@@ -5,9 +5,11 @@ import Testing
 /// BT-CONNECT: ``BTConnectionManager``'s attempt pipeline — TCC gate first
 /// (never a real IOBluetooth touch here: every seam is injected), the hard
 /// timeout over `openConnection`, the endpoint poll, the one-shot ~5 s
-/// fallback nudge, and the address derivation. Timing knobs are shrunk to
-/// tens of milliseconds so nothing costs wall-clock seconds.
+/// fallback nudge, and the address derivation. Every timer, and the fake
+/// open's own delay, waits on `clock` until the test moves it.
 @Suite final class BTConnectionManagerTests: IsolatedSuite {
+
+    private let clock = ManualDelayClock()
 
     private final class Recorder: @unchecked Sendable {
         private let lock = NSLock()
@@ -21,17 +23,20 @@ import Testing
         openReturn: Int32 = 0,
         openDelay: TimeInterval = 0,
         endpointAppears: Bool = true,
-        connectTimeout: TimeInterval = 0.5,
-        fallbackDelay: TimeInterval = 0.05,
-        appearWindow: TimeInterval = 0.2,
+        connectTimeout: TimeInterval = 20,
+        fallbackDelay: TimeInterval = 5,
+        appearWindow: TimeInterval = 5,
         recorder: Recorder = Recorder()
     ) -> (BTConnectionManager, Recorder) {
+        let clock = self.clock
         let manager = BTConnectionManager(
             isBluetoothAuthorized: { authorized },
             openConnection: { address in
                 recorder.record("open:\(address)")
                 if openDelay > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(openDelay * 1_000_000_000))
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        clock.clock(openDelay, .global(), DispatchWorkItem { continuation.resume() })
+                    }
                 }
                 return openReturn
             },
@@ -43,7 +48,10 @@ import Testing
             connectTimeout: connectTimeout,
             fallbackSuggestionDelay: fallbackDelay,
             endpointAppearWindow: appearWindow,
-            endpointPollInterval: 0.01)
+            // Equal to the appear window: one wait, then the window is spent.
+            endpointPollInterval: 5,
+            delayClock: clock.clock,
+            uptimeClock: clock.uptime)
         return (manager, recorder)
     }
 
@@ -92,7 +100,11 @@ import Testing
     /// the distinct reason (the A2DP-without-audio case the plan flags).
     @Test func missingEndpointFailsAfterTheAppearWindow() async {
         let (manager, _) = makeManager(endpointAppears: false)
-        let outcome = await manager.connect(address: "C4-38-75-0E-BF-4A")
+        let attempt = Task { await manager.connect(address: "C4-38-75-0E-BF-4A") }
+        // The fallback nudge, the hard timeout and the poll's first wait.
+        await SuiteWait.until("the endpoint poll waits on the clock") { self.clock.pendingCount == 3 }
+        clock.advance(by: 5)   // the appear window runs out
+        let outcome = await attempt.value
         guard case .failed(_, let reason) = outcome else {
             Issue.record("expected .failed, got \(outcome)")
             return
@@ -103,26 +115,23 @@ import Testing
     /// The hard ceiling: an open that outlives `connectTimeout` resolves
     /// `.failed("timeout")` at the ceiling, not at the open's own pace.
     @Test func hangingOpenHitsTheHardTimeout() async {
-        // openDelay is deliberately huge: the ONLY way the test finishes well
-        // under it is the timeout race winning. No tight wall-clock margin —
-        // scheduler latency under machine load once pushed a 0.1s ceiling past
-        // 12s of elapsed and flaked a `< 5` assertion (the roadmap-023 class).
-        let (manager, _) = makeManager(openDelay: 60, connectTimeout: 0.1)
-        let outcome = await manager.connect(address: "C4-38-75-0E-BF-4A")
+        // The open waits 60 s on the same clock as the 20 s ceiling, so only
+        // the timeout winning the race can resolve the attempt at 20.
+        let (manager, _) = makeManager(openDelay: 60, connectTimeout: 20)
+        let attempt = Task { await manager.connect(address: "C4-38-75-0E-BF-4A") }
+        // The fallback nudge, the hard timeout and the open's own delay.
+        await SuiteWait.until("the attempt's timers and the open all wait on the clock") {
+            self.clock.pendingCount == 3
+        }
+        clock.advance(by: 20)
+        let outcome = await attempt.value
+        clock.fireAll()   // lets the abandoned open return, so its task ends
         guard case .failed(let reportedElapsed, let reason) = outcome else {
             Issue.record("expected .failed, got \(outcome)")
             return
         }
         #expect(reason == "timeout")
-        // Judge the ceiling by the manager's OWN measurement, not this test's
-        // wall clock. `reportedElapsed` is taken at the moment the race
-        // resolves; `elapsed` additionally contains however long the scheduler
-        // then took to hand the result back here, which under a saturated pool
-        // has been observed past 60 s and failed this line on an unmodified
-        // `main` — the very roadmap-023 class the comment above warns about,
-        // reintroduced by measuring from the outside.
-        #expect(reportedElapsed < 60, "must resolve at the ceiling, never at the open's own pace")
-        #expect(reportedElapsed >= 0.1)
+        #expect(reportedElapsed == 20, "must resolve at the ceiling, never at the open's own pace")
     }
 
     // MARK: Fallback nudge
@@ -130,9 +139,16 @@ import Testing
     /// A slow attempt fires `onFallbackSuggested` once, mid-flight, while the
     /// attempt continues to its own outcome.
     @Test func slowAttemptSuggestsTheFallbackOnceMidFlight() async {
-        let (manager, recorder) = makeManager(openDelay: 0.15, fallbackDelay: 0.05)
+        let (manager, recorder) = makeManager(openDelay: 10, fallbackDelay: 5)
         manager.onFallbackSuggested = { address in recorder.record("fallback:\(address)") }
-        let outcome = await manager.connect(address: "C4-38-75-0E-BF-4A")
+        let attempt = Task { await manager.connect(address: "C4-38-75-0E-BF-4A") }
+        // The fallback nudge, the hard timeout and the open's own delay.
+        await SuiteWait.until("the attempt's timers and the open all wait on the clock") {
+            self.clock.pendingCount == 3
+        }
+        clock.advance(by: 5)   // the nudge's delay, with the open still in flight
+        clock.advance(by: 5)   // the open returns
+        let outcome = await attempt.value
         #expect(outcome == .connected, "the attempt still ran to completion")
         let fallbacks = recorder.events.filter { $0.hasPrefix("fallback:") }
         #expect(fallbacks == ["fallback:C4-38-75-0E-BF-4A"])
@@ -143,10 +159,10 @@ import Testing
 
     /// A fast attempt never bothers the user with the fallback.
     @Test func fastAttemptNeverSuggestsTheFallback() async {
-        let (manager, recorder) = makeManager(fallbackDelay: 0.1)
+        let (manager, recorder) = makeManager()
         manager.onFallbackSuggested = { address in recorder.record("fallback:\(address)") }
         _ = await manager.connect(address: "C4-38-75-0E-BF-4A")
-        try? await Task.sleep(nanoseconds: 200_000_000)   // past the (cancelled) delay
+        clock.fireAll()   // the nudge's delay passes after the outcome resolved
         #expect(!recorder.events.contains { $0.hasPrefix("fallback:") })
     }
 

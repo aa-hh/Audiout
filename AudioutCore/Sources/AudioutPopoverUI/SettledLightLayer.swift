@@ -46,6 +46,11 @@ final class SettledLightLayer: CAMetalLayer {
         var variant: Float
         /// The light's colour, linear-ish sRGB components.
         var color: SIMD3<Float>
+        /// 0…1: how hard the light is listening. Above 0 the ring's own curl
+        /// gains a second, faster wobble of up to the curl's amplitude
+        /// (`shimmerRate`); at 0 the shader skips it, so the light draws
+        /// exactly as before.
+        var listening: Float = 0
     }
 
     /// The site composes its stills at t = 40 s and starts its live clock
@@ -145,6 +150,22 @@ final class SettledLightLayer: CAMetalLayer {
     /// 0.70 by the owner from a live preview; a speed knob, so it does not
     /// affect the `exposure` solve.
     static let curlSlow: Double = 0.70
+    /// How much faster the listening shimmer wobbles than the slowed curl.
+    /// PER-SURFACE.
+    ///
+    /// A light that is listening hard (`Light.listening` > 0) trembles: a
+    /// second curl term, at `listening` × the shared `curlAmp` and this many
+    /// times the curl's slowed rate, is added on top of the first. At full
+    /// listening the two together reach twice the curl's amplitude.
+    ///
+    /// An added term, not a faster clock: the shader's time is shared, so
+    /// speeding up one light's curl would multiply the whole elapsed time and
+    /// jump its phase the moment `listening` moved. Here only the added
+    /// term's AMPLITUDE follows `listening`; its phase always runs off the
+    /// same clock, so rising and falling is a smooth swell with no jump. The
+    /// term moves the crest along `r`, never the `reach` mask, so the light's
+    /// drawn edge stays where it was.
+    static let shimmerRate: Double = 2.5
     /// The centre-core mask, symmetric to `cap` at the other end: the light
     /// fades to zero BELOW the crest so no bright blob sits at r = 0. The core
     /// is the ring function's crest nearest r = 0 — at variant 0
@@ -262,6 +283,7 @@ final class SettledLightLayer: CAMetalLayer {
         var radius: SIMD2<Float>
         var opacity: SIMD2<Float>
         var variant: SIMD2<Float>
+        var listening: SIMD2<Float>
         var color0: SIMD3<Float>
         var color1: SIMD3<Float>
     }
@@ -285,6 +307,7 @@ final class SettledLightLayer: CAMetalLayer {
             radius: SIMD2(Float(max(a.radius, 1)) * scale, Float(max(b.radius, 1)) * scale),
             opacity: SIMD2(a.opacity, b.opacity),
             variant: SIMD2(a.variant, b.variant),
+            listening: SIMD2(a.listening, b.listening),
             color0: a.color, color1: b.color)
     }
 
@@ -315,6 +338,7 @@ final class SettledLightLayer: CAMetalLayer {
         float2 radius;
         float2 opacity;
         float2 variant;
+        float2 listening;
         float3 color0;
         float3 color1;
     };
@@ -334,7 +358,8 @@ final class SettledLightLayer: CAMetalLayer {
     }
 
     /// One settled source at `c` with unit radius `radius`, in pixels.
-    static float source(float2 frag, float2 c, float radius, float t, float variant) {
+    static float source(float2 frag, float2 c, float radius, float t, float variant,
+                        float listening) {
         float seed = variant * 6.13 + 1.7;
         // Step 1 — orbit: PER-SURFACE, NOT APPLIED. The hero lets each source
         // roam on the shared `settled.orbit` so it never sits still, but this
@@ -374,6 +399,14 @@ final class SettledLightLayer: CAMetalLayer {
         // after the light had landed, so the curl's TIME rate is slowed to a
         // gentle drift (shared curlAmp/curlRate untouched, only the speed cut).
         float ph2 = ph + \(msl(s.curlAmp)) * sin(ph - t * \(msl(s.curlRate)) * \(msl(curlSlow))) * taperF;
+        // PER-SURFACE `shimmerRate`: a light listening hard trembles — a
+        // second, faster curl whose amplitude (never phase) follows
+        // `listening`, so it swells in and out without a jump. Skipped at 0
+        // so every other light draws exactly as before.
+        if (listening > 0.0) {
+            ph2 += \(msl(s.curlAmp)) * listening
+                 * sin(ph - t * \(msl(s.curlRate)) * \(msl(curlSlow)) * \(msl(shimmerRate)) + seed) * taperF;
+        }
         float rings = pow(0.5 + 0.5 * sin(ph2), \(msl(d.sharp)));
         // PER-SURFACE: narrow the crest band. Raising rings to a power > 1
         // multiplies the effective sharpness, shrinking the band's half-width
@@ -400,7 +433,8 @@ final class SettledLightLayer: CAMetalLayer {
         float2 centres[2] = { u.centre0, u.centre1 };
         float3 colors[2] = { u.color0, u.color1 };
         for (int k = 0; k < 2; ++k) {
-            float light = source(frag, centres[k], u.radius[k], u.time, u.variant[k]);
+            float light = source(frag, centres[k], u.radius[k], u.time, u.variant[k],
+                                 u.listening[k]);
             // The site's tone curve, then the light's own colour at that
             // intensity — the halo's job, now with structure in it.
             // PER-SURFACE `exposure`: the field is the whole light here.

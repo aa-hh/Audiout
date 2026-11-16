@@ -118,9 +118,40 @@ import Testing
         var all: [(uids: [String], latencyMs: Double)] { lock.withLock { asked } }
     }
 
+    /// A slew clock with no timer: each step queues on the applier's queue
+    /// behind the one before, until the applier stops it.
+    private final class BackToBackSlew: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stopped = false
+        private let queue: DispatchQueue
+        private let tick: @Sendable () -> Void
+
+        init(queue: DispatchQueue, tick: @escaping @Sendable () -> Void) {
+            self.queue = queue
+            self.tick = tick
+        }
+
+        static let clock: DriftCorrectionApplier.SlewClock = { _, queue, tick in
+            let slew = BackToBackSlew(queue: queue, tick: tick)
+            slew.next()
+            return { slew.stop() }
+        }
+
+        func stop() { lock.withLock { stopped = true } }
+
+        func next() {
+            queue.async { [self] in
+                guard !lock.withLock({ stopped }) else { return }
+                tick()
+                next()
+            }
+        }
+    }
+
     private func applier(_ room: Room, silent: Silence,
                          bluetooth: @escaping @Sendable (String) -> Bool = { _ in true },
-                         verify: VerifyLog = VerifyLog())
+                         verify: VerifyLog = VerifyLog(),
+                         verifyClock: ManualDelayClock = ManualDelayClock())
         -> DriftCorrectionApplier {
         DriftCorrectionApplier(
             isBluetooth: bluetooth,
@@ -129,8 +160,14 @@ import Testing
             markCalibrationStale: { room.recordStale($0) },
             programIsSilent: { silent.ask() },
             scheduleVerify: { verify.record($0) },
-            stepSeconds: 0.02,
-            verifySeconds: 0.02)
+            verifyClock: verifyClock.clock,
+            slewClock: BackToBackSlew.clock)
+    }
+
+    /// Returns once every `handle` sent before it has run: the read is a
+    /// `queue.sync` on the applier's serial queue.
+    private func drain(_ applier: DriftCorrectionApplier) {
+        _ = applier.surfacedCorrectionMs(forDevice: "")
     }
 
     /// Silent from the first question — every correction lands as one move.
@@ -197,7 +234,7 @@ import Testing
             let error = room.observedErrorMs("bt")
             #expect(error == 0, "window \(window) must see no error to chase")
             applier.handle([observation("bt", error)])
-            try await Task.sleep(nanoseconds: 50_000_000)
+            drain(applier)
         }
         #expect(room.allWrites.count == 1, "and nothing further is ever moved")
         #expect(room.measuredLatencyMs("bt") == 170)
@@ -229,8 +266,9 @@ import Testing
         ])
         let applier = applier(room, silent: alwaysSilent, bluetooth: { $0 == "bt" })
         applier.handle([observation("bt", 20), observation("airplay", 25)])
-        try await waitFor { room.allWrites.count >= 1 }
-        try await Task.sleep(nanoseconds: 100_000_000)
+        // Both observations are handled in one block, so once it has run the
+        // AirPlay one has had its chance to write.
+        drain(applier)
         #expect(room.allWrites.map(\.uid) == ["bt"])
     }
 
@@ -279,12 +317,14 @@ import Testing
             "bt-b": .init(measuredLatencyMs: 150, trueLatencyMs: 180),
         ])
         let verify = VerifyLog()
-        let applier = applier(room, silent: alwaysSilent, verify: verify)
+        let verifyClock = ManualDelayClock()
+        let applier = applier(room, silent: alwaysSilent, verify: verify, verifyClock: verifyClock)
         applier.handle([
             .init(deviceUID: "bt-a", errorMs: 25, hostNanos: 0, isBestGuess: true),
             .init(deviceUID: "bt-b", errorMs: 30, hostNanos: 0, isBestGuess: true),
         ])
-        try await waitFor { !verify.all.isEmpty }
+        drain(applier)
+        verifyClock.fireAll()
         #expect(verify.all.map { $0.uids } == [["bt-a", "bt-b"]])
         #expect(room.allWrites.isEmpty,
                 "and the guess moved nothing while it waited to be checked")
@@ -296,6 +336,8 @@ import Testing
     @Test func aVerifyWaitsForItsCorrectionToLand() async throws {
         let room = Room(["bt": .init(measuredLatencyMs: 150, trueLatencyMs: 162)])
         let verify = VerifyLog()
+        let verifyClock = ManualDelayClock()
+        let slew = DriftCorrectionApplierSinkTests.RenderLoopSlewClock()
         let applier = DriftCorrectionApplier(
             isBluetooth: { _ in true },
             currentLatencyMs: { room.measuredLatencyMs($0) },
@@ -304,11 +346,15 @@ import Testing
             programIsSilent: { false },
             scheduleVerify: { verify.record($0, latencyMs: room.measuredLatencyMs("bt")) },
             policy: DriftCorrectionPolicy(verifyMode: .applyThenVerify),
-            stepSeconds: 0.02,
-            verifySeconds: 0.02)
+            verifyClock: verifyClock.clock,
+            slewClock: slew.clock)
 
         applier.handle([.init(deviceUID: "bt", errorMs: 12, hostNanos: 0, isBestGuess: true)])
-        try await waitFor { !verify.all.isEmpty }
+        slew.waitForFirstStep(of: applier)
+        #expect(verifyClock.pendingCount == 0, "no verify while the slew is still moving")
+        for _ in 0..<300 where room.measuredLatencyMs("bt") != 162 { slew.step() }
+        #expect(room.measuredLatencyMs("bt") == 162)
+        verifyClock.fireAll()
         #expect(verify.all.map { $0.uids } == [["bt"]])
         #expect(verify.all.first?.latencyMs == 162,
                 "the whole slew had landed before the verify was asked for")
@@ -406,7 +452,6 @@ import Testing
         private let lock = NSLock()
         private var queue: DispatchQueue?
         private var tick: (@Sendable () -> Void)?
-        private let didArm = DispatchSemaphore(value: 0)
 
         /// What `DriftCorrectionApplier(slewClock:)` takes.
         var clock: DriftCorrectionApplier.SlewClock {
@@ -415,19 +460,18 @@ import Testing
                     self.queue = queue
                     self.tick = tick
                 }
-                didArm.signal()
                 return { [self] in lock.withLock { self.tick = nil } }
             }
         }
 
         /// Wait for the applier to arm the clock, and then for the step it
-        /// takes inline while arming it.
-        func waitForFirstStep() {
-            guard didArm.wait(timeout: .now() + 5) == .success else {
+        /// takes inline while arming it. Both happen inside `handle`'s block on
+        /// the applier's serial queue, and a `queue.sync` read queues behind it.
+        func waitForFirstStep(of applier: DriftCorrectionApplier) {
+            _ = applier.surfacedCorrectionMs(forDevice: "")
+            if lock.withLock({ queue }) == nil {
                 Issue.record("the applier never armed its slew clock")
-                return
             }
-            lock.withLock { queue }?.sync {}
         }
 
         /// One step, finished before the caller renders again.
@@ -520,7 +564,7 @@ import Testing
 
         applier.handle(
             [.init(deviceUID: "dev-a", errorMs: errorMs, hostNanos: 0, isBestGuess: false)])
-        clock.waitForFirstStep()
+        clock.waitForFirstStep(of: applier)
         // A step is written to the sink, not to the ring, so it is the render
         // ABOVE the next step that consumes it — which is why the loop renders
         // first and steps second. The 300-iteration bound is a hang-stop, not
@@ -633,7 +677,7 @@ extension SerializedSharedState {
 
         applier.handle([.init(deviceUID: "C4-38-75-0E-BF-4A:output", errorMs: 120,
                               hostNanos: 0, isBestGuess: false)])
-        clock.waitForFirstStep()
+        clock.waitForFirstStep(of: applier)
         for _ in 0..<118 { clock.step() }
         #expect(latency.value == 269, "one step short of the whole 120 ms")
         #expect(events.mine.isEmpty, "the slew has not landed yet")

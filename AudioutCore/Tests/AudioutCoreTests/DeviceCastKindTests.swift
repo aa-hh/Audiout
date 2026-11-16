@@ -46,4 +46,25 @@ import Testing
                     "a suggestion is one sentence and ends with a period")
         }
     }
+
+    /// A Cast receiver told to load but not yet reporting PLAYING counts as still
+    /// connecting, though Cast devices never carry `isSelected`. Turns red if the
+    /// check is narrowed to selected devices, which drops Cast entirely.
+    @Test func castStillLoadingCountsAsStillConnecting() {
+        let loading = Device(id: "c", name: "C", kind: .cast, connectionState: .connecting)
+        #expect([loading].hasDeviceStillConnecting)
+        #expect(!loading.isSelected)
+    }
+
+    /// Once every device has confirmed or stopped, nothing is waiting. Turns red
+    /// if a playing, idle or failed device is mistaken for one still starting.
+    @Test func confirmedIdleAndFailedDevicesAreNotStillConnecting() {
+        let devices = [
+            Device(id: "a", name: "A", kind: .cast, connectionState: .connected),
+            Device(id: "b", name: "B", kind: .cast, connectionState: .off),
+            Device(id: "c", name: "C", kind: .cast,
+                   connectionState: .failed(ConnectionFailure(cause: .timedOut))),
+        ]
+        #expect(!devices.hasDeviceStillConnecting)
+    }
 }

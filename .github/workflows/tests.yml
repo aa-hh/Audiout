@@ -5,9 +5,11 @@ name: Tests
 # the PR stuck at "expected". Free on this public repo, same as the licence
 # gate's macOS job.
 #
-# Caches: a cache saved by a pull_request run is visible only to that PR's
-# merge ref, and a merge_group run can only read caches saved on main. So
-# only push-to-main and workflow_dispatch save; PR and queue runs restore.
+# Caches: PR and push runs save; a PR's saved cache is visible to that PR's
+# later pushes and is searched before main's, so a second push rebuilds only
+# its own diff. A merge-queue run can read only main's caches so it does not
+# save; the 10 GB repo limit evicts by last access, and main's cache is
+# re-saved on every merge.
 
 on:
   pull_request:
@@ -37,6 +39,9 @@ env:
   AUDIOUT_BUILD_LOCAL: "1"
   AUDIOUT_TEST_PREFER: local
   AUDIOUT_TEST_NO_CACHE: "1"
+  # Best effort: the toolchain's test helper may lack the entitlement the
+  # backtracer needs. The crash-report upload below is the reliable record.
+  SWIFT_BACKTRACE: enable=yes
 
 jobs:
   suite:
@@ -46,21 +51,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Shard 1 is the suites whose files still hold blocking waits
-        # (Thread.sleep, RunLoop.run(until:), .wait(timeout:)); those hold a
-        # cooperative thread and starve Swift concurrency process-wide (see
-        # SuiteWait.swift and 8a1016d9), so they get a process of their own.
-        # Shards 2 and 3 are every other suite file, split in half
-        # alphabetically by file. Each regex names whole suite types after
-        # `.` (top level) or `/` (nested, e.g. under SerializedSharedState).
-        # A new suite file must be added to shard 2 or 3 or it will not run.
-        include:
-          - shard: 1
-            filter: '[./](AggregateOutputDeviceIdentityTests|AggregateOutputDeviceTests|AggregateOutputDeviceWiringTests|AppRouteMixerTests|CastFakeReceiverLoopTests|CastLiveAudioServerRefusalTests|CastLiveAudioServerTests|CastOutputManagerTests|CompanionEndToEndTests|DACPServerTests|DriftCorrectionApplierAnalyticsTests|DriftCorrectionApplierSinkTests|DriftCorrectionApplierTests|LeveledAppInjectorTests|NativeBackendGlobalStateTests|NativeBackendTests|NativeCaptureCoordinatorTests|NativeDiscoveryLiveTests|NativeDiscoveryTests|PassiveDriftSamplerAnalyticsTests|PassiveDriftSamplerTests|PassiveDriftTrackerTests|PerAppCaptureCoordinatorTests|SyncDrawerCloseVetoTests|SyncDrawerMountedKeyTests)\b'
-          - shard: 2
-            filter: '[./](AboutSectionTests|AccessibilitySignalSweepTests|AirPlayHandoffWatcherTests|AlignmentPlateCellTests|AlignmentStageViewTests|AlignmentTickInjectorTests|AlignmentTokenContrastTests|AnalyticsTests|AppIconCacheTests|AppRelaunchCommandTests|AppRouteStoreTests|AppRouteTargetEligibilityTests|AppRoutingControllerTests|AppRowViewTests|AppSettingsTests|AppSurfaceControllerTests|AppTranslocationTests|AudioCapturePermissionProbeTests|AudioDiagTests|AudioProcessResolverTests|AudioSettingsLatencyTests|AudioSettingsRemoteReloadTests|AudioSettingsWakeRestoreTests|BTAlignmentPosteriorTests|BTAlignmentWizardProposalTelemetryTests|BTAlignmentWizardSessionTests|BTClockStabilityTests|BTConnectionManagerTests|BTDeviceEnumeratorTests|BTDeviceRowTests|BTFanoutTests|BTHardwareVolumeStoreTests|BTHardwareVolumeTests|BTPopoverRowsTests|BTSinkClockStormTests|BTSpeakerTimingTests|BTSyncDrawerAccordionTests|BTSyncDrawerLayoutTests|BTSyncDrawerViewTests|BTSyncedSinkProtocolWitnessTests|BTSyncedSinkTests|BTSyncedSinkTestsRebuildTelemetry|BTTrimStoreTests|BackendKindResolutionTests|BrandMarkTests|BusRailCollapseResolveTests|CardViewCollapseTrajectoryTests|CastBrowserTests|CastFeedDelayTests|CastMessageCodecTests|CastRoomDelayTests|CastVolumePendingTests|CompanionAlignmentOwnershipTests|CompanionApprovalStoreTests|CompanionCommandDispatcherTests|CompanionCommandRateLimiterTests|CompanionCopyTripwireTests|CompanionLicenseActivationTests|CompanionServerTests|CompanionSnapshotBuilderTests|CompanionWiringTests|CompositedTokenContrastTests|ConnectionDiagnosisViewTests|ConnectionDiagnosticsTests|ConnectionStateTests|ControlPanelBackingViewTests|ControlPanelWindowControllerTests|DefaultOutputDeviceMonitorTests|DefaultOutputSwitcherTests|DeviceBluetoothKindTests|DeviceCastKindTests|DeviceDetailViewTests|DeviceEQStoreTests|DeviceEQTests|DeviceIconResolverTests|DeviceIconStoreTests|DeviceIconWellViewTests|DeviceIdentityTests|DeviceLocalNetworkProofTests|DeviceRowAirPlay1LiveTests|DeviceRowConnectBrightenTests|DeviceRowConnectionStateTests|DeviceRowMutedStateTests|DiagnosticsBundleTests|DiscoverySettleTrackerTests|DriftCorrectionPolicyTests|EQEditorViewTests|EQProcessorTests|EQResponseCurveTests|EmitterFieldTests|EnergizeTests|EqualizerEngagedMarkTests|ExcludedAppsTests|FeedColumnTests|FoldAnimatorTests|GeneralSettingsCompanionTests|GeneralSettingsRememberedPhonesTests|GroupControllerSyncedLocalFlipTests|GroupControllerTests|GroupEditorClickTargetTests|GroupIconPersistenceTests|GroupIdentityGlowViewTests|GroupMasterVolumePersistenceTests)\b'
-          - shard: 3
-            filter: '[./](GroupRenameFieldTests|GroupsHeaderParityTests|GroupsInkTemperatureTests|GroupsOverviewViewControllerTests|HaloRingGapTests|HeadlessRuntimeTests|IconPickerTests|IncreaseContrastLiveReconcileTests|LevelMeterViewTests|LicenseCheckInTests|LicenseDeepLinkTests|LicenseGateTests|LicenseGateTrialAnalyticsTests|LicenseValidatorTests|LocalNetworkPrimerTests|LocalOutputLatencyTests|LocalPlaybackEngineTests|MainOutRowMenuDispatchTests|MainOutRowRingTests|MembershipBusTests|MembershipRailTests|MembershipWellContrastTests|MenuBarStatusTests|MicProbeSessionTests|MixerWindowControllerTests|MockBackendTests|NativeBackendBTAlignmentInterceptTests|NativeBackendBTDevicesTests|NativeBackendBTHardwareVolumeTests|NativeBackendBTSelectionTests|NativeBackendBTSelectionTestsTelemetry|NativeBackendCastTests|NativeBackendSyncedLocalSelectionTests|NoteBannerColorTests|ObjCExceptionCatchingTests|OnboardingPermissionColorTests|OnboardingUITests|OnboardingWindowLevelTests|OutputSelectorGuardTests|PCMDelayLineTests|PTPHelperActivationTests|PTPHelperReconcilerTests|PermissionModeTests|PermissionStateObserverTests|PhaseControllerTests|PopoverBTAlignmentUITests|PopoverCastSyncOffsetTests|PopoverConnectionAnalyticsTests|PopoverControllerRowRevealMotionTests|PopoverControllerRowRevealTests|PopoverControllerTests|PopoverDeviceListOverflowTests|PopoverDeviceVisibilityTests|PopoverEqualizerEntryTests|PopoverExcludedAppsTests|PopoverIconTests|PopoverLocalSyncTrimTests|PopoverPanelHeaderTests|PreviewPaletteTokenPinTests|RailConnectPulseControllerTests|RailConnectPulseTests|ReferenceAudioRingTests|RemoteInviteViewTests|RemovalUndoTests|RingRailToneLockTests|RouteArmedSignalTests|RowAccessorySymbolTests|SettingsAccentAndHintsTests|SettingsRootViewControllerTests|SettledLightLayerTests|SetupFlowModelTests|SetupModelTests|SetupTelemetryTests|SetupUsageStatsTests|SidebarActionsTests|SpeakerPasswordSheetTests|StatusItemIconTests|StatusRoutingIndicatorTests|StoreRecoveryTests|StructuralStateGateTests|SurfaceScreenSwitchCostTests|SurfaceToolbarRevealedTabHitArea|SurfaceToolbarTests|SyncValueFieldLiveKeyTests|SyncedLocalFanoutTests|SyncedLocalFanoutTestsFeedGapTelemetry|SyncedLocalSinkRingOverflowTelemetryTests|SyncedLocalSinkTests|SyncedLocalSinkTestsAnchorTelemetry|SystemAudioCaptureTCCTests|TCCProbeRunnerTests|TapRebuildLifecycleTests|TelemetryTests|TestKeySilencerTests|TokenContrastMatrixTests|TrialClockTests|TrialReachabilityTests|TrialRegistrarTests|VolumeHUDPanelTests|VolumeKeyInterceptionTests|WarmFaderCellTests|WizardDoorAnalyticsTests|WizardMeasuredProposalTests|WorkgroupLifecycleTests)\b'
+        # The shard lists live in scripts/lib/suite-shards.sh, which the
+        # runner reads for `--shard N`. Shard 1 is the suites whose files
+        # still hold blocking waits (Thread.sleep, RunLoop.run(until:),
+        # .wait(timeout:)); those hold a cooperative thread and starve Swift
+        # concurrency process-wide (see SuiteWait.swift and 8a1016d9), so
+        # they get a process of their own. Shard 2 is the alphabetical first
+        # half of the rest plus three main-actor suites moved in to balance
+        # it. Shard 3 is the serialized chains. Shard 4 is everything else,
+        # via `--skip`, so a new suite file needs no edit here.
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -91,13 +91,21 @@ jobs:
           echo "in -help-hidden: $(swiftc -help-hidden | grep -c file-hashing || true)"
 
       - name: AudioutCore suite
-        run: bash scripts/run-tests.sh --filter '${{ matrix.filter }}' --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
+        run: bash scripts/run-tests.sh --shard ${{ matrix.shard }} --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
 
-      # One saver, so three shards do not race on one key.
+      - name: Upload crash reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-reports-shard-${{ matrix.shard }}
+          path: /Users/runner/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: ignore
+
+      # One saver, so four shards do not race on one key.
       - name: Save SwiftPM build caches
         # !cancelled(): the build products are valid whether or not a test
         # failed, and a cache that saves only on green never warms up.
-        if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && strategy.job-index == 0 }}
+        if: ${{ !cancelled() && github.event_name != 'merge_group' && strategy.job-index == 0 }}
         uses: actions/cache/save@v4
         with:
           path: AudioutCore/.build
@@ -132,6 +140,14 @@ jobs:
       - name: AirPlayEngine suite
         run: AUDIOUT_TEST_PACKAGE=AirPlayEngine bash scripts/run-tests.sh --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
 
+      - name: Upload crash reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-reports-airplayengine
+          path: /Users/runner/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: ignore
+
       - name: Save AirPlayEngine build cache
         if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         uses: actions/cache/save@v4
@@ -139,16 +155,53 @@ jobs:
           path: AirPlayEngine/.build
           key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-${{ github.sha }}
 
+  # Handoffs, .scratch/, dev/notes/ and the other internal docs are
+  # gitignored; `git add -f` still tracks one, so fail on any tracked file
+  # .gitignore matches. Runs inside the required `tests` check, so the
+  # ruleset needs no new entry.
+  internal-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No tracked file matches .gitignore
+        run: |
+          tracked=$(git ls-files --cached --ignored --exclude-standard)
+          if [ -n "$tracked" ]; then
+            echo "These files match .gitignore and must not reach main (git rm --cached them):" >&2
+            printf '%s\n' "$tracked" >&2
+            exit 1
+          fi
+
+  # The pre-commit shared-leak guard again, over the whole PR: the hook is
+  # skipped without core.hooksPath or with --no-verify. Required through
+  # `tests` (owner's call, 2026-10-26); push and manual runs have no base, so
+  # it skips there.
+  shared-leak:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No local copy of an audiout-shared type
+        run: sh .githooks/guard-shared-leak.sh "${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || format('origin/{0}', github.base_ref) }}"
+
   # The one required check the ruleset names.
   tests:
     runs-on: ubuntu-latest
-    needs: [suite, airplayengine]
+    needs: [suite, airplayengine, internal-docs, shared-leak]
     if: always()
     steps:
       - name: Every suite job passed
         run: |
-          echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }}"
-          [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ]
+          echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }} internal-docs=${{ needs.internal-docs.result }} shared-leak=${{ needs.shared-leak.result }}"
+          [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ] && [ "${{ needs.internal-docs.result }}" = success ] || exit 1
+          case "${{ github.event_name }}/${{ needs.shared-leak.result }}" in
+            */success|push/skipped|workflow_dispatch/skipped) ;;
+            *) exit 1 ;;
+          esac
 
   # The ruleset requires a `review` commit status, which the session posts on
   # the PR head. A merge-queue run checks its own temporary merge commit,

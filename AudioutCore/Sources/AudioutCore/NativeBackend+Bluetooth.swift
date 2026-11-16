@@ -161,17 +161,26 @@ extension NativeBackend {
     /// has to be at least its latency; the margin leaves room for the user's
     /// trim on top of a freshly measured device.
     static let btReferenceHeadroomMs = 100
-    /// The reference a Bluetooth-target wizard run pins the timeline to. The
-    /// latency it is about to measure is unknown by definition, so the search
+    /// The reference the Mac's by-ear search pins the timeline to, and the one
+    /// a phone run pins for a speaker whose latency is unknown or not yet
+    /// trusted. The latency the run is about to find is unknown, so the search
     /// needs room to reach any plausible A2DP/DSP latency instead of pinning
-    /// against a 500 ms floor and bowing out "unreachable".
+    /// against a 500 ms floor and bowing out "unreachable". A phone run on a
+    /// speaker that is tuned and measured pins its latency plus
+    /// ``btWizardKnownLatencyMarginMs`` instead
+    /// (``companionProbeReferenceMs(targetLatencyMs:targetStatus:participantsReferenceMs:)``).
     ///
-    /// 2 s, not the 1.5 s it was: ``btWizardLatencyRangeMs`` now stops one
-    /// default BT-only buffer SHORT of the reference (a candidate at the
-    /// reference itself is a delay of 0 — the ring seeked dry, silent for the
-    /// rest of the session), so the reference has to carry that buffer on top
-    /// for the reachable latency span to stay the ~1.5 s the search needs.
+    /// 2 s, not 1.5: ``btWizardLatencyRangeMs`` stops one default BT-only
+    /// buffer SHORT of the reference (a candidate at the reference itself is a
+    /// delay of 0 — the ring seeked dry, silent for the rest of the session),
+    /// so the reference has to carry that buffer on top for the reachable
+    /// latency span to stay the ~1.5 s the search needs.
     static let btWizardReferenceBufferMs = 2_000
+    /// What a phone run on a tuned, measured speaker pins above its latency:
+    /// the dry-ring buffer the ceiling keeps, plus the correction reach a
+    /// re-check may need.
+    static let btWizardKnownLatencyMarginMs =
+        BTSyncedSink.defaultBTOnlyBufferMs + Int(BTSyncTrim.rangeMs)
 
     /// The BT-only reference for a selection: never below the
     /// ``BTSyncedSink/defaultBTOnlyBufferMs`` floor, and always far enough
@@ -191,6 +200,23 @@ extension NativeBackend {
         let slowest = uids.map { (latencies[$0] ?? 0) - Swift.min(0, trims[$0] ?? 0) }.max() ?? 0
         return Swift.max(BTSyncedSink.defaultBTOnlyBufferMs,
                          Int(slowest.rounded()) + btReferenceHeadroomMs)
+    }
+
+    /// The reference a phone run pins: the target's stored latency plus
+    /// ``btWizardKnownLatencyMarginMs`` when the target is tuned and measured,
+    /// else ``btWizardReferenceBufferMs``, and never below what the run's
+    /// participants already need (`participantsReferenceMs`, their
+    /// ``btOnlyReferenceMs(latencies:trims:uids:)``).
+    static func companionProbeReferenceMs(targetLatencyMs: Double?,
+                                          targetStatus: BTSpeakerTiming.Status?,
+                                          participantsReferenceMs: Int) -> Int {
+        let wanted: Int
+        if let targetLatencyMs, targetStatus == .tuned {
+            wanted = Int(targetLatencyMs.rounded()) + btWizardKnownLatencyMarginMs
+        } else {
+            wanted = btWizardReferenceBufferMs
+        }
+        return Swift.max(participantsReferenceMs, wanted)
     }
 
     /// Recompute the BT-only reference and, if it moved, push it to the sink
@@ -220,7 +246,7 @@ extension NativeBackend {
             }
         }
         let desired = btWizardReferenceRaised
-            ? Self.btWizardReferenceBufferMs
+            ? btWizardReferencePinnedMs
             : Self.btOnlyReferenceMs(latencies: latencies, trims: trims, uids: btSelectedUIDs)
         guard desired != btReferenceBufferMs else { return desired }
         btReferenceBufferMs = desired
@@ -380,8 +406,7 @@ extension NativeBackend {
         // Scheduled ON `stateQueue`, so a newer toggle's cancel (above) before this
         // fires simply drops it — no double-firing, no stale work after a newer
         // decision landed.
-        self.stateQueue.asyncAfter(
-            deadline: .now() + self.syncedLocalSettleWindow, execute: work)
+        self.delayClock(self.syncedLocalSettleWindow, self.stateQueue, work)
     }
 
     /// T1/T2: the quiet window elapsed — run AT MOST one real transition for the
@@ -409,9 +434,8 @@ extension NativeBackend {
         // Record the real transition and count how many landed inside the rolling
         // horizon. Monotonic clock, so a wall-clock jump can neither fabricate nor
         // hide churn.
-        let now = DispatchTime.now().uptimeNanoseconds
-        let horizonNanos = UInt64(self.syncedLocalTransitionHorizon * 1_000_000_000)
-        self.syncedLocalTransitionTimes.removeAll { now &- $0 > horizonNanos }
+        let now = self.uptimeClock()
+        self.syncedLocalTransitionTimes.removeAll { now - $0 > self.syncedLocalTransitionHorizon }
         self.syncedLocalTransitionTimes.append(now)
         let recentTransitions = self.syncedLocalTransitionTimes.count
 
@@ -616,7 +640,7 @@ extension NativeBackend {
         let claimed = perApp ? btPerAppClaimedUIDs.contains(id) : expectedSelected.contains(id)
         guard claimed, known[id]?.isBluetooth == true else { return }
         setConnectionState(.connecting, for: id)
-        btConnectingDeadlines[id] = Date().addingTimeInterval(btRenderStartTimeout)
+        btConnectingDeadlines[id] = uptimeClock() + btRenderStartTimeout
         scheduleBTRenderPollLocked()
     }
 
@@ -626,7 +650,7 @@ extension NativeBackend {
         guard btRenderPollWork == nil, !btConnectingDeadlines.isEmpty else { return }
         let work = DispatchWorkItem { [weak self] in self?.pollBTRenderStart() }
         btRenderPollWork = work
-        stateQueue.asyncAfter(deadline: .now() + Self.btRenderPollInterval, execute: work)
+        delayClock(Self.btRenderPollInterval, stateQueue, work)
     }
 
     /// Read the rendering set off `captureControlQueue` (which owns `btSink`)
@@ -659,7 +683,7 @@ extension NativeBackend {
     private func applyBTRenderStart(
         _ rendering: Set<String>, anchored: Set<String>?
     ) {   // on stateQueue
-        let now = Date()
+        let now = uptimeClock()
         for (id, deadline) in btConnectingDeadlines {
             guard expectedSelected.contains(id) || btPerAppClaimedUIDs.contains(id) else {
                 btConnectingDeadlines[id] = nil
@@ -724,20 +748,21 @@ extension NativeBackend {
             self.btEnumerator?.refresh()
             self.stateQueue.async { [weak self] in
                 guard let self else { return }
-                let now = Date()
-                let diedRecently = self.btSinkDeathAt[uid].map { now.timeIntervalSince($0) < 10 } ?? false
+                let now = self.uptimeClock()
+                let diedRecently = self.btSinkDeathAt[uid].map { now - $0 < 10 } ?? false
                 if resolves && !diedRecently {
                     self.btSinkDeathAt[uid] = now
                     self.reapplyBTSinkLocked()
                     return
                 }
                 self.markBTDeviceLostLocked(uid)
-                self.stateQueue.asyncAfter(deadline: .now() + self.btSinkDeathRecoverySeconds) { [weak self] in
+                let work = DispatchWorkItem { [weak self] in
                     self?.captureControlQueue.async { [weak self] in
                         self?.btEnumerator?.stop()
                         self?.btEnumerator?.start()
                     }
                 }
+                self.delayClock(self.btSinkDeathRecoverySeconds, self.stateQueue, work)
                 self.reconcileSilenceWatchdog()
                 self.reapplyBTSinkLocked()
             }
@@ -813,6 +838,16 @@ extension NativeBackend {
                 if let minor = snapshot.deviceClassMinor {
                     updated.bluetoothDeviceClassMinor = minor
                 }
+                // The model keeps the last known value for the same reason: a
+                // snapshot taken without the grant, or one whose SDP cache has
+                // gone, carries none. It also never DOWNGRADES: once the ids
+                // have been read, a later snapshot whose SDP cache has gone
+                // falls back to a name phrase, and letting that replace the
+                // ids would count one speaker under two strings in a session.
+                if let model = snapshot.model,
+                   updated.model == nil || model.hasPrefix("bt:") {
+                    updated.model = model
+                }
                 if updated != existing {
                     let availabilityMoved = updated.isAvailable != existing.isAvailable
                     if availabilityMoved, expectedSelected.contains(id) {
@@ -871,7 +906,8 @@ extension NativeBackend {
                     // gets the value re-pushed on every arm, so the snapshot and
                     // what is audible agree.
                     eq: eqByDeviceID[id] ?? .flat,
-                    bluetoothDeviceClassMinor: snapshot.deviceClassMinor)
+                    bluetoothDeviceClassMinor: snapshot.deviceClassMinor,
+                    model: snapshot.model)
                 // The first time this process lists a connected Bluetooth
                 // device is the only link-up it will ever see for it: a first
                 // pairing, or a speaker already up when the app launched. Both
@@ -985,8 +1021,8 @@ public protocol BTOutputControlling: AnyObject {
     /// IDEMPOTENT for the tick itself: a redundant edge does nothing at all.
     /// Both edges re-anchor every sink, and the panel's Done button issues a
     /// second `false` after a terminal screen already stopped the tick. The
-    /// participant hold is the exception — it is recomputed on every call, so a
-    /// reference swapped mid-run comes back off the hold without a tick edge.
+    /// participant hold is the exception — it is recomputed on every call,
+    /// because a `false` also clears the participants, edge or not.
     func setBTWizardTickActive(_ active: Bool, btTargetDeviceID: String?,
                                btReferenceDeviceID: String?)
     /// The wizard panel is going away for good — Keep, Discard, Done, ✕,
@@ -1029,17 +1065,22 @@ public protocol BTOutputControlling: AnyObject {
 
     // MARK: Mic probe (roadmap 064)
 
-    /// Stage the one-shot mic-probe sweeps on the live wizard feed: DOWN sweep
-    /// to the engine/AirPlay/Mac fan-out, UP sweep to the Bluetooth fan-out.
-    /// Call after the wizard tick has been activated
+    /// Stage the one-shot mic probe on the live wizard feed: the lane on the
+    /// Bluetooth fan-out first, the same lane on the engine/AirPlay/Mac
+    /// fan-out `SyncProbe.Layout.laneSpacingSeconds` later. Call after the
+    /// wizard tick has been activated
     /// (``setBTWizardTickActive(_:btTargetDeviceID:btReferenceDeviceID:)``);
-    /// the existing arm gate then starts the sweeps instead of the first tick,
-    /// and the tick grid arms itself when they finish. `onStarted` fires at
-    /// the gate opening, `onFinished` when the last sweep frame has entered
-    /// the feed; a run torn down early fires neither — the mic session's
-    /// timeout is the recovery. Default: no-op (mock/dev backends have no
-    /// wizard feed to stage on).
-    func stageBTMicProbe(onStarted: @escaping () -> Void, onFinished: @escaping () -> Void)
+    /// the existing arm gate then starts the probe instead of the first tick,
+    /// asking `levelStepDB` for its level step, and the tick grid arms itself
+    /// when it finishes. `onStarted` fires at the gate opening with the room
+    /// delay in seconds (how long a fed frame takes to leave the slowest
+    /// participating lane), `onFinished`
+    /// when the last probe frame has entered the feed; a run torn down early
+    /// fires neither — the mic session's timeout is the recovery. Default:
+    /// no-op (mock/dev backends have no wizard feed to stage on).
+    func stageBTMicProbe(levelStepDB: @escaping () -> Int,
+                         onStarted: @escaping (_ pipelineDelaySeconds: TimeInterval) -> Void,
+                         onFinished: @escaping () -> Void)
 
     /// The usable trim range for a device (D11/T3) — the drawer's ruler and
     /// numeric field hard-stop here instead of at the nominal ±`BTSyncTrim
@@ -1064,6 +1105,18 @@ public protocol BTOutputControlling: AnyObject {
     /// unchanged.
     var onBTAlignmentChanged: (@Sendable () -> Void)? { get set }
 
+    /// Fired with the target when the lease of a prepared run (one readied by
+    /// ``prepareCompanionAlignmentProbe(targetID:referenceID:)`` and never
+    /// started) runs out and stands it down, so the wiring can give back the
+    /// phone's claim and the speakers it selected for that run. Not fired for
+    /// any other exit. Default get-nil / set-noop.
+    var onCompanionPreparedProbeLeaseEnded: (@Sendable (_ targetID: String) -> Void)? { get set }
+
+    /// Whether a run prepared for `targetID` and not yet started is up now.
+    /// The wiring asks before acting on a lease report, which reaches it after
+    /// a hop to main and may trail a newer preparation. Default `false`.
+    func hasPreparedCompanionAlignmentProbe(targetID: String) -> Bool
+
     /// What the Mac publishes about this device's timing, for the snapshot's
     /// `DeviceState.alignment`. `nil` (the default) means this backend reports
     /// no alignment at all and the phone shows none.
@@ -1077,25 +1130,42 @@ public protocol BTOutputControlling: AnyObject {
     /// Returns a refusal reason for the preconditions only this layer can
     /// answer (the target has no live Bluetooth sink; a run, fine-tune session
     /// or Mac wizard is already up), or `nil` once staged. `onStarted` fires
-    /// when the sweeps enter the feed, `onFinished` when the last sweep frame
+    /// when the probe enters the feed with the room delay in seconds (how far
+    /// the air lags the feed), `onFinished` when its last frame
     /// does; a run torn down early fires neither, and the phone recovers by
     /// timeout. Nothing about the device's tuning changes until a measurement
     /// is reported back.
     func startCompanionAlignmentProbe(targetID: String, referenceID: String,
-                                      onStarted: @escaping () -> Void,
+                                      onStarted: @escaping (_ roomDelaySeconds: TimeInterval) -> Void,
                                       onFinished: @escaping () -> Void) -> String?
+
+    /// Ready a sync-calibration run for `targetID` against `referenceID`
+    /// while the phone still shows the page with Start on it: the wizard feed
+    /// comes up and the speakers release, so a
+    /// ``startCompanionAlignmentProbe(targetID:referenceID:onStarted:onFinished:)``
+    /// for the same pair plays at once. Refused like that call; idempotent for
+    /// the same pair; ``cancelCompanionAlignmentProbe(targetID:)`` releases it.
+    func prepareCompanionAlignmentProbe(targetID: String, referenceID: String) -> String?
 
     /// Stand a run, fine-tune session or A/B demo for `targetID` down now —
     /// the phone's Cancel, and the path a vanished client takes. Idempotent,
     /// and a no-op for a device with nothing in flight.
     func cancelCompanionAlignmentProbe(targetID: String)
 
-    /// Apply the phone's raw measurement: the target's currently applied
-    /// latency plus the reported offset, less whatever stagger the staging
-    /// used. Persisted through the same path the Mac wizard's Keep takes
+    /// Stand down a run prepared for `targetID` and nothing else — no
+    /// fine-tune session, demo or clicks. For a refused start: the phone sends
+    /// no cancel after one, so the prepared feed would otherwise keep the room
+    /// silent until the sheet closes. A no-op when nothing is prepared.
+    func standDownPreparedCompanionAlignmentProbe(targetID: String)
+
+    /// Apply the phone's measurement: the target's currently applied latency
+    /// plus the reported offset (ProbeKit has already removed the probe's lane
+    /// spacing). Persisted through the same path the Mac wizard's Keep takes
     /// (measured latency written, trim zeroed). The success case carries the
-    /// two numbers the phone cannot derive — the de-staggered measurement and
-    /// how far the stored latency actually moved.
+    /// measurement as applied and how far the stored latency actually moved,
+    /// which the phone cannot derive. A run whose sweeps had finished keeps
+    /// its wizard feed up for a short grace, so clicks the phone asks for next
+    /// for the same pair start without a second rebuild.
     func applyCompanionAlignmentMeasurement(targetID: String,
                                             offsetMs: Double,
                                             confidence: Double) -> CompanionAlignmentApplyResult
@@ -1147,7 +1217,8 @@ extension BTOutputControlling {
         -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
     }
 
-    public func stageBTMicProbe(onStarted: @escaping () -> Void,
+    public func stageBTMicProbe(levelStepDB: @escaping () -> Int,
+                                onStarted: @escaping (_ pipelineDelaySeconds: TimeInterval) -> Void,
                                 onFinished: @escaping () -> Void) {}
 
     /// Defaults for the whole phone-driven family: a backend with no Bluetooth
@@ -1157,13 +1228,22 @@ extension BTOutputControlling {
         get { nil }
         set { }
     }
+    public var onCompanionPreparedProbeLeaseEnded: (@Sendable (_ targetID: String) -> Void)? {
+        get { nil }
+        set { }
+    }
+    public func hasPreparedCompanionAlignmentProbe(targetID: String) -> Bool { false }
     public func btAlignmentReport(forDevice id: String) -> BTSpeakerTimingReport? { nil }
     public func startCompanionAlignmentProbe(targetID: String, referenceID: String,
-                                             onStarted: @escaping () -> Void,
+                                             onStarted: @escaping (_ roomDelaySeconds: TimeInterval) -> Void,
                                              onFinished: @escaping () -> Void) -> String? {
         "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
     }
+    public func prepareCompanionAlignmentProbe(targetID: String, referenceID: String) -> String? {
+        "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
+    }
     public func cancelCompanionAlignmentProbe(targetID: String) {}
+    public func standDownPreparedCompanionAlignmentProbe(targetID: String) {}
     public func applyCompanionAlignmentMeasurement(targetID: String,
                                                    offsetMs: Double,
                                                    confidence: Double) -> CompanionAlignmentApplyResult {
@@ -1395,6 +1475,9 @@ extension NativeBackend {
         }
         if persist {
             do { try btTrimStore?.saveLatencies(all) } catch { StoreRecovery.noteWriteFailure(error) }
+            // The row's number moved, and `noteDriftCorrected` fires only on
+            // the first correction, so tell the phone's snapshot here.
+            btSpeakerTiming.onChange?()
         }
         // The reference floor is a function of the slowest known latency, so a
         // correction can move it — and it must move FIRST, exactly as at the
@@ -1558,9 +1641,9 @@ extension NativeBackend: BTOutputControlling {
 
     public func setBTWizardTickActive(_ active: Bool, btTargetDeviceID: String?,
                                       btReferenceDeviceID: String?) {
-        // NOT edge-guarded, unlike everything below: the host re-pushes a `true`
-        // when the user swaps the reference mid-run, and the new reference has
-        // to come back off the hold that the old one was exempt from.
+        // NOT edge-guarded, unlike everything below: a `false` also clears the
+        // participants, and that has to happen even when the tick already
+        // stopped. (The reference is locked once the run leaves the intro.)
         updateBTWizardParticipantHold(
             active: active, targetUID: btTargetDeviceID, referenceUID: btReferenceDeviceID)
         // Idempotent (see the protocol): everything below is an EDGE cost — a
@@ -1612,15 +1695,17 @@ extension NativeBackend: BTOutputControlling {
         }
     }
 
-    /// Hold every selected Bluetooth speaker that is NOT part of the comparison
-    /// silent for the run, and let them all back in when it ends.
+    /// Hold every output that is NOT part of the comparison silent for the
+    /// run — other Bluetooth speakers, Cast, AirPlay and the Mac's own sink —
+    /// and let them all back in when it ends.
     ///
-    /// The reference is exempt only when it is itself a Bluetooth device — a
-    /// Mac reference renders through a different sink entirely and is not in
-    /// this set to begin with, so passing its id costs nothing. Applied through
-    /// the ordinary composed-gain seam: no rebuild, no gap, and the wizard's
-    /// arm gate (which keys off `hasStartedRendering`) is unaffected because a
-    /// gain of 0 is still a released, rendering sink.
+    /// With a reference named, the target and reference become
+    /// `companionTickParticipants`, per-app program and local playback are
+    /// suppressed, and the non-participants drop out of the room delay; when
+    /// that moves the room delay, every sink re-anchors on it. Held Bluetooth
+    /// speakers go silent through the ordinary composed-gain seam: no rebuild,
+    /// no gap, and the wizard's arm gate (which keys off `hasStartedRendering`)
+    /// is unaffected because a gain of 0 is still a released, rendering sink.
     private func updateBTWizardParticipantHold(
         active: Bool, targetUID: String?, referenceUID: String?
     ) {
@@ -1631,15 +1716,49 @@ extension NativeBackend: BTOutputControlling {
                     .subtracting([targetUID, referenceUID].compactMap { $0 })
             }
             let changed = want.symmetricDifference(self.btWizardHeldUIDs)
-            guard !changed.isEmpty else { return }
-            self.btWizardHeldUIDs = want
-            for uid in changed { self.pushBTSinkGainLocked(uid) }
+            if !changed.isEmpty {
+                self.btWizardHeldUIDs = want
+                for uid in changed { self.pushBTSinkGainLocked(uid) }
+            }
+            // Everything that is not the target or its reference goes silent
+            // too (Cast, AirPlay, the Mac, per-app program), and drops out of
+            // the room delay. A `true` with no reference is the companion
+            // audition's own activation, which owns its participants.
+            let wanted: Set<String>?
+            if active, let referenceUID {
+                wanted = [targetUID ?? Self.localDeviceID, referenceUID]
+            } else if active {
+                return
+            } else {
+                wanted = nil
+            }
+            guard wanted != self.companionTickParticipants else { return }
+            let before = self.roomDelayLocked()
+            self.companionTickParticipants = wanted
+            let after = self.roomDelayLocked()
+            self.btTrimLock.withLock { self.companionProgramSuppressed = wanted != nil }
+            for uid in self.btSelectedUIDs { self.pushBTSinkGainLocked(uid) }
+            for castID in self.castSelectedIDs { self.pushCastLevelLocked(castID) }
+            self.pushSyncedLocalGain()
+            for (engineID, outputID) in self.outputIDs where self.added.contains(engineID) {
+                self.pushVolume(outputID, id: engineID,
+                                engineValue: self.currentCompanionRestoreValue(forID: engineID),
+                                uiLevel: nil)
+            }
+            self.localPlaybackEngine?.setOutputSuppressed(wanted != nil) {}
+            if before != after { self.roomDelayChangedLocked(cause: "wizard_hold") }
         }
     }
 
-    public func stageBTMicProbe(onStarted: @escaping () -> Void,
+    public func stageBTMicProbe(levelStepDB: @escaping () -> Int,
+                                onStarted: @escaping (_ pipelineDelaySeconds: TimeInterval) -> Void,
                                 onFinished: @escaping () -> Void) {
-        captureCoordinator?.stageWizardMicProbe(onStarted: onStarted, onFinished: onFinished)
+        stateQueue.async {
+            let seconds = Double(self.roomDelayLocked()) / 1000
+            self.captureCoordinator?.stageWizardMicProbe(levelStepDB: levelStepDB,
+                                                         onStarted: { onStarted(seconds) },
+                                                         onFinished: onFinished)
+        }
     }
 
     // MARK: Phone-driven sync calibration
@@ -1650,22 +1769,47 @@ extension NativeBackend: BTOutputControlling {
     /// at the current value and no swap.
     private static let companionDemoLegSeconds: TimeInterval = 2
 
-    /// How long a stood-down run waits for the phone's measurement before
-    /// giving up and putting the suspended trim back. The timer starts at audio
-    /// stand-down — the pipeline tail after the last sweep frame — and the
-    /// phone measures at that same tail, reports, then waits its own 20 s
+    /// How long a run awaiting its report waits for the phone's measurement
+    /// before giving up and putting the suspended trim back. The timer starts when the
+    /// last sweep frame enters the feed; the phone measures a tail after that,
+    /// reports, then waits its own 20 s
     /// (`AlignmentRunController.applyTimeoutSeconds`) for the Mac's answer. So
-    /// both sides give up about 20 s past the tail, and neither is left holding
-    /// a run the other has abandoned.
-    private static let companionReportTimeoutSeconds: TimeInterval = 20
+    /// both sides give up about 20 s after the sweeps, and neither is left
+    /// holding a run the other has abandoned for long.
+    static let companionReportTimeoutSeconds: TimeInterval = 20
 
     public var onBTAlignmentChanged: (@Sendable () -> Void)? {
         get { btSpeakerTiming.onChange }
         set { btSpeakerTiming.onChange = newValue }
     }
 
+    public var onCompanionPreparedProbeLeaseEnded: (@Sendable (_ targetID: String) -> Void)? {
+        get { btTrimLock.withLock { companionPreparedLeaseEnded } }
+        set { btTrimLock.withLock { companionPreparedLeaseEnded = newValue } }
+    }
+
+    public func hasPreparedCompanionAlignmentProbe(targetID: String) -> Bool {
+        btTrimLock.withLock {
+            companionAlignmentRun.map { $0.phase == .prepared && $0.targetUID == targetID } ?? false
+        }
+    }
+
     public func btAlignmentReport(forDevice id: String) -> BTSpeakerTimingReport? {
-        btSpeakerTiming.report(uid: id)
+        var report = btSpeakerTiming.report(uid: id)
+        report.delayMs = btDelayMs(forDevice: id)
+        return report
+    }
+
+    /// The number the speaker's row on the Mac prints as "<N> ms"
+    /// (`DeviceRowView.syncChipValueMs`): the stored trim plus the stored
+    /// measured latency, rounded half away from zero. `nil` when neither
+    /// exists, which is when the row reads "Not set" (or "Align").
+    func btDelayMs(forDevice id: String) -> Int? {
+        btTrimLock.withLock {
+            let latency = btLatencyMsByUID[id], trim = btTrimsByUID[id]
+            guard latency != nil || trim != nil else { return nil }
+            return Int(((trim ?? 0) + (latency ?? 0)).rounded(.toNearestOrAwayFromZero))
+        }
     }
 
     /// The offset this speaker has stored, which is both halves of what
@@ -1680,11 +1824,12 @@ extension NativeBackend: BTOutputControlling {
         btTrimLock.withLock { btLatencyMsByUID[id] ?? btTrimsByUID[id] }
     }
 
-    /// What names this speaker in the release analytics event: its
+    /// What names this speaker in the release analytics events: its
     /// ``btSpeakerIndexByUID`` entry, minted here the first time this install
-    /// is asked about the UID and written to the same file the trims live in.
+    /// is asked about the id and written to the same file the trims live in.
     /// Highest index plus one rather than a count, so a map that ever loses an
-    /// entry cannot hand a second speaker the first one's number.
+    /// entry cannot hand a second speaker the first one's number. AirPlay and
+    /// Cast ids share the map since 2026-11-01, for the connection events.
     func btSpeakerKey(forDevice id: String) -> String {
         let (index, all) = btTrimLock.withLock { () -> (Int, [String: Int]?) in
             if let existing = btSpeakerIndexByUID[id] { return (existing, nil) }
@@ -1698,6 +1843,8 @@ extension NativeBackend: BTOutputControlling {
         return String(index)
     }
 
+    public func analyticsSpeakerKey(forDevice id: String) -> String? { btSpeakerKey(forDevice: id) }
+
     /// The pairing's device class, from the stash ``applyBTSnapshots(_:)``
     /// keeps — `known` is `stateQueue`-confined and this is read from three
     /// other queues.
@@ -1708,7 +1855,7 @@ extension NativeBackend: BTOutputControlling {
     /// Whether the Bluetooth manager renders at the feed's own rate — the same
     /// question `NativeCaptureCoordinator` asks its base resampler
     /// (`SyncedLocalBaseResampler.isIdentity`), from the one input that decides
-    /// it. A staggered run needs this: only at the feed rate can the fan-out
+    /// it. A routed run needs this: only at the feed rate can the fan-out
     /// write two different blocks into two different delay lines.
     private var btSinkRendersAtFeedRate: Bool {
         let rate = btSinkRefLock.withLock { btSink }?.renderSampleRate
@@ -1717,11 +1864,116 @@ extension NativeBackend: BTOutputControlling {
     }
 
     public func startCompanionAlignmentProbe(targetID: String, referenceID: String,
-                                             onStarted: @escaping () -> Void,
+                                             onStarted: @escaping (_ roomDelaySeconds: TimeInterval) -> Void,
                                              onFinished: @escaping () -> Void) -> String? {
         guard let coordinator = captureCoordinator else {
             return "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
         }
+        let check = companionProbePreflight(targetID: targetID, referenceID: referenceID)
+        if let refusal = check.refusal {
+            // The phone sends no cancel after a refused start, so a run it
+            // prepared for this speaker would hold the room silent until the
+            // sheet closes.
+            standDownPreparedCompanionAlignmentProbe(targetID: targetID)
+            return refusal
+        }
+        // A measurement just applied for this speaker left its feed up for the
+        // clicks, and a run prepared against another reference readied the
+        // wrong pair. A new probe stands either down first, so it stages on a
+        // fresh injector rather than the one the last probe finished on.
+        if let stale = takeCompanionProbeRun({
+            $0.targetUID == targetID
+                && ($0.phase == .handoff || ($0.phase == .prepared && $0.referenceUID != referenceID))
+        }) {
+            abandonCompanionProbe(stale)
+        }
+        // A run prepared for this pair already has its feed up and its
+        // speakers released: the probe stages straight onto it.
+        let preparedID = btTrimLock.withLock { () -> UUID? in
+            guard var run = companionAlignmentRun, run.phase == .prepared,
+                  run.targetUID == targetID, run.referenceUID == referenceID else { return nil }
+            run.phase = .probe
+            companionAlignmentRun = run
+            return run.id
+        }
+        let runID: UUID
+        if let preparedID {
+            runID = preparedID
+        } else {
+            guard let claimed = claimCompanionProbeRun(targetID: targetID, referenceID: referenceID,
+                                                       phase: .probe) else {
+                return "This Mac is already measuring a speaker. Finish that first."
+            }
+            runID = claimed
+            raiseCompanionProbeFeed(targetID: targetID, referenceID: referenceID,
+                                    referenceIsBluetooth: check.referenceIsBluetooth)
+        }
+        // Read after the hold above (queued ahead of this on `stateQueue`), the
+        // way `stageBTMicProbe` reads it, so only the run's own speakers count.
+        let roomDelaySeconds = stateQueue.sync { Double(self.roomDelayLocked()) / 1000 }
+        coordinator.stageCompanionMicProbe(
+            routed: check.routed,
+            referenceOnEngine: !check.referenceIsBluetooth,
+            targetWindowUID: targetID,
+            referenceWindowUID: check.referenceIsBluetooth ? referenceID : nil,
+            onStarted: { onStarted(roomDelaySeconds) },
+            onFinished: { [weak self] in
+                onFinished()
+                // The feed stays up: the phone waits its own tail after being
+                // told the probe finished, transforms the recording, reports,
+                // and then asks for the clicks on this same feed.
+                self?.awaitCompanionProbeReport(runID: runID, targetID: targetID)
+            })
+        return nil
+    }
+
+    public func prepareCompanionAlignmentProbe(targetID: String, referenceID: String) -> String? {
+        guard let coordinator = captureCoordinator else {
+            return "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
+        }
+        let check = companionProbePreflight(targetID: targetID, referenceID: referenceID)
+        if let refusal = check.refusal { return refusal }
+        let alreadyPrepared = btTrimLock.withLock { () -> Bool in
+            guard let run = companionAlignmentRun else { return false }
+            return run.phase == .prepared && run.targetUID == targetID && run.referenceUID == referenceID
+        }
+        if alreadyPrepared { return nil }
+        // A run prepared against another reference, or a measurement's
+        // handoff ("Check again" after a result), stands down first, as it
+        // does for a start.
+        if let other = takeCompanionProbeRun({
+            $0.targetUID == targetID && ($0.phase == .prepared || $0.phase == .handoff)
+        }) {
+            abandonCompanionProbe(other)
+        }
+        guard let runID = claimCompanionProbeRun(targetID: targetID, referenceID: referenceID,
+                                                 phase: .prepared) else {
+            return "This Mac is already measuring a speaker. Finish that first."
+        }
+        raiseCompanionProbeFeed(targetID: targetID, referenceID: referenceID,
+                                referenceIsBluetooth: check.referenceIsBluetooth)
+        coordinator.prepareCompanionMicProbe()
+        // A phone left on its Start page would otherwise keep the user's audio
+        // off for as long as it stays connected. Keyed by run id, so the lease
+        // of a run already stood down never ends the one prepared after it.
+        // The report to the wiring names only the target; the wiring checks
+        // `hasPreparedCompanionAlignmentProbe` on main before acting, so a
+        // report that trails a newer preparation leaves that one alone.
+        delayClock(companionPreparedLeaseSeconds, captureControlQueue, DispatchWorkItem { [weak self] in
+            guard let self,
+                  let stale = self.takeCompanionProbeRun({ $0.id == runID && $0.phase == .prepared })
+            else { return }
+            self.abandonCompanionProbe(stale)
+            self.btTrimLock.withLock { self.companionPreparedLeaseEnded }?(stale.targetUID)
+        })
+        return nil
+    }
+
+    /// The refusals only this layer can answer for a phone run on `targetID`
+    /// against `referenceID`, and the run's shape when there is none.
+    private func companionProbePreflight(
+        targetID: String, referenceID: String
+    ) -> (refusal: String?, routed: Bool, referenceIsBluetooth: Bool) {
         // Only this layer knows whether the target has a delay line to measure
         // and how many other Bluetooth speakers are in the room. The
         // audible-target / usable-reference half of the preconditions is answered by
@@ -1734,31 +1986,48 @@ extension NativeBackend: BTOutputControlling {
         }
         guard targetIsLive else {
             if let targetName {
-                return "\u{201C}\(targetName)\u{201D} isn't playing right now, so there's nothing to measure."
+                return ("\u{201C}\(targetName)\u{201D} isn't playing right now, so there's nothing to measure.",
+                        false, referenceIsBluetooth)
             }
-            return "That speaker isn't playing right now, so there's nothing to measure."
+            return ("That speaker isn't playing right now, so there's nothing to measure.",
+                    false, referenceIsBluetooth)
         }
-        // Two Bluetooth speakers cannot be measured from one recording unless
-        // their sweeps are separated in time — see `AlignmentTickInjector
-        // .ProbeShape.staggered`.
-        let staggered = referenceIsBluetooth || otherBTAudible
-        // The staggered shape rests on the fan-out writing the sweep-carrying
-        // block into one delay line and the sweep-free block into every other,
+        // Both lanes always play in turn. When two Bluetooth speakers are
+        // audible, or the reference is itself Bluetooth, the Bluetooth fan-out
+        // carries both lanes and each must reach only its own speaker — see
+        // `AlignmentTickInjector.ProbeShape.routedWindows`.
+        let routed = referenceIsBluetooth || otherBTAudible
+        // The routed shape rests on the fan-out writing the probe-carrying
+        // block into one delay line and the probe-free block into every other,
         // which `NativeCaptureCoordinator.deliver` can only do while the
         // Bluetooth manager renders at the feed's own rate. Off that rate it
         // falls back to one feed for everybody and BOTH speakers play BOTH
-        // sweeps — a confident number attributable to neither speaker, which is
+        // lanes — a confident number attributable to neither speaker, which is
         // worse than no number at all.
-        if staggered, !btSinkRendersAtFeedRate {
-            return "Can't tell these two speakers apart right now. Try again in a moment."
+        if routed, !btSinkRendersAtFeedRate {
+            return ("Can't tell these two speakers apart right now. Try again in a moment.",
+                    routed, referenceIsBluetooth)
         }
-        let runID = btTrimLock.withLock { () -> UUID? in
+        return (nil, routed, referenceIsBluetooth)
+    }
+
+    /// Put a new phone run in the slot, or `nil` when a run, a demo or a Mac
+    /// wizard already holds the room — including a Mac wizard on its receipt,
+    /// whose tick has stopped but whose raised reference stays up: a phone run
+    /// would then measure against that reference, not its own pin, and clamp a
+    /// latency above the pin's ceiling.
+    private func claimCompanionProbeRun(targetID: String, referenceID: String,
+                                        phase: CompanionAlignmentRun.Phase) -> UUID? {
+        // Read first, outside the lock: queued after any `endBTWizardRun()` a
+        // stand-down just before this enqueued, so that lowering counts.
+        guard !stateQueue.sync(execute: { btWizardReferenceRaised }) else { return nil }
+        return btTrimLock.withLock { () -> UUID? in
             guard companionAlignmentRun == nil, companionDemoTargetUID == nil,
                   btWizardTickActive == false else { return nil }
             let run = CompanionAlignmentRun(
                 targetUID: targetID,
-                phase: .probe,
-                staggerMs: staggered ? AlignmentTickInjector.probeStaggerSeconds * 1_000 : 0,
+                referenceUID: referenceID,
+                phase: phase,
                 // SUSPEND the user's trim for the run, exactly as the Mac's own
                 // wizard does: latency and trim are the same linear term in the
                 // delay, so sweeps judged with the nudge still applied measure
@@ -1770,36 +2039,31 @@ extension NativeBackend: BTOutputControlling {
             companionAlignmentRun = run
             return run.id
         }
-        guard let runID else {
-            return "This Mac is already measuring a speaker. Finish that first."
-        }
+    }
+
+    /// Bring a newly claimed phone run's audio up: the trim suspended, the
+    /// reference pinned and raised, the wizard feed on with every other
+    /// output held.
+    private func raiseCompanionProbeFeed(targetID: String, referenceID: String,
+                                         referenceIsBluetooth: Bool) {
         setBTWizardTrimPreview(0, forDevice: targetID)
+        // The pin is fixed for the run: a latency written mid-run must not move
+        // the reference, which would rebuild the sink under the clicks. Queued
+        // ahead of the raise below on the same serial queue, so it lands first.
+        let participantsMs = btTrimLock.withLock {
+            Self.btOnlyReferenceMs(latencies: btLatencyMsByUID, trims: btTrimsByUID,
+                                   uids: referenceIsBluetooth ? [targetID, referenceID] : [targetID])
+        }
+        let pinnedMs = Self.companionProbeReferenceMs(
+            targetLatencyMs: btMeasuredLatencyMs(forDevice: targetID),
+            targetStatus: btAlignmentReport(forDevice: targetID)?.status,
+            participantsReferenceMs: participantsMs)
+        stateQueue.async { self.btWizardReferencePinnedMs = pinnedMs }
         // Reuse the wizard's whole staging: the participant hold (every other
         // Bluetooth speaker silent for the run), the raised Bluetooth-only
         // reference, the arm gate that waits for every sink to release, and
         // the re-anchor both edges do.
         setBTWizardTickActive(true, btTargetDeviceID: targetID, btReferenceDeviceID: referenceID)
-        coordinator.stageCompanionMicProbe(
-            staggered: staggered,
-            referenceOnEngine: !referenceIsBluetooth,
-            downWindowUID: referenceIsBluetooth ? referenceID : nil,
-            upWindowUID: targetID,
-            onStarted: onStarted,
-            onFinished: { [weak self] in
-                onFinished()
-                // The air lags the feed by the sinks' pipeline delay, so the
-                // AUDIO stands down a tail's worth after the last sweep FRAME —
-                // the same figure the mic session waits out (`MicProbeSession
-                // .pipelineTailSeconds`). The RUN outlives it: the phone waits
-                // its own tail after being told the sweeps finished, then
-                // transforms the recording, and only then reports.
-                self?.captureControlQueue.asyncAfter(
-                    deadline: .now() + MicProbeSession.pipelineTailSeconds
-                ) { [weak self] in
-                    self?.standDownCompanionProbeAudio(runID: runID, targetID: targetID)
-                }
-            })
-        return nil
     }
 
     public func cancelCompanionAlignmentProbe(targetID: String) {
@@ -1817,14 +2081,20 @@ extension NativeBackend: BTOutputControlling {
         endCompanionTickSession(targetID: targetID, persist: true)
     }
 
-    /// Silence the sweeps and put the room back — holds released, tick mode
-    /// off, the raised Bluetooth reference lowered — while KEEPING the run
-    /// record, which the phone's measurement still has to find. Arms the
-    /// report timeout, the last of the four ways an awaiting run ends.
+    public func standDownPreparedCompanionAlignmentProbe(targetID: String) {
+        if let run = takeCompanionProbeRun({ $0.phase == .prepared && $0.targetUID == targetID }) {
+            abandonCompanionProbe(run)
+        }
+    }
+
+    /// The probe has left the feed: mark the run as waiting for the phone's
+    /// measurement and arm the report timeout, the last of the four ways an
+    /// awaiting run ends. The audio is left as it is — the wizard feed, the
+    /// holds and the raised reference stay up for the clicks that follow.
     ///
     /// Keyed by run id, so a timer armed by one run can never stand down its
     /// successor.
-    private func standDownCompanionProbeAudio(runID: UUID, targetID: String) {
+    private func awaitCompanionProbeReport(runID: UUID, targetID: String) {
         let moved = btTrimLock.withLock { () -> Bool in
             guard var run = companionAlignmentRun,
                   run.id == runID, run.phase == .probe else { return false }
@@ -1833,19 +2103,19 @@ extension NativeBackend: BTOutputControlling {
             return true
         }
         guard moved else { return }
-        setBTWizardTickActive(false, btTargetDeviceID: targetID, btReferenceDeviceID: nil)
-        endBTWizardRun()
-        captureControlQueue.asyncAfter(
-            deadline: .now() + Self.companionReportTimeoutSeconds
-        ) { [weak self] in
-            guard let self, let run = self.takeCompanionProbeRun({ $0.id == runID }) else { return }
+        delayClock(Self.companionReportTimeoutSeconds, captureControlQueue, DispatchWorkItem { [weak self] in
+            // Only a run still awaiting: an applied run's `.handoff` keeps the
+            // same id and has its own grace.
+            guard let self,
+                  let run = self.takeCompanionProbeRun({ $0.id == runID && $0.phase == .awaitingReport })
+            else { return }
             self.abandonCompanionProbe(run)
-        }
+        })
     }
 
-    /// Take the probe run (playing or awaiting its report) that `match`
-    /// accepts out of the slot, leaving a fine-tune session alone. The caller
-    /// then puts the room back.
+    /// Take the probe run (playing, awaiting its report, or handing off) that
+    /// `match` accepts out of the slot, leaving a fine-tune session alone. The
+    /// caller then puts the room back.
     private func takeCompanionProbeRun(
         _ match: (CompanionAlignmentRun) -> Bool
     ) -> CompanionAlignmentRun? {
@@ -1857,36 +2127,42 @@ extension NativeBackend: BTOutputControlling {
     }
 
     /// Put the room back after a run that produced no measurement — the
-    /// phone's Cancel, a client that vanished, or a report that never came.
-    /// The sweeps are silenced only if they were still playing, and the trim
-    /// the staging suspended goes back on the sink whichever it was.
+    /// phone's Cancel, a client that vanished, a report that never came, a
+    /// preparation whose lease ran out, or a handoff nobody took up. The wizard feed is stood down, and the trim the
+    /// staging suspended goes back on the sink — except after a measurement
+    /// (`.handoff`), whose kept value is already there.
     private func abandonCompanionProbe(_ run: CompanionAlignmentRun) {
-        if run.phase == .probe {
+        if run.phase != .tick {
             setBTWizardTickActive(false, btTargetDeviceID: run.targetUID, btReferenceDeviceID: nil)
             endBTWizardRun()
         }
-        setBTWizardTrimPreview(run.trimAtSessionStartMs, forDevice: run.targetUID)
+        if run.phase != .handoff {
+            setBTWizardTrimPreview(run.trimAtSessionStartMs, forDevice: run.targetUID)
+        }
     }
 
     public func applyCompanionAlignmentMeasurement(targetID: String,
                                                    offsetMs: Double,
                                                    confidence: Double) -> CompanionAlignmentApplyResult {
-        guard let run = takeCompanionProbeRun({ $0.targetUID == targetID }) else {
+        // A prepared run played no probe, and a handoff's measurement is
+        // already kept: a report reaching either would write a latency nobody
+        // measured, or add its offset on top of the one just kept.
+        guard let run = takeCompanionProbeRun({
+            $0.targetUID == targetID && ($0.phase == .probe || $0.phase == .awaitingReport)
+        }) else {
             return .refused("That measurement isn't running any more. Start it again.")
         }
-        // A phone quick enough to report before the tail elapsed leaves the
-        // sweeps still playing; silence them here rather than letting the
-        // stand-down find a run that has already been taken.
+        // A phone quick enough to report before the sweeps finished leaves
+        // them still playing; silence them here.
         if run.phase == .probe {
             setBTWizardTickActive(false, btTargetDeviceID: targetID, btReferenceDeviceID: nil)
         }
-        // The phone reports RAW: what its microphone heard, with no sign
-        // convention or trim arithmetic on the wire. Trim semantics are the
-        // Mac's, and so is the stagger — the phone never knew the sweeps were
-        // separated, so the separation comes out here.
+        // The phone reports what its microphone heard, with the probe's own
+        // lane spacing already removed by ProbeKit and no trim arithmetic on
+        // the wire. Trim semantics are the Mac's.
         let applied = btMeasuredLatencyMs(forDevice: targetID) ?? 0
         let range = btWizardLatencyRangeMs(forDevice: targetID)
-        let corrected = BTSyncTrim.snap(applied + (offsetMs - run.staggerMs))
+        let corrected = BTSyncTrim.snap(applied + offsetMs)
         let value = Swift.min(Swift.max(corrected, range.lowerBound), range.upperBound)
         // A re-check after a measurement made while the clock was still
         // settling: how far the early number was off, and how much the clock
@@ -1897,7 +2173,7 @@ extension NativeBackend: BTOutputControlling {
                 "uid": targetID,
                 "earlyMs": String(Int(applied)),
                 "jumpSumMs": String(format: "%.1f", jumpSumMs),
-                "recheckMs": String(format: "%.1f", offsetMs - run.staggerMs),
+                "recheckMs": String(format: "%.1f", offsetMs),
             ])
         }
         // ADR 0001: a measurement that lands within `AlignmentThresholds
@@ -1911,7 +2187,7 @@ extension NativeBackend: BTOutputControlling {
         // Every measurement, whether the run offered a re-check or not: what
         // the microphone heard (`rawOffsetMs`) with the phone's own confidence
         // (a peak-to-sidelobe ratio: ~1 is noise, a clean arrival runs to the
-        // hundreds), what it became after the stagger and the stored latency
+        // hundreds), what it became after the stored latency
         // (`correctedMs`), and what the speaker was left on (`keptMs`) — the
         // measurement clamped to the sink's reachable range when it replaced
         // the stored number, the stored number itself when it did not
@@ -1924,7 +2200,6 @@ extension NativeBackend: BTOutputControlling {
             "uid": targetID,
             "confidence": String(format: "%.1f", confidence),
             "rawOffsetMs": String(format: "%.1f", offsetMs),
-            "staggerMs": String(format: "%.1f", run.staggerMs),
             "priorLatencyMs": String(Int(applied)),
             "correctedMs": String(format: "%.1f", corrected),
             "keptMs": String(format: "%.1f", keptMs),
@@ -1938,10 +2213,25 @@ extension NativeBackend: BTOutputControlling {
         // The Mac wizard's Keep, exactly: the kept latency written, trim
         // zeroed (it was a manual stand-in for the latency just measured).
         endBTWizardLatencyPreview(forDevice: targetID, keepMs: keptMs, recordsAlignment: false)
-        // Lowers the raised Bluetooth reference and releases the holds. A run
-        // already stood down did both at the tail, and both are idempotent.
-        endBTWizardRun()
-        return .applied(measuredMs: offsetMs - run.staggerMs,
+        if run.phase == .probe {
+            // The sweeps were silenced above and nothing is handed off: lower
+            // the raised reference and release the holds now.
+            endBTWizardRun()
+        } else {
+            // Keep the feed, the holds and the pinned reference up for the
+            // clicks the phone asks for next; a click request for the same pair
+            // adopts it, and otherwise the grace timer stands it down.
+            var handoff = run
+            handoff.phase = .handoff
+            btTrimLock.withLock { companionAlignmentRun = handoff }
+            delayClock(companionHandoffGraceSeconds, captureControlQueue, DispatchWorkItem { [weak self] in
+                guard let self,
+                      let stale = self.takeCompanionProbeRun({ $0.id == run.id && $0.phase == .handoff })
+                else { return }
+                self.abandonCompanionProbe(stale)
+            })
+        }
+        return .applied(measuredMs: offsetMs,
                         correctedMs: Swift.max(0, keptMs) - applied)
     }
 
@@ -1956,7 +2246,15 @@ extension NativeBackend: BTOutputControlling {
                 onReleased()
                 return
             }
-            let now = Date()
+            let now = self.uptimeClock()
+            // A handoff for this speaker kept the probe's feed up for clicks on
+            // the SAME pair; one naming another reference stands it down and
+            // starts fresh.
+            if let stale = self.takeCompanionProbeRun({
+                $0.phase == .handoff && $0.targetUID == targetID && $0.referenceUID != referenceID
+            }) {
+                self.abandonCompanionProbe(stale)
+            }
             let claimed = self.btTrimLock.withLock { () -> (UUID?, String?) in
                 if var current = self.companionAudition {
                     guard current.targetID == targetID, current.referenceID == referenceID else {
@@ -1978,22 +2276,28 @@ extension NativeBackend: BTOutputControlling {
                         return (nil, "This Mac is restoring the speaker levels. Try again shortly.")
                     }
                 }
-                guard self.companionAlignmentRun == nil, self.companionDemoTargetUID == nil,
-                      !self.btWizardTickActive else {
+                // Adopting the handoff waives the tick guard: its feed is the
+                // one these clicks will play on.
+                let adopts = self.companionAlignmentRun.map {
+                    $0.phase == .handoff && $0.targetUID == targetID && $0.referenceUID == referenceID
+                } ?? false
+                guard adopts || self.companionAlignmentRun == nil, self.companionDemoTargetUID == nil,
+                      adopts || !self.btWizardTickActive else {
                     return (nil, "This Mac is already measuring a speaker. Finish that first.")
                 }
                 let trim = self.btTrimsByUID[targetID] ?? 0
-                let run = CompanionAlignmentRun(targetUID: targetID, phase: .tick,
-                                                staggerMs: 0, trimAtSessionStartMs: trim,
+                let run = CompanionAlignmentRun(targetUID: targetID, referenceUID: nil, phase: .tick,
+                                                trimAtSessionStartMs: trim,
                                                 liveTrimMs: trim)
                 self.companionAlignmentRun = run
                 self.companionProgramSuppressed = true
                 var lifecycle = CompanionAuditionLifecycle(
                     id: run.id, targetID: targetID, referenceID: referenceID,
-                    preparationDeadline: now.addingTimeInterval(self.companionAuditionPreparationSeconds),
-                    leaseDeadline: now.addingTimeInterval(self.companionAuditionLeaseSeconds),
+                    preparationDeadline: now + self.companionAuditionPreparationSeconds,
+                    leaseDeadline: now + self.companionAuditionLeaseSeconds,
                     startCompletions: [completion])
                 lifecycle.releaseCallbacks = [onReleased]
+                lifecycle.adoptsWizardFeed = adopts
                 self.companionAudition = lifecycle
                 return (run.id, nil)
             }
@@ -2019,7 +2323,11 @@ extension NativeBackend: BTOutputControlling {
                     reason: "The speaker click session ended.")
             })
             self.stateQueue.async {
+                let roomBefore = self.roomDelayLocked()
                 self.companionTickParticipants = [targetID, referenceID]
+                if self.roomDelayLocked() != roomBefore {
+                    self.roomDelayChangedLocked(cause: "wizard_hold")
+                }
                 let btUIDs = Array(self.btSelectedUIDs)
                 let castIDs = Array(self.castSelectedIDs)
                 let holds = self.outputIDs.filter {
@@ -2091,7 +2399,7 @@ extension NativeBackend: BTOutputControlling {
     /// the stash is what an UNMUTE would restore, so pushing it at cleanup
     /// turned a muted speaker back on. Reads state, writes none: the mute and
     /// the stored fader both stay exactly as the user left them.
-    private func currentCompanionRestoreValue(forID id: String) -> Double {   // on stateQueue
+    func currentCompanionRestoreValue(forID id: String) -> Double {   // on stateQueue
         if muted.contains(id) {
             return known[id]?.supportsAirPlay2 == false ? -1.0 : Self.engineVolume(fraction: 0)
         }
@@ -2166,7 +2474,7 @@ extension NativeBackend: BTOutputControlling {
         guard let current = btTrimLock.withLock({ companionAudition }),
               current.id == id, current.phase == .preparing else { return }
         // The live-pair read waits on `stateQueue`; no lock is held across it.
-        guard Date() < current.preparationDeadline,
+        guard uptimeClock() < current.preparationDeadline,
               companionAuditionPairIsLive(targetID: current.targetID,
                                           referenceID: current.referenceID) else {
             failCompanionAuditionPreparation(id: id,
@@ -2183,7 +2491,7 @@ extension NativeBackend: BTOutputControlling {
             guard var audition = companionAudition, audition.id == id,
                   audition.phase == .preparing, audition.preparationFailure == nil,
                   audition.preparationPending.isEmpty else { return .gone }
-            guard Date() < audition.preparationDeadline else { return .expired }
+            guard uptimeClock() < audition.preparationDeadline else { return .expired }
             audition.phase = .active
             let callbacks = audition.startCompletions
             audition.startCompletions = []
@@ -2198,13 +2506,19 @@ extension NativeBackend: BTOutputControlling {
                 reason: "Starting the speaker clicks took too long. Try again.")
         case .claimed(let callbacks):
             setBTWizardTickActive(true, btTargetDeviceID: nil, btReferenceDeviceID: nil)
+            // An adopted feed is already active, so the edge above opened no
+            // arm gate; activation arms the clicks itself, on a short lead.
+            if current.adoptsWizardFeed {
+                captureCoordinator?.armWizardTicks(
+                    firstTickAfterSeconds: Self.companionAdoptedFirstTickLeadSeconds)
+            }
             callbacks.forEach { $0(nil) }
             monitorCompanionAuditionPair(id: id)
         }
     }
 
     private func monitorCompanionAuditionPair(id: UUID) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+        let work = DispatchWorkItem { [weak self] in
             guard let self, let audition = self.btTrimLock.withLock({ self.companionAudition }),
                   audition.id == id, audition.phase == .active else { return }
             if !self.companionAuditionPairIsLive(targetID: audition.targetID,
@@ -2215,6 +2529,7 @@ extension NativeBackend: BTOutputControlling {
                 self.monitorCompanionAuditionPair(id: id)
             }
         }
+        delayClock(0.25, .main, work)
     }
 
     public func endCompanionAlignmentAudition(
@@ -2227,7 +2542,7 @@ extension NativeBackend: BTOutputControlling {
                 guard audition.targetID == targetID else {
                     return (nil, "A different speaker click session is running.")
                 }
-                if let deadline = audition.cleanupDeadline, Date() >= deadline {
+                if let deadline = audition.cleanupDeadline, self.uptimeClock() >= deadline {
                     return (nil, "Restoring the speaker levels took too long. Try again shortly.")
                 }
                 audition.stopCompletions.append(completion)
@@ -2249,7 +2564,7 @@ extension NativeBackend: BTOutputControlling {
                   !audition.cleanupStarted else { return nil }
             audition.cleanupStarted = true
             audition.phase = .cleaning
-            audition.cleanupDeadline = Date().addingTimeInterval(companionAuditionStopSeconds)
+            audition.cleanupDeadline = uptimeClock() + companionAuditionStopSeconds
             let callbacks = audition.startCompletions
             audition.startCompletions = []
             companionAudition = audition
@@ -2269,7 +2584,11 @@ extension NativeBackend: BTOutputControlling {
             self?.timeoutCompanionAuditionStop(id: id)
         })
         stateQueue.async {
+            let roomBefore = self.roomDelayLocked()
             self.companionTickParticipants = nil
+            if self.roomDelayLocked() != roomBefore {
+                self.roomDelayChangedLocked(cause: "wizard_hold")
+            }
             for uid in self.btSelectedUIDs { self.pushBTSinkGainLocked(uid) }
             for castID in self.castSelectedIDs { self.pushCastLevelLocked(castID) }
             self.pushSyncedLocalGain()
@@ -2443,8 +2762,8 @@ extension NativeBackend: BTOutputControlling {
                 guard companionDemoTargetUID == nil, btWizardTickActive == false else { return false }
                 let trim = btTrimsByUID[targetID] ?? 0
                 companionAlignmentRun = CompanionAlignmentRun(
-                    targetUID: targetID, phase: .tick,
-                    staggerMs: 0, trimAtSessionStartMs: trim, liveTrimMs: trim)
+                    targetUID: targetID, referenceUID: nil, phase: .tick,
+                    trimAtSessionStartMs: trim, liveTrimMs: trim)
                 return true
             }
             guard claimed else {
@@ -2629,6 +2948,7 @@ extension NativeBackend: BTOutputControlling {
             guard self.btWizardReferenceRaised else { return }
             self.btWizardReferenceRaised = false
             self.updateBTReferenceBufferLocked()
+            self.btWizardReferencePinnedMs = Self.btWizardReferenceBufferMs
         }
     }
 
@@ -2689,7 +3009,8 @@ extension NativeBackend: BTOutputControlling {
         // wrong early answer, so the range gives it somewhere to go.
         let reference = stateQueue.sync { () -> Int in
             btComposition.usesPresentationReference
-                ? roomDelayLocked() : Self.btWizardReferenceBufferMs
+                ? roomDelayLocked()
+                : btWizardReferenceRaised ? btWizardReferencePinnedMs : Self.btWizardReferenceBufferMs
         }
         let lower = -BTSyncTrim.rangeMs
         let upper = Double(reference) - Double(BTSyncedSink.defaultBTOnlyBufferMs)
@@ -2813,7 +3134,7 @@ extension NativeBackend: BTOutputControlling {
     /// `captureControlQueue`.
     private func beginWizardArmGate(expecting uids: Set<String>) {   // captureControlQueue
         cancelWizardArmGate()
-        scheduleWizardArmPoll(started: Date(), releasedAt: nil, expecting: uids)
+        scheduleWizardArmPoll(started: uptimeClock(), releasedAt: nil, expecting: uids)
     }
 
     /// `captureControlQueue`. Idempotent.
@@ -2822,24 +3143,23 @@ extension NativeBackend: BTOutputControlling {
         wizardArmPollWork = nil
     }
 
-    private func scheduleWizardArmPoll(started: Date, releasedAt: Date?,
+    private func scheduleWizardArmPoll(started: TimeInterval, releasedAt: TimeInterval?,
                                        expecting uids: Set<String>) {
         let work = DispatchWorkItem { [weak self] in
             self?.pollWizardArmGate(started: started, releasedAt: releasedAt, expecting: uids)
         }
         wizardArmPollWork = work
-        captureControlQueue.asyncAfter(
-            deadline: .now() + wizardArmPollInterval, execute: work)
+        delayClock(wizardArmPollInterval, captureControlQueue, work)
     }
 
     /// One arm-gate poll. `captureControlQueue`, which owns both sinks — and is
     /// not a render or tap thread, so the one telemetry line at the end is
     /// emitted where it belongs.
-    private func pollWizardArmGate(started: Date, releasedAt: Date?,
+    private func pollWizardArmGate(started: TimeInterval, releasedAt: TimeInterval?,
                                    expecting uids: Set<String>) {
         wizardArmPollWork = nil
-        let now = Date()
-        let waited = now.timeIntervalSince(started)
+        let now = uptimeClock()
+        let waited = now - started
         let rendering = btSink?.renderingDeviceUIDs() ?? []
         // `true` when there is no local sink at all: nothing to wait for.
         let localReleased = syncedLocalSink?.hasStartedRendering ?? true
@@ -2859,7 +3179,7 @@ extension NativeBackend: BTOutputControlling {
         // still awake. A release seen between two polls is dated to the poll
         // that saw it, which errs long by at most one interval.
         let releasedAt = releasedAt ?? (everyoneReleased ? now : nil)
-        let bedSeconds = releasedAt.map { now.timeIntervalSince($0) } ?? 0
+        let bedSeconds = releasedAt.map { now - $0 } ?? 0
         let ready = everyoneReleased && bedSeconds >= wizardArmMinimumBedSeconds
         // The ceiling is for a speaker that never releases. One that has
         // released is owed its bed however late it got there.
@@ -2878,5 +3198,6 @@ extension NativeBackend: BTOutputControlling {
             "localReleased": localReleased ? "1" : "0",
             "timedOut": ready ? "0" : "1",
         ])
+        btSink?.logHealthNow(at: "wizard_armed", uids: uids)
     }
 }

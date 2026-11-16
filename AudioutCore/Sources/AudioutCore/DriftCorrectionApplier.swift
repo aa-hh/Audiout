@@ -75,12 +75,9 @@ final class DriftCorrectionApplier: @unchecked Sendable {
     /// `.scheduleVerify` for a guessed attribution, and without this the only
     /// window that could check one is the next periodic one, three minutes on.
     private let scheduleVerify: @Sendable ([String]) -> Void
-    /// How long one slew step waits. Only the tests pass anything but
-    /// ``slewStepSeconds`` — shortening it there keeps a rate-cap assertion
-    /// from costing the suite whole seconds.
-    private let stepSeconds: Double
-    /// Only the tests pass anything but ``verifySettleSeconds``.
-    private let verifySeconds: Double
+    /// Schedules the verify window ``verifySettleSeconds`` on. Only the tests
+    /// pass anything but `NativeBackend.dispatchDelayClock`.
+    private let verifyClock: NativeBackend.DelayClock
     /// Only the tests pass anything but ``dispatchSlewClock``: a step landing
     /// while a sink renders costs that cycle its audio, and a test rendering
     /// far denser than playback does sees that collision where music never
@@ -110,11 +107,9 @@ final class DriftCorrectionApplier: @unchecked Sendable {
          programIsSilent: @escaping @Sendable () -> Bool,
          scheduleVerify: @escaping @Sendable ([String]) -> Void,
          policy: DriftCorrectionPolicy = DriftCorrectionPolicy(),
-         stepSeconds: Double = DriftCorrectionApplier.slewStepSeconds,
-         verifySeconds: Double = DriftCorrectionApplier.verifySettleSeconds,
+         verifyClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
          slewClock: @escaping SlewClock = DriftCorrectionApplier.dispatchSlewClock) {
-        self.stepSeconds = stepSeconds
-        self.verifySeconds = verifySeconds
+        self.verifyClock = verifyClock
         self.slewClock = slewClock
         self.isBluetooth = isBluetooth
         self.currentLatencyMs = currentLatencyMs
@@ -261,11 +256,11 @@ final class DriftCorrectionApplier: @unchecked Sendable {
         awaitingVerify.formUnion(deviceUIDs)
         Telemetry.log(.localPlayback, "drift_verify_scheduled", [
             "devices": deviceUIDs.sorted().joined(separator: ","),
-            "afterSeconds": String(format: "%.0f", verifySeconds),
+            "afterSeconds": String(format: "%.0f", Self.verifySettleSeconds),
         ])
-        queue.asyncAfter(deadline: .now() + verifySeconds) { [weak self] in
+        verifyClock(Self.verifySettleSeconds, queue, DispatchWorkItem { [weak self] in
             self?.scheduleVerify(deviceUIDs)
-        }
+        })
     }
 
     /// `queue` only. A correction has finished moving, which may be the last
@@ -312,7 +307,7 @@ final class DriftCorrectionApplier: @unchecked Sendable {
     /// `queue` only.
     private func startTimerIfNeeded() {
         guard cancelSlewClock == nil else { return }
-        cancelSlewClock = slewClock(stepSeconds, queue) { [weak self] in self?.stepSlews() }
+        cancelSlewClock = slewClock(Self.slewStepSeconds, queue) { [weak self] in self?.stepSlews() }
     }
 
     /// `queue` only. One step of every running slew — or, the moment the music

@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
-import CoreImage
-import CoreImage.CIFilterBuiltins
 
 /// The Mac's one invitation to Audiout Remote (`shape-mac-invites.md`): a QR
-/// tile carrying ``RemoteInviteView/pageURLString``, with the address as text
-/// under it. Each host writes its own heading and line around this.
+/// tile carrying ``RemoteInviteView/codeURLString``, with the page address as
+/// text under it. Each host writes its own heading and line around this.
 ///
-/// Three hosts mount this same view at three sizes — the alignment wizard
-/// sheet's first page (96 pt), Settings › General under the Allow switch
-/// (72 pt), and the Setup window's iPhone card (160 pt). It is never a button
+/// Two hosts mount this same view at two sizes — Settings › Audiout Remote
+/// (96 pt) and the Setup window's iPhone card (160 pt). The alignment wizard
+/// dropped its tile for a text link (owner ruling 2026-11-01). It is never a button
 /// and never gold: it is information a person takes to their phone, and the
 /// only pressable way to the same page is the stock push button each host
 /// puts beside it.
@@ -20,7 +18,7 @@ import CoreImage.CIFilterBuiltins
 /// white paper is what a scanner is built for, and a "dark mode" code is a
 /// code that fails in the dark. It joins the wizard stage and the EQ scope
 /// under PRODUCT.md's "instruments never theme", which is why the two fixed
-/// colours here are `NSColor.white` and the generator's own black rather than
+/// colours here are `NSColor.white` and the artwork's own black rather than
 /// `Tokens` values (the sanctioned-exception rule asks for a written reason,
 /// and this is it).
 ///
@@ -29,11 +27,16 @@ import CoreImage.CIFilterBuiltins
 /// modules; the address is the thing it can read out.
 public final class RemoteInviteView: NSView {
 
-    /// What every QR tile in the app encodes, and the one page all four
-    /// invitations point at. Before the iPhone app is on the store this page
-    /// says so and takes an email; after it, it carries the store badge. No
-    /// Mac string names the store, so nothing here changes on launch day.
+    /// The page every host's "Open audiout.app/remote" button opens and every
+    /// tile prints under the code. Before the iPhone app is on the store this
+    /// page says so and takes an email; after it, it carries the store badge.
     public static let pageURLString = "https://audiout.app/remote"
+
+    /// What every QR tile encodes: the App Store listing itself, so a scan
+    /// lands one tap from installing (owner decision 2026-11-01). Baked into
+    /// `Resources/Audiout-Remote-QR.pdf`; this copy exists so a test can read
+    /// the drawn code back and catch artwork that drifted from it.
+    public static let codeURLString = "https://apps.apple.com/app/audiout-remote/id6804838945"
 
     /// The same address as the user reads and types it: no scheme, caption
     /// voice, printed beside every tile.
@@ -43,9 +46,11 @@ public final class RemoteInviteView: NSView {
     /// buttons.
     public static var pageURL: URL { URL(string: pageURLString)! }
 
-    /// The three tile sizes, one per host (`shape-mac-invites.md` §5.1).
-    public static let settingsTileSide: CGFloat = 72
-    public static let wizardTileSide: CGFloat = 96
+    /// The tile sizes, one per host (`shape-mac-invites.md` §5.1). The
+    /// designed code is denser than the generated one it replaced (41 modules
+    /// against 25), and at 72 pt it stops scanning on a 1x display; 84 pt is
+    /// the measured floor, 96 the size with room above it.
+    public static let settingsTileSide: CGFloat = 96
     public static let setupTileSide: CGFloat = 160
 
     private let tile: QRTileView
@@ -91,23 +96,31 @@ public final class RemoteInviteView: NSView {
 
 /// The QR tile itself: a square of white paper carrying the code.
 ///
-/// Modules are drawn at a whole number of DEVICE pixels with interpolation
-/// off, so no module ever lands on a half pixel and blurs — that is what a
-/// camera fails to read. Whatever the scale leaves over stays white, which is
-/// the quiet zone doing its job: the code carries a four-module margin at
-/// minimum and more is never worse.
+/// The code is designed artwork (`Resources/Audiout-Remote-QR.pdf`: rounded
+/// modules, the brand mark in the middle), not a generated bitmap, so it is
+/// drawn smoothed at any scale rather than snapped to device pixels. The tile
+/// pads it so the white margin is at least four modules on every side, the QR
+/// standard's own quiet zone, at every size.
 private final class QRTileView: NSView {
 
-    /// Four modules of white on every side is the QR standard's own quiet
-    /// zone. `CIFilter.qrCodeGenerator()` already draws ONE of them into its
-    /// output (measured: a 25-module symbol comes back 27 px square), so the
-    /// tile adds the other three.
+    /// The artwork's geometry, measured from the designer's 512-unit SVG: 41
+    /// modules of 11 units each, with 30 units (under three modules) of white
+    /// around them. Only the ratios matter; the PDF is drawn to fit.
+    ///
+    /// The bundled copy is a PDF (`rsvg-convert -f pdf`) because NSImage's
+    /// own SVG renderer ignores the artwork's clip path and draws the module
+    /// layer as one solid black square.
+    private static let artworkSide: CGFloat = 512
+    private static let artworkMargin: CGFloat = 30
+    private static let moduleSide: CGFloat = 11
     private static let quietZoneModules: CGFloat = 4
-    private static let generatorQuietZoneModules: CGFloat = 1
 
-    /// One generated code, shared by every tile — all three sizes carry the
-    /// same address, and the generator is the expensive part.
-    private static let code: CGImage? = makeCode(RemoteInviteView.pageURLString)
+    /// One image, shared by every tile — every size carries the same code.
+    /// `nil` only if the bundled asset is missing, which leaves a blank tile
+    /// rather than a crash (the same degrade as ``BrandMark``).
+    private static let code: NSImage? = BrandMark.resourceBundle
+        .flatMap { $0.url(forResource: "Audiout-Remote-QR", withExtension: "pdf") }
+        .flatMap { NSImage(contentsOf: $0) }
 
     let side: CGFloat
 
@@ -125,53 +138,38 @@ private final class QRTileView: NSView {
 
     override var isOpaque: Bool { true }
 
-    /// A change of screen changes how many device pixels a module gets.
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        needsDisplay = true
-    }
-
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         // FIXED, both appearances and every accent-dial position — see
         // `RemoteInviteView`'s note on why a QR code is not chrome.
         NSColor.white.setFill()
         bounds.fill()
-        guard let code = Self.code, let context = NSGraphicsContext.current?.cgContext else { return }
-        let modules = CGFloat(code.width)
-        let scale = moduleScale(modules: modules)
-        let drawn = modules * scale
-        let origin = ((side - drawn) / 2).rounded(.down)
-        context.interpolationQuality = .none
-        context.draw(code, in: CGRect(x: origin, y: origin, width: drawn, height: drawn))
+        guard let code = Self.code else { return }
+        // Grow the artwork's own margin to the full quiet zone: the artwork
+        // is drawn into a square that much smaller than the tile.
+        let quiet = Self.quietZoneModules * Self.moduleSide
+        let extra = max(0, quiet - Self.artworkMargin)
+        let drawn = side * Self.artworkSide / (Self.artworkSide + 2 * extra)
+        let origin = (side - drawn) / 2
+        NSGraphicsContext.current?.imageInterpolation = .high
+        code.draw(in: NSRect(x: origin, y: origin, width: drawn, height: drawn))
     }
 
-    /// Points per module: the largest whole number of device pixels that
-    /// still leaves the quiet zone.
-    private func moduleScale(modules: CGFloat) -> CGFloat {
-        let pixel = 1 / max(1, window?.backingScaleFactor ?? 1)
-        let extraQuiet = (Self.quietZoneModules - Self.generatorQuietZoneModules) * 2
-        let fits = side / (modules + extraQuiet)
-        return max(pixel, (fits / pixel).rounded(.down) * pixel)
-    }
-
-    /// The tile as an image, for the test that decodes it back.
+    /// The tile as an image, for the test that decodes it back — at ONE
+    /// pixel per point, the hardest display it ships to, rather than the test
+    /// Mac's own Retina scale, where a code too dense for 1x still decodes.
     func render() -> NSImage {
-        let image = NSImage(size: NSSize(width: side, height: side))
-        image.lockFocus()
+        let pixels = Int(side)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return NSImage() }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         draw(bounds)
-        image.unlockFocus()
+        NSGraphicsContext.restoreGraphicsState()
+        let image = NSImage(size: NSSize(width: side, height: side))
+        image.addRepresentation(rep)
         return image
-    }
-
-    private static func makeCode(_ text: String) -> CGImage? {
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(text.utf8)
-        // Level M: the middle of the four, and what a printed code this size
-        // is normally cut at. Level L would not shrink this address's symbol
-        // (both land on version 2, 25 modules).
-        filter.correctionLevel = "M"
-        guard let output = filter.outputImage else { return nil }
-        return CIContext(options: nil).createCGImage(output, from: output.extent)
     }
 }

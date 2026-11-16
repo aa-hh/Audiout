@@ -14,8 +14,11 @@ import Foundation
 /// keeps it structurally unreachable there.
 ///
 /// The gate is the first-open welcome for an install with no key and no trial.
-/// Everything else the server declines — an ended trial, a refunded or revoked
-/// key — keeps running, limited to one speaker (`limitsToOneSpeaker`).
+/// A Mac that has held a paid licence (`AppSettings.hasHeldPaidLicense`) meets
+/// it too, offered "Continue on one speaker" instead of a trial; once tapped
+/// (`AppSettings.hasChosenOneSpeaker`) the gate stays away and the Mac runs
+/// limited. Everything else the server declines — an ended trial, a refunded or
+/// revoked key — keeps running, limited to one speaker (`limitsToOneSpeaker`).
 ///
 /// Both stay offline-tolerant: `licenseUnregistered` treats a stored key with
 /// no verdict as registered (the soft-check posture), so a key accepted while
@@ -25,14 +28,15 @@ public enum LicenseGate {
 
     public static func shouldPresent(
         settings: AppSettings,
-        presentation: LicenseGatePresentation = .resolved()
+        presentation: LicenseGatePresentation? = nil
     ) -> Bool {
-        switch presentation {
+        switch presentation ?? .resolved(settings: settings) {
         case .forceShow: return true
         case .forceHide: return false
         case .auto:
             guard settings.licenseServerURL != nil,
-                  (settings.licenseKey ?? "").isEmpty,
+                  !settings.hasLicenseKey,
+                  !settings.hasChosenOneSpeaker,
                   case .none = TrialClock.state(settings: settings) else {
                 return false
             }
@@ -43,9 +47,11 @@ public enum LicenseGate {
     /// Whether this install plays on one speaker at a time: an official build
     /// the server declined, or whose trial ended with a verdict on record. A
     /// freshly typed key with no verdict yet (`licenseStatus == nil`) is not
-    /// limited — the soft-check posture.
+    /// limited — the soft-check posture. The website's app-config can waive the
+    /// limit (``RemoteAppConfig``); a stale or missing file never limits anyone.
     public static func limitsToOneSpeaker(settings: AppSettings) -> Bool {
         guard settings.licenseServerURL != nil else { return false }
+        if RemoteAppConfig.licenseCheckWaived(settings: settings) { return false }
         var declined = settings.licenseUnregistered
         if case .expired = TrialClock.state(settings: settings), settings.licenseStatus != nil {
             declined = true
@@ -58,7 +64,7 @@ public enum LicenseGate {
     public static func owesThankYouCard(settings: AppSettings) -> Bool {
         settings.licenseServerURL != nil
             && settings.licenseStatus == .active
-            && !(settings.licenseKey ?? "").isEmpty
+            && settings.hasLicenseKey
             && settings.trialStartedAt != nil
             && settings.trialExpiresAt == nil
             && !settings.licenseThankYouShown
@@ -68,7 +74,7 @@ public enum LicenseGate {
     /// the open after its thank-you card. The host reads it on open.
     public static func owesConversionConsentAsk(settings: AppSettings) -> Bool {
         settings.licenseStatus == .active
-            && !(settings.licenseKey ?? "").isEmpty
+            && settings.hasLicenseKey
             && settings.trialStartedAt != nil
             && settings.trialExpiresAt == nil
             && settings.licenseThankYouShown
@@ -86,7 +92,7 @@ public enum LicenseGate {
     /// ``AppSettings/licenseUnregistered`` to read, and without this clause a
     /// Mac on day one of its trial would run limited to one speaker.
     private static func trialIsRunningWithoutAKey(settings: AppSettings) -> Bool {
-        guard (settings.licenseKey ?? "").isEmpty else { return false }
+        guard !settings.hasLicenseKey else { return false }
         if case .active = TrialClock.state(settings: settings) { return true }
         return false
     }
@@ -96,8 +102,10 @@ public enum LicenseGate {
 /// (sibling of `AIRPLAY_SETUP`). Dev builds carry no licence server, so without
 /// `force` the gate is invisible in the whole dev loop — this is how the window
 /// itself gets iterated on; `skip` keeps a URL-carrying test build out of the
-/// way.
-public enum LicenseGatePresentation {
+/// way. A dev build also reads the Settings › General › Developer "Licence
+/// gate" popup (``AppSettings/licenseGatePresentation``) when the env var is
+/// unset.
+public enum LicenseGatePresentation: String {
     case auto
     case forceShow
     case forceHide
@@ -105,20 +113,27 @@ public enum LicenseGatePresentation {
     public static let environmentVariableName = "AUDIOUT_LICENSE_GATE"
 
     /// Same posture as `SetupPresentation.resolved`: a dev knob, so an
-    /// unrecognized value warns once on stderr and falls back to `.auto`.
+    /// unrecognized value warns once on stderr and falls through.
+    ///
+    /// Priority: a recognised env var, then the Settings › General › Developer
+    /// popup (``AppSettings/licenseGatePresentation``) on a dev build only,
+    /// then `.auto`. A shipping build never reads the stored setting.
     public static func resolved(
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        settings: AppSettings = AppSettings(),
+        isDevBuild: Bool = AppSettings.isDevBuild
     ) -> LicenseGatePresentation {
-        guard let raw = environment[environmentVariableName]?.lowercased() else { return .auto }
-        switch raw {
-        case "force", "show", "always", "on", "1":  return .forceShow
-        case "skip", "hide", "off", "never", "0":   return .forceHide
-        case "auto", "default":                     return .auto
-        default:
-            FileHandle.standardError.write(
-                Data("warning: unrecognized \(environmentVariableName) value \"\(raw)\" — using auto\n".utf8))
-            return .auto
+        if let raw = environment[environmentVariableName]?.lowercased() {
+            switch raw {
+            case "force", "show", "always", "on", "1":  return .forceShow
+            case "skip", "hide", "off", "never", "0":   return .forceHide
+            case "auto", "default":                     return .auto
+            default:
+                FileHandle.standardError.write(
+                    Data("warning: unrecognized \(environmentVariableName) value \"\(raw)\" — ignoring it\n".utf8))
+            }
         }
+        return isDevBuild ? settings.licenseGatePresentation : .auto
     }
 }
 
@@ -127,6 +142,11 @@ public enum LicenseGatePresentation {
 /// surfaces can never drift apart. Plain words; failure lines name the problem
 /// and the recovery.
 public enum LicenseCopy {
+
+    /// The trial's days-left line, shared by the popover's pill and Settings.
+    public static func trialPillText(daysLeft: Int) -> String {
+        "Trial · \(daysLeft) day\(daysLeft == 1 ? "" : "s") left"
+    }
 
     /// A refused key on a limited install, named by the server's `reason`
     /// (`AppSettings.licenseReason`): the popover's standing note and the
@@ -141,6 +161,7 @@ public enum LicenseCopy {
         switch reason {
         case "refund": return "This key was refunded"
         case "chargeback": return "This key\u{2019}s payment was reversed"
+        case "test_purchase_expired": return "This test purchase has expired"
         default: return "This key was revoked"
         }
     }

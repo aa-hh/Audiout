@@ -44,6 +44,19 @@ if [ -z "${AUDIOUT_LICENSE_URL:-}" ]; then
   exit 1
 fi
 
+# make-app.sh bakes these dev diagnostics into LSEnvironment whenever the shell
+# exports them, and every buyer's copy would then log or label itself as a dev
+# build. A Claude Code session exports AIRPLAY_AUDIO_DIAG, which is how a 1.3.0
+# candidate first came out with it. Keep this list in step with make-app.sh's.
+for diag in AUDIOUT_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL AUDIOUT_TCC_DIAG \
+            AIRPLAY_AUDIO_DIAG AIRPLAY_DEBUG_LATENCY; do
+  eval "val=\${$diag:-}"
+  if [ -n "$val" ]; then
+    echo "ERROR: $diag is set ($val) — make-app.sh would bake it into this release build. Unset it (env -u $diag …) and run again" >&2
+    exit 1
+  fi
+done
+
 # Same reasoning: the first-open gate's only route for someone without a key
 # is its "Buy Audiout" button, and that button hides itself without this.
 export AUDIOUT_BUY_URL="${AUDIOUT_BUY_URL:-https://audiout.app/buy}"

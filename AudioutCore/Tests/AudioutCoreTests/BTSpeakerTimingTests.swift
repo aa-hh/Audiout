@@ -24,10 +24,10 @@ import Testing
 
     private func timing(_ store: StoredOffsets = StoredOffsets(),
                         stored: Double? = 300,
-                        floorRebroadcastDelay: TimeInterval = BTSpeakerTiming.settleSeconds)
+                        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock)
         -> BTSpeakerTiming {
         BTSpeakerTiming(storedOffsetMs: { uid in store.read(uid) ?? stored },
-                        floorRebroadcastDelay: floorRebroadcastDelay)
+                        delayClock: delayClock)
     }
 
     // MARK: The pure rules
@@ -327,16 +327,17 @@ import Testing
 
     /// Nothing fires at the instant the floor expires — the detector only
     /// speaks while the speaker plays — so the link-up arms its own re-check.
-    /// The connect instant is backdated so the shortened timer lands past the
-    /// floor.
+    /// The connect instant is backdated so the re-check, fired by hand, lands
+    /// past the floor.
     @Test func theFloorsExpiryRebroadcastsWhenNoEvidenceEverCame() {
-        let timing = self.timing(floorRebroadcastDelay: 0.05)
+        let clock = ManualDelayClock()
+        let timing = self.timing(delayClock: clock.clock)
         let changes = counting(timing)
         timing.noteConnected(
             uid: "speaker-a",
             at: Date().addingTimeInterval(-BTSpeakerTiming.settleSeconds - 1))
         #expect(changes.value == 1, "the connect itself")
-        SuiteWait.untilOnRunLoop("the floor's expiry to rebroadcast") { changes.value == 2 }
+        clock.fireAll()
         #expect(changes.value == 2, "the verdict flipped on a clock, so the phone has to be told")
         #expect(timing.report(uid: "speaker-a").clockState == .steady)
     }
@@ -511,44 +512,93 @@ import Testing
         ]
     }
 
-    @Test func aTargetThatIsNotPlayingIsRefusedByName() {
+    /// Turns red if the refusal of a target that is not a Main Out member
+    /// returns: the coordinator selects a silent target for the run itself.
+    @Test func aSilentTargetIsStagedAgainstTheMacsOwnOutput() {
         let outcome = CompanionAlignmentPreconditions.evaluate(
-            targetID: "bt-a", among: room(), isAudible: { $0 == "local" })
-        #expect(outcome == .refused(
-            "\u{201C}Kitchen\u{201D} isn't playing right now, so there's nothing to measure."))
+            targetID: "bt-a", referenceID: nil, among: room(), isAudible: { _ in false })
+        #expect(outcome == .ready(referenceID: "local"))
     }
 
-    @Test func aPlayingTargetWithNothingElseAudibleIsRefused() {
+    /// Turns red if the reference candidates are filtered by audibility again:
+    /// the Mac's own output is the reference even when nothing selects it.
+    @Test func theMacsOwnOutputIsTheReferenceEvenWhenSilent() {
         let outcome = CompanionAlignmentPreconditions.evaluate(
-            targetID: "bt-a", among: room(), isAudible: { $0 == "bt-a" })
-        #expect(outcome == .refused("Nothing else is playing to compare \u{201C}Kitchen\u{201D} against."))
+            targetID: "bt-a", referenceID: nil, among: room(), isAudible: { $0 == "bt-a" })
+        #expect(outcome == .ready(referenceID: "local"))
     }
 
     /// A Cast receiver plays seconds behind live, so it is never a reference —
-    /// a room where it is the only other audible device has none.
+    /// a room where it is the only other device has none. Turns red if the
+    /// fallback stops excluding Cast.
     @Test func aCastReceiverIsNeverTheReference() {
+        let castOnly = [
+            Device(id: "bt-a", name: "Kitchen", kind: .bluetooth),
+            Device(id: "cast", name: "Nest", kind: .cast),
+        ]
         let outcome = CompanionAlignmentPreconditions.evaluate(
-            targetID: "bt-a", among: room(), isAudible: { $0 == "bt-a" || $0 == "cast" })
-        #expect(outcome == .refused("Nothing else is playing to compare \u{201C}Kitchen\u{201D} against."))
+            targetID: "bt-a", referenceID: nil, among: castOnly, isAudible: { _ in true })
+        #expect(outcome == .refused("Nothing else to compare \u{201C}Kitchen\u{201D} against."))
     }
 
     @Test func theMacsOwnOutputIsPreferredOverAnotherSpeaker() {
         let outcome = CompanionAlignmentPreconditions.evaluate(
-            targetID: "bt-a", among: room(), isAudible: { _ in true })
+            targetID: "bt-a", referenceID: nil, among: room(), isAudible: { _ in true })
         #expect(outcome == .ready(referenceID: "local"))
     }
 
+    /// Turns red if the fallback stops preferring the one audible speaker
+    /// when the room has no Mac output.
     @Test func anotherBluetoothSpeakerIsTakenWhenTheMacIsSilent() {
+        let noMac = room().filter { $0.id != "local" }
         let outcome = CompanionAlignmentPreconditions.evaluate(
-            targetID: "bt-a", among: room(), isAudible: { $0 == "bt-a" || $0 == "bt-b" })
+            targetID: "bt-a", referenceID: nil, among: noMac, isAudible: { $0 == "bt-a" || $0 == "bt-b" })
         #expect(outcome == .ready(referenceID: "bt-b"))
     }
 
     @Test func aDeviceThatIsNotBluetoothIsNotAMeasurableTarget() {
         #expect(CompanionAlignmentPreconditions.evaluate(
-            targetID: "local", among: room(), isAudible: { _ in true }) == .refused("Unknown speaker."))
+            targetID: "local", referenceID: nil, among: room(), isAudible: { _ in true })
+            == .refused("Unknown speaker."))
         #expect(CompanionAlignmentPreconditions.evaluate(
-            targetID: "nobody", among: room(), isAudible: { _ in true }) == .refused("Unknown speaker."))
+            targetID: "nobody", referenceID: nil, among: room(), isAudible: { _ in true })
+            == .refused("Unknown speaker."))
+    }
+
+    /// Turns red if a reference the phone names is ignored or refused while
+    /// it is one of the Mac's own outputs.
+    @Test func aNamedLocalCandidateWins() {
+        let outcome = CompanionAlignmentPreconditions.evaluate(
+            targetID: "bt-a", referenceID: "local", among: room(), isAudible: { _ in false })
+        #expect(outcome == .ready(referenceID: "local"))
+    }
+
+    /// Turns red if a named reference equal to the fallback default is refused
+    /// because it is not one of the Mac's own outputs.
+    @Test func aNamedReferenceEqualToTheFallbackDefaultIsAccepted() {
+        let noMac = room().filter { $0.id != "local" }
+        let outcome = CompanionAlignmentPreconditions.evaluate(
+            targetID: "bt-a", referenceID: "bt-b", among: noMac, isAudible: { $0 == "bt-b" })
+        #expect(outcome == .ready(referenceID: "bt-b"))
+    }
+
+    /// Turns red if the Mac accepts any speaker the phone names instead of
+    /// only its own outputs or the default.
+    @Test func aNamedReferenceThatIsNeitherCandidateNorDefaultIsRefused() {
+        let outcome = CompanionAlignmentPreconditions.evaluate(
+            targetID: "bt-a", referenceID: "bt-b", among: room(), isAudible: { _ in true })
+        #expect(outcome == .refused("\u{201C}Study\u{201D} can't be compared against right now."))
+        let cast = CompanionAlignmentPreconditions.evaluate(
+            targetID: "bt-a", referenceID: "cast", among: room(), isAudible: { _ in true })
+        #expect(cast == .refused("\u{201C}Nest\u{201D} can't be compared against right now."))
+    }
+
+    /// Turns red if a named reference missing from the room is staged or
+    /// reported as anything but unknown.
+    @Test func aNamedReferenceNotInTheRoomIsUnknown() {
+        let outcome = CompanionAlignmentPreconditions.evaluate(
+            targetID: "bt-a", referenceID: "nobody", among: room(), isAudible: { _ in true })
+        #expect(outcome == .refused("Unknown speaker."))
     }
 }
 
@@ -607,13 +657,13 @@ extension SerializedSharedState {
                         speakerKey: String = "7",
                         codec: String? = nil,
                         deviceClassMinor: UInt32? = 5,
-                        floorRebroadcastDelay: TimeInterval = BTSpeakerTiming.settleSeconds)
+                        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock)
         -> BTSpeakerTiming {
         BTSpeakerTiming(storedOffsetMs: { _ in storedOffsetMs },
                         speakerKey: { _ in speakerKey },
                         codec: { _ in codec },
                         deviceClassMinor: { _ in deviceClassMinor },
-                        floorRebroadcastDelay: floorRebroadcastDelay)
+                        delayClock: delayClock)
     }
 
     /// Ten jump-free seconds, which is what the detector calls settled.
@@ -694,11 +744,13 @@ extension SerializedSharedState {
     /// slowest bucket, which is a measurement of nothing.
     @Test func secondsToSettleIsAbsentWhenTheFloorMadeTheVerdict() {
         withSinks { lines, events in
-            let timing = self.timing(floorRebroadcastDelay: 0.05)
-            // Backdated so the shortened timer lands past the floor itself,
-            // which is what makes the verdict steady with no evidence at all.
+            let clock = ManualDelayClock()
+            let timing = self.timing(delayClock: clock.clock)
+            // Backdated so the re-check, fired by hand, lands past the floor
+            // itself, which is what makes the verdict steady with no evidence at all.
             timing.noteConnected(
                 uid: self.uid, at: Date().addingTimeInterval(-BTSpeakerTiming.settleSeconds - 1))
+            clock.fireAll()
             SuiteWait.untilOnRunLoop("the floor's expiry to record the link") {
                 lines.lines(evt: "bt_link_settled").count == 1
             }

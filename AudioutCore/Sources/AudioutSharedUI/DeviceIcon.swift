@@ -88,6 +88,7 @@ public enum DeviceIcon {
     static let rowGlyphFits: [String: (pointSize: CGFloat, dx: CGFloat, dy: CGFloat)] = [
         "hifispeaker.fill": (18, 0, 0),
         "homepod.fill": (19, 0, 0),
+        "homepodmini.fill": (19, 0, 0),
         "appletv.fill": (16, 0, 0),
         "wifi.router.fill": (14.75, 0.25, 1.25),
         "laptopcomputer": (14.25, 0, 0.25),
@@ -233,8 +234,9 @@ public final class DeviceIconController {
 
     /// The symbol to render for `device`: its override if one is set and
     /// still valid on this OS, else the device's own default (`Device`'s
-    /// `symbolName`, which is the kind's glyph everywhere except a Bluetooth
-    /// pairing that reports itself as headphones or car audio).
+    /// `symbolName`, which is the kind's glyph everywhere except a HomePod
+    /// mini and a Bluetooth pairing that names its product or reports itself
+    /// as headphones or car audio).
     public func symbolName(for device: Device) -> String {
         DeviceIcon.resolve(overrides[device.id], default: device.symbolName)
     }

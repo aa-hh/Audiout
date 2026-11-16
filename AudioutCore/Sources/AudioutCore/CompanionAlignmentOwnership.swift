@@ -155,6 +155,38 @@ import Foundation
         return current
     }
 
+    /// How a prepared probe run ended without playing.
+    public enum PreparedProbeEnd: Sendable, Equatable {
+        /// The phone's own start was refused; `clientID` is the phone that asked.
+        case startRefused(clientID: UUID?)
+        /// The backend's lease ran out and stood the run down.
+        /// `backendStillPrepared` is the backend's answer, read when the
+        /// report reached main: true means the target was prepared again
+        /// after the lease fired, and that newer run keeps its claim.
+        case leaseEnded(backendStillPrepared: Bool)
+    }
+
+    /// Give back the claim of a run that was prepared and ends without
+    /// playing, and drop it from `prepared`. Only a target still in `prepared`
+    /// (a start that took has already left it), and only a probe claim that
+    /// is the run's own or no claim at all: a refused start ends only the
+    /// asking phone's preparation, and nothing ends another kind of work.
+    /// Returns whether the caller gives back the run's speakers too.
+    public func endPreparedProbe(targetID: String, _ end: PreparedProbeEnd,
+                                 prepared: inout Set<String>) -> Bool {
+        let owner = entries[targetID]
+        let ownsRun: Bool
+        switch end {
+        case .startRefused(let clientID):
+            ownsRun = owner == nil || (owner?.kind == .probe && owner?.clientID == clientID)
+        case .leaseEnded(let backendStillPrepared):
+            ownsRun = !backendStillPrepared && (owner == nil || owner?.kind == .probe)
+        }
+        guard ownsRun, prepared.remove(targetID) != nil else { return false }
+        if let owner { releaseOwned(targetID: targetID, clientID: owner.clientID) }
+        return true
+    }
+
     /// Take the probe owner for a measurement report and return the phone to
     /// address the result to. Leaves any other kind — an audition especially —
     /// exactly where it is.

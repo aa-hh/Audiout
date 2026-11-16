@@ -26,6 +26,17 @@ extension SerializedSharedState {
             // No crash, no observable effect — nothing further to assert.
         }
 
+        // Turns red if `Analytics.anonymousID` stops checking consent or stops reading the sink's id.
+        @Test func anonymousIDIsNilWithoutConsentAndTheSinksIDWithIt() {
+            Analytics.install(Analytics.Sink(capture: { _, _ in }, captureError: { _, _ in },
+                                             consentChanged: { _ in }, anonymousID: { "abc-123" }),
+                              consent: false)
+            defer { Analytics.install(nil, consent: false) }
+            #expect(Analytics.anonymousID == nil)
+            Analytics.setConsent(true)
+            #expect(Analytics.anonymousID == "abc-123")
+        }
+
         @Test func installedSinkWithConsentFalseDoesNotCapture() {
             let captured = Captured()
             Analytics.install(Analytics.Sink(capture: { name, props in
@@ -36,6 +47,30 @@ extension SerializedSharedState {
             Analytics.capture("test_event", ["k": "v"])
 
             #expect(captured.events().isEmpty)
+        }
+
+        /// Red if `captureStructured` stopped checking consent (a survey answer
+        /// would leave a Mac that opted out) or stopped reaching the sink.
+        @Test func captureStructuredIsConsentGated() {
+            let captured = Captured()
+            let sink = Analytics.Sink(capture: { _, _ in }, captureError: { _, _ in }, consentChanged: { _ in },
+                                      captureStructured: { name, props in
+                                          captured.append(name, ["count": "\(props.count)"])
+                                      })
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.install(sink, consent: false)
+            Analytics.captureStructured("survey dismissed", ["$set": ["k": true]])
+            #expect(captured.events().isEmpty)
+
+            Analytics.install(Analytics.Sink(capture: { _, _ in }, captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            Analytics.captureStructured("survey dismissed", ["$set": ["k": true]])
+            #expect(captured.events().isEmpty)
+
+            Analytics.install(sink, consent: true)
+            Analytics.captureStructured("survey sent", ["$set": ["k": true]])
+            #expect(captured.events().map(\.0) == ["survey sent"])
         }
 
         @Test func installedSinkWithConsentTrueDeliversNameAndProperties() {
@@ -145,6 +180,25 @@ extension SerializedSharedState {
 
             #expect(events.events().map(\.0) == ["mixer:device_selected"])
             #expect(errors.events().map(\.0) == ["settings:save_failed"])
+        }
+
+        // Turns red if an error with a `cause` stops getting its own PostHog issue, which folds every cause back into one.
+        @Test func anErrorWithACauseIsGroupedByThatCause() {
+            let errors = Captured()
+            Analytics.install(Analytics.Sink(capture: { _, _ in },
+                                             captureError: { errors.append($0, $1) },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.captureError("airplay:connect_failed", ["cause": "timedOut", "reason": "opTimedOut"])
+            Analytics.captureError("settings:save_failed", ["store": "groups"])
+
+            #expect(errors.events().map(\.1) == [
+                ["cause": "timedOut", "reason": "opTimedOut",
+                 "$exception_fingerprint": "airplay:connect_failed:timedOut",
+                 "$issue_name": "airplay:connect_failed (timedOut)"],
+                ["store": "groups"],
+            ])
         }
 
         @Test func setConsentForwardsToConsentChangedAndGatesSubsequentCaptures() {

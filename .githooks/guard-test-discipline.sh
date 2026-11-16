@@ -6,12 +6,18 @@
 # (A @Test line added in a hunk that also removed one is a rename or an
 # attribute edit of an existing test, not a new test: replacing one @Test
 # with a different test in the same hunk, equal counts, is not checked.)
-# Three checks over staged Swift files under AudioutCore/Tests and
+# Four checks over staged Swift files under AudioutCore/Tests and
 # AirPlayEngine/Tests (root AGENTS.md "New tests buy their place"):
 #   1. every ADDED @Test has, in the comment block directly above it, a
 #      sentence naming the change that turns it red (no escape marker)
 #   2. no added print( line (trailing `print-ok` exempts)
 #   3. a NEW test file holds more than one @Test (`new-suite-ok` exempts)
+#   4. no added real-time wait outside a // comment: Task.sleep, Thread.sleep,
+#      usleep, sleep(, asyncAfter, SuiteWait.settle(, any .wait(timeout:
+#      (a hang ceiling counts), or a Timeout/Delay/Deadline/Interval/Grace/
+#      Window/Seconds name (optionally with Override and a type) set to a
+#      positive fraction of a second such as `stallSeconds = 0.05` or
+#      `makeBackend(castAbsenceGrace: 0.3)`. `real-time-ok: <reason>` exempts.
 
 # A conflict-resolution merge commit (MERGE_HEAD present) carries other
 # people's lines; a clean merge never runs pre-commit at all.
@@ -22,7 +28,7 @@ files=$(git diff --cached --name-only --diff-filter=AM -- 'AudioutCore/Tests/' '
 
 new_files=$(git diff --cached --name-only --diff-filter=A -- 'AudioutCore/Tests/' 'AirPlayEngine/Tests/' 2>/dev/null | grep -E '\.swift$')
 
-hits1=""; hits2=""; hits3=""
+hits1=""; hits2=""; hits3=""; hits4=""
 nl='
 '
 for f in $files; do
@@ -51,6 +57,11 @@ for f in $files; do
 
     p=$(git diff --cached -U0 -- "$f" | grep -E '^\+[[:space:]]*print\(' | grep -v 'print-ok')
     [ -n "$p" ] && hits2="$hits2$f$nl"
+
+    w=$(git diff --cached -U0 -- "$f" | grep -E '^\+' | grep -vE '^\+\+\+' | grep -vE '^\+[[:space:]]*//' \
+        | grep -E 'Task\.sleep|Thread\.sleep|usleep\(|(^|[^A-Za-z0-9_.])sleep\(|asyncAfter|SuiteWait\.settle\(|\.wait\(timeout:|([Tt]imeout|[Dd]elay|[Dd]eadline|[Ii]nterval|[Gg]race|[Ww]indow|[Ss]econds)(Override)?[[:space:]]*(:[[:space:]]*[A-Za-z]+[[:space:]]*)?[=:][[:space:]]*0*\.0*[1-9]' \
+        | grep -vE 'real-time-ok:[[:space:]]*[^[:space:]]')
+    [ -n "$w" ] && hits4="$hits4$f$nl"
 
     case "$nl$new_files$nl" in
     *"$nl$f$nl"*)
@@ -87,6 +98,21 @@ if [ -n "$hits3" ]; then
     printf '%s' "$hits3" | sed 's/^/    /' >&2
     echo "  Root AGENTS.md: \"Extend before adding… a new test beats a new suite.\"" >&2
     echo "  Add it to an existing suite, or put 'new-suite-ok' in the file." >&2
+    echo "  ('git commit --no-verify' for a real emergency.)" >&2
+    rc=1
+fi
+if [ -n "$hits4" ]; then
+    echo "" >&2
+    echo "  REFUSED (Guard 11): real-time wait added in a test file:" >&2
+    printf '%s' "$hits4" | sed 's/^/    /' >&2
+    echo "  Covered: Task.sleep, Thread.sleep, usleep, sleep(, asyncAfter," >&2
+    echo "  SuiteWait.settle(, every .wait(timeout:, and a Timeout/Delay/Deadline/" >&2
+    echo "  Interval/Grace/Window/Seconds value set to a fraction of a second." >&2
+    echo "  A wait on the wall clock flakes on a slow runner. Inject the backend's" >&2
+    echo "  uptimeClock/delayClock and drive ManualDelayClock" >&2
+    echo "  (AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift) with" >&2
+    echo "  advance(by:) instead. A trailing 'real-time-ok: <reason>' exempts a line;" >&2
+    echo "  a hang ceiling (a .wait(timeout:) safety limit) counts as a reason." >&2
     echo "  ('git commit --no-verify' for a real emergency.)" >&2
     rc=1
 fi

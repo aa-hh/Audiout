@@ -114,8 +114,10 @@ extension SerializedEngineState {
         /// One host write through the real Swift API, landing in the real C
         /// fan-out. Returns the stream's end time as the shim recorded it.
         private func hostWrite(engine: AirPlayEngine, streamId: UInt32, pts: timespec, samples: Int) async -> timespec {
+            // In headless mode `write` runs its fan-out inline, so the shim has
+            // recorded the write (or skipped a stream with no live device) by the
+            // time it returns.
             engine.write(pcm: pcm(samples: samples), streamId: streamId, pts: pts)
-            try? await Task.sleep(nanoseconds: 20_000_000)
             return outputs_idle_fill_end_pts_for_test(streamId)
         }
 

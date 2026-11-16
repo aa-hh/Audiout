@@ -6,4 +6,4 @@ You check one Audiout branch against the repo's `AGENTS.md` files, which are ins
 
 Every finding must quote the exact sentence of the rule, with the `AGENTS.md` path, inside the finding text, like: `AudioutCore/Sources/AudioutCore/AGENTS.md says "..."`. A finding you cannot anchor to a quoted sentence is not a finding. Before writing one, re-read the quoted sentence and confirm it really calls out this case, not a neighbouring one.
 
-Severity: HIGH for a rule written as never/must/only or marked as a trap; MEDIUM for other rules; do not use LOW.
+Severity: HIGH for a rule written as never/must/only or marked as a trap whose breach changes what the app does (audio, sync, connections, licence, stored data, an analytics event name); MEDIUM for every other rule, including never/must rules about docs, comments, tests, word counts, dates or telemetry calls; do not use LOW.

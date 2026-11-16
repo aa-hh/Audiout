@@ -458,13 +458,21 @@ final class PassiveDriftTracker: @unchecked Sendable {
     /// timer fires again on its own while a busy suite keeps the test from
     /// looking, so they step time by hand instead.
     private let periodicClock: PeriodicClock
+    /// Paces the silence poll. Only the tests pass anything but
+    /// ``dispatchPeriodicClock``, for the same reason as `periodicClock`.
+    private let silencePollClock: PeriodicClock
+    /// Closes each window and schedules the near-miss retry and the settled
+    /// reconnect window. Only the tests pass anything but
+    /// `NativeBackend.dispatchDelayClock`.
+    private let delayClock: NativeBackend.DelayClock
     private let queue = DispatchQueue(label: "com.audiout.passive-drift")
 
     /// `queue` only.
     private var sampler = PassiveDriftSampler()
     /// Stops the periodic timer; `nil` while it is not running.
     private var cancelPeriodicTimer: (@Sendable () -> Void)?
-    private var silenceTimer: DispatchSourceTimer?
+    /// Stops the silence poll; `nil` while it is not running.
+    private var cancelSilencePoll: (@Sendable () -> Void)?
     private var windowInFlight = false
     /// Whether periodic sampling is meant to be running — true between
     /// ``start()`` and ``stop()``, including a blind spell when the timer
@@ -510,9 +518,13 @@ final class PassiveDriftTracker: @unchecked Sendable {
          now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          isNearMiss: @escaping @Sendable ([DriftPeak], PassiveDriftCorrelator) -> Bool = PassiveDriftSampler.isNearMiss,
          periodicClock: @escaping PeriodicClock = PassiveDriftTracker.dispatchPeriodicClock,
+         silencePollClock: @escaping PeriodicClock = PassiveDriftTracker.dispatchPeriodicClock,
+         delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
          onObservations: @escaping @Sendable ([DriftCorrectionPolicy.Observation]) -> Void) {
         self.ring = ring
         self.periodicClock = periodicClock
+        self.silencePollClock = silencePollClock
+        self.delayClock = delayClock
         self.windowSeconds = windowSeconds
         self.intervalSeconds = intervalSeconds
         self.firstWindowSeconds = firstWindowSeconds
@@ -532,7 +544,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
 
     deinit {
         cancelPeriodicTimer?()
-        silenceTimer?.cancel()
+        cancelSilencePoll?()
     }
 
     /// The calibrated per-speaker delays this tracker measures against, and a
@@ -563,7 +575,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
         queue.async { [self] in
             isRunning = true
             if cancelPeriodicTimer == nil { scheduleTimer() }
-            if silenceTimer == nil { scheduleSilencePoll() }
+            if cancelSilencePoll == nil { scheduleSilencePoll() }
         }
     }
 
@@ -572,8 +584,8 @@ final class PassiveDriftTracker: @unchecked Sendable {
             self.isRunning = false
             self.cancelPeriodicTimer?()
             self.cancelPeriodicTimer = nil
-            self.silenceTimer?.cancel()
-            self.silenceTimer = nil
+            self.cancelSilencePoll?()
+            self.cancelSilencePoll = nil
             // Silence measured before the stop says nothing about the sink the
             // next start() builds: left set, the first poll after a restart
             // reads audible against it and takes a silence-to-audio window on a
@@ -592,11 +604,9 @@ final class PassiveDriftTracker: @unchecked Sendable {
 
     /// `queue` only.
     private func scheduleSilencePoll() {
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + pollIntervalSeconds, repeating: pollIntervalSeconds)
-        timer.setEventHandler { [weak self] in self?.pollSilence() }
-        self.silenceTimer = timer
-        timer.resume()
+        cancelSilencePoll = silencePollClock(pollIntervalSeconds, pollIntervalSeconds, queue) { [weak self] in
+            self?.pollSilence()
+        }
     }
 
     /// `queue` only. A silent spell that held for `silenceEdgeSeconds` and
@@ -633,10 +643,10 @@ final class PassiveDriftTracker: @unchecked Sendable {
                     self.now() + self.clockStepWindowSpacingSeconds
                 // The pacing clock is still settling for up to
                 // `BTClockStability.stableAfterSeconds` after a reconnect.
-                self.queue.asyncAfter(deadline: .now() + self.reconnectDelaySeconds) {
+                self.delayClock(self.reconnectDelaySeconds, self.queue, DispatchWorkItem {
                     self.clockStepState[uid]?.reconnectSettlingUntil = nil
                     self.takeWindow(reason: .reconnect(uid: uid))
-                }
+                })
             default:
                 self.takeWindow(reason: reason)
             }
@@ -740,11 +750,11 @@ final class PassiveDriftTracker: @unchecked Sendable {
         Telemetry.log(.localPlayback, "drift_window_started",
                       logFields(reason, ["seconds": String(format: "%.1f", windowSeconds)]))
         windowInFlight = true
-        queue.asyncAfter(deadline: .now() + windowSeconds) { [self] in
+        delayClock(windowSeconds, queue, DispatchWorkItem { [self] in
             finishWindow(recorder: recorder, captureRate: captureRate, reason: reason)
             ring.setArmed(false)
             windowInFlight = false
-        }
+        })
         return true
     }
 
@@ -799,9 +809,9 @@ final class PassiveDriftTracker: @unchecked Sendable {
            isNearMiss(sampler.lastCandidates, sampler.correlator) {
             // The retry's own `drift_window_started` line carries
             // `trigger: retry`, so nothing extra is logged here.
-            queue.asyncAfter(deadline: .now() + retryDelaySeconds) { [weak self] in
+            delayClock(retryDelaySeconds, queue, DispatchWorkItem { [weak self] in
                 self?.takeWindow(reason: .retry)
-            }
+            })
         }
         if sampler.isBlind { cancelPeriodicTimer?(); cancelPeriodicTimer = nil }
     }

@@ -295,7 +295,6 @@ cfg_getint(cfg_t *sec, const char *name)
 int
 cfg_getbool(cfg_t *sec, const char *name)
 {
-  (void)sec;
   if (!name)
     return 0;
 
@@ -312,10 +311,12 @@ cfg_getbool(cfg_t *sec, const char *name)
   // Per-device bool keys (exclude/permanent/exclusive/airplay2_disable/
   // raop_disable/ptp_disable) are read behind a `devcfg && ...` guard, so they
   // arrive only for a device with a password section. None is configurable:
-  // each is off.
-  if (strcmp(name, "exclude") == 0 || strcmp(name, "permanent") == 0
-      || strcmp(name, "exclusive") == 0 || strcmp(name, "airplay2_disable") == 0
-      || strcmp(name, "raop_disable") == 0 || strcmp(name, "ptp_disable") == 0)
+  // each is off. The silent answer is for a table section only; the root and
+  // the sentinel fall through to the unknown-key path.
+  if (sec && sec != &cfg_root && sec != &cfg_section_sentinel
+      && (strcmp(name, "exclude") == 0 || strcmp(name, "permanent") == 0
+          || strcmp(name, "exclusive") == 0 || strcmp(name, "airplay2_disable") == 0
+          || strcmp(name, "raop_disable") == 0 || strcmp(name, "ptp_disable") == 0))
     return 0;
 
   // The only global bool the vendored cluster reads is "ipv6" (misc.c net

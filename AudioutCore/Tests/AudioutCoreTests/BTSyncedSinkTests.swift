@@ -1215,6 +1215,9 @@ extension SerializedSharedState {
                 }
             }
             for i in 0..<7 { feed(atSec: BTSyncedSinkTests.anchorSec + i) }
+            // The anchor posts lock-holding work to `graphQueue`, and render takes
+            // the state lock with `try()`: drain it or the gate may not open.
+            sink.test_waitForPendingRebuild()
 
             // Open the gate; the NEXT enqueue posts the stashed record.
             _ = BTSyncedSinkTests.renderCycle(
@@ -1234,6 +1237,7 @@ extension SerializedSharedState {
             sink.test_waitForPendingRebuild()
             BTSyncedSinkTests.enqueueRamp(
                 into: manager, atSec: BTSyncedSinkTests.anchorSec + 10)
+            sink.test_waitForPendingRebuild()   // same: the re-anchor posts work
             _ = BTSyncedSinkTests.renderCycle(
                 sink, at: BTSyncedSinkTests.anchorNanos + 11_000_000_000)
             BTSyncedSinkTests.enqueueRamp(

@@ -79,7 +79,10 @@ extension SerializedSharedState {
             let sent = forwarded.snapshot()
             #expect(sent.count == 1)
             #expect(sent.first?.0 == "airplay:session_failed")
-            #expect(sent.first?.1 == ["cause": "droppedMidStream"], "only `shared` may leave the Mac")
+            #expect(sent.first?.1 == ["cause": "droppedMidStream",
+                                      "$exception_fingerprint": "airplay:session_failed:droppedMidStream",
+                                      "$issue_name": "airplay:session_failed (droppedMidStream)"],
+                    "only `shared`, plus the issue grouping `Analytics` derives from its `cause`, may leave the Mac")
         }
 
         @Test func fieldsWithSpecialCharactersAreEscapedAndRoundTrip() throws {

@@ -48,8 +48,8 @@ public final class ProminentButton: NSButton {
     /// under light Increase Contrast, which reads 1.84:1 on `#E8B84B`).
     private var ink: NSColor { Self.pinnedDark(Tokens.Color.inkOnFill) }
 
-    /// `color` resolved once under `.darkAqua`.
-    private static func pinnedDark(_ color: NSColor) -> NSColor {
+    /// `color` resolved once under `.darkAqua`. `CTAButton` pins its gold the same way.
+    static func pinnedDark(_ color: NSColor) -> NSColor {
         var resolved = color
         NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
             resolved = color.usingColorSpace(.sRGB) ?? color
@@ -71,6 +71,10 @@ public final class ProminentButton: NSButton {
         self.action = action
         bezelStyle = .rounded
         controlSize = .regular
+        // macOS 26+ draws a `bezelColor` at full strength only at primary
+        // prominence; the automatic default blended it toward the window
+        // background, so the gold came out a dark olive in the popover.
+        if #available(macOS 26.0, *) { tintProminence = .primary }
         setContentHuggingPriority(.required, for: .horizontal)
         applyColours()
         NotificationCenter.default.addObserver(

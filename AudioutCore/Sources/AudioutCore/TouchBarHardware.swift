@@ -32,7 +32,7 @@ public enum TouchBarHardware {
         "Mac14,7",                                                               // 13" M2 2022
     ]
 
-    private static func hardwareModel() -> String? {
+    static func hardwareModel() -> String? {
         var size = 0
         guard sysctlbyname("hw.model", nil, &size, nil, 0) == 0, size > 0 else { return nil }
         var buffer = [CChar](repeating: 0, count: size)

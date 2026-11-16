@@ -20,7 +20,7 @@
 # merging main in or a docs-only commit, uses no round: the run re-posts that
 # round's status on the new HEAD and exits with its result. Round 2
 # reviews only what was committed since round 1's head (the fix for its HIGH
-# findings) and never skips; a third run refuses. No PR yet means round 1
+# findings), less anything merged in from main, and never skips; a third run refuses. No PR yet means round 1
 # against main. Only a HIGH finding fails the status; MEDIUM and LOW are
 # posted and do not block.
 #
@@ -175,6 +175,12 @@ if [ "$round" = 2 ]; then
   base=$prev_head
   git rev-parse --verify -q "$base^{commit}" > /dev/null \
     || { echo "Round 1's head $base (from PR #$pr) is not in this clone; git fetch, then run again." >&2; exit 2; }
+  # Main merged in since round 1: compare against round 1's head with main
+  # merged into it, so main's own changes are not reviewed as the fix. If that
+  # merge conflicts, review the branch's whole change against main instead.
+  if ! git merge-base --is-ancestor "$main_base" "$base"; then
+    base=$(git merge-tree --write-tree "$base" "$main_base" 2> /dev/null) || base=$main_base
+  fi
 else
   base=$main_base
 fi
@@ -392,13 +398,22 @@ if [ "$level" = cheap ]; then
     echo "  [cheap] $line"; count "$line"
   done < <(grep -E '^(HIGH|MEDIUM|LOW) \|' "$state/cheap.out")
 else
-  # razor: no cross-reviewer dedupe; two passes reporting the same defect show
-  # twice. Upgrade path: merge findings on their path:line key before scoring.
+  # Findings on the same path:line are one finding: the first reply's text at
+  # the highest severity any pass gave it, tagged with every pass that raised
+  # it (deep+comments). razor: the key is the exact path:line, so one defect
+  # cited at two lines still shows twice. Upgrade path: key on path plus the
+  # enclosing function.
   if [ ! -f "$state/findings" ]; then
-    : > "$state/findings" || exit 2
     for p in "${REVIEWERS[@]}"; do
-      grep -E '^(HIGH|MEDIUM|LOW) \|' "$state/$p.out" | sed "s/^/$p	/" >> "$state/findings"
-    done
+      grep -E '^(HIGH|MEDIUM|LOW) \|' "$state/$p.out" | sed "s/^/$p	/" || true
+    done | awk -F'\t' '{
+        split($2, f, / *\| */); k = f[2]; r = (f[1] == "HIGH") ? 3 : (f[1] == "MEDIUM") ? 2 : 1
+        if (!(k in rank)) { keys[++n] = k; rank[k] = r; text[k] = $2; tags[k] = $1; next }
+        if (index("+" tags[k] "+", "+" $1 "+") == 0) tags[k] = tags[k] "+" $1
+        if (r > rank[k]) { rank[k] = r; sub(/^[A-Z]+/, f[1], text[k]) }
+      }
+      END { for (i = 1; i <= n; i++) print tags[keys[i]] "\t" text[keys[i]] }' \
+      > "$state/findings" || exit 2
     if [ -s "$state/findings" ]; then
       scores=(); n=0
       while IFS=$'\t' read -r tag line; do

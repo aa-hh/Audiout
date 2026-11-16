@@ -32,6 +32,10 @@ public struct LicenseValidator {
     private let settings: AppSettings
     private let transport: Transport
 
+    /// Main queue only. One line per launch is enough to point at a server
+    /// missing its signing secret.
+    private nonisolated(unsafe) static var loggedMissingToken = false
+
     public init(settings: AppSettings, transport: @escaping Transport = LicenseValidator.defaultTransport) {
         self.settings = settings
         self.transport = transport
@@ -73,7 +77,26 @@ public struct LicenseValidator {
                     completion(.unreachable)
                     return
                 }
+                // A key typed over a trial that the server says does not
+                // exist. Recording this answer would end the trial (it carries
+                // no expiry), so the trial's own key goes back instead and
+                // nothing else is written. The trial is on record by either
+                // of its two records, as in ``TrialClock/hasEnded(settings:now:)``.
+                // A revoked or refunded key is a real key and is recorded.
+                if status == .unknown || status == .invalid, key != settings.trialKey,
+                   TrialClock.state(settings: settings) != .none
+                    || settings.licenseReason == "trial_expired" {
+                    settings.restoreTrialKey()
+                    completion(.verified(status))
+                    return
+                }
                 settings.licenseStatus = status
+                // An active answer that is not a trial's is a paid licence (a
+                // converted trial answers with the paid body). Never set false
+                // here: a later refund does not give the trial back.
+                if status == .active, body.kind != "trial" {
+                    settings.hasHeldPaidLicense = true
+                }
                 // Written on every answer, present or not. An answer with no
                 // reason is the server saying this verdict needs no
                 // explaining, and yesterday's reason left in place would
@@ -101,9 +124,13 @@ public struct LicenseValidator {
                 // other verified status revokes it; `.active` with no token
                 // (old server, or the secret isn't configured) leaves the
                 // stored value as-is — its own expiry bounds the staleness.
+                // Such an answer is logged once per launch.
                 if status == .active {
                     if let token = body.companionToken, !token.isEmpty {
                         settings.companionToken = token
+                    } else if !Self.loggedMissingToken {
+                        Self.loggedMissingToken = true
+                        Telemetry.log(.settings, "companion_token_missing")
                     }
                 } else {
                     settings.companionToken = nil
@@ -113,13 +140,40 @@ public struct LicenseValidator {
         }
     }
 
+    /// Stores a key the person typed (the licence sheet's Register, the
+    /// welcome gate's boxes) over the stored one, then validates it.
+    ///
+    /// When ``validate(completion:)`` takes a typed key the server says does
+    /// not exist back off a trial, the key it replaced comes back with the
+    /// verdict it had. Only this path knows them: the plain path puts back
+    /// the trial's recorded key, which a Mac whose settings are gone no
+    /// longer has. An unreachable server keeps the typed key, which may well
+    /// be real.
+    public func validate(typedKey key: String, completion: @escaping (Result) -> Void) {
+        let previous = (key: settings.licenseKey, status: settings.licenseStatus)
+
+        // A different key is an unanswered question: the previous key's
+        // verdict must not stand in for it while the server is asked.
+        if key != previous.key { settings.licenseStatus = nil }
+        settings.licenseKey = key
+
+        validate { result in
+            if result == .verified(.unknown) || result == .verified(.invalid),
+               settings.licenseKey == settings.trialKey {
+                // Never set to nil here: that would clear the trial.
+                if let previousKey = previous.key { settings.licenseKey = previousKey }
+                settings.licenseStatus = previous.status
+            }
+            completion(result)
+        }
+    }
+
     /// A 200 with a body we can read, or `nil` for every other outcome — a
     /// transport error, a non-200, or JSON that isn't the documented shape.
     /// All of those are "no answer", never "the key is bad".
     ///
-    /// `kind` is read and not stored: `"trial"` marks an active trial, and
-    /// every reader of that fact reads ``TrialClock`` instead, which the
-    /// stored `expires_at` already answers for.
+    /// `kind` is read for one thing, marking the Mac as having held a paid
+    /// licence; every other reader of a running trial reads ``TrialClock``.
     private static func parse(data: Data?, response: URLResponse?)
         -> (status: LicenseStatus?, key: String?, maxMajor: Int?, companionToken: String?,
             reason: String?, kind: String?, expiresAt: Date?)? {
@@ -138,6 +192,29 @@ public struct LicenseValidator {
 
     private func finish(_ result: Result, _ completion: @escaping (Result) -> Void) {
         DispatchQueue.main.async { completion(result) }
+    }
+
+    /// The key in the server's stored spelling, or nil when it cannot be a
+    /// key. Must match `canonicalizeKey` in the licence server's `src/keys.ts`
+    /// rule for rule: the proof's `key_hash` hashes this spelling, so a drift
+    /// here makes the snapshot's key hash disagree with every proof.
+    public static func canonicalKey(_ raw: String) -> String? {
+        let stripped = raw.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        guard stripped.hasPrefix("AUDT") else { return nil }
+        let body = String(stripped.dropFirst(4).map { c -> Character in
+            switch c {
+            case "O": return "0"
+            case "I", "L": return "1"
+            default: return c
+            }
+        })
+        let alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+        guard body.count == 20, body.allSatisfy({ alphabet.contains($0) }) else { return nil }
+        let groups = stride(from: 0, to: 20, by: 5).map { start -> String in
+            let from = body.index(body.startIndex, offsetBy: start)
+            return String(body[from..<body.index(from, offsetBy: 5)])
+        }
+        return "AUDT-" + groups.joined(separator: "-")
     }
 
     public static func defaultTransport(_ request: URLRequest,

@@ -32,6 +32,8 @@ git-owned history and comments that had drifted into being *wrong*.
 7. **Orphan tags** — task ids that grep to nothing under `docs/`,
    `AirPlayEngine/docs/`, `dev/notes/`. Doc-anchored tags (SPEC §, D#, Q#,
    R-*, STABILITY(...), plan T-*) are live traceability — keep them.
+   `dev/notes/` and `docs/plans/` are gitignored and absent from worktrees
+   and CI, so a tag anchored there is not an orphan.
 8. **Commented-out code** and debug leftovers (bare `print` in library code —
    CLI/snapshot tools print by design).
 

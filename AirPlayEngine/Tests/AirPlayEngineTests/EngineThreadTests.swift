@@ -18,37 +18,42 @@ import Testing
     // `stop()` lets the engine thread `event_base_free` it, then
     // `event_base_once` runs on freed memory. `beforeScheduleForTesting` parks
     // the enqueue exactly at that preemption point.
-    @Test func stopWaitsForAnInFlightEnqueueBeforeFreeingTheBase() throws {
+    @Test func stopWaitsForAnInFlightEnqueueBeforeFreeingTheBase() async throws {
         let t = EngineThread(name: "com.airplayengine.engine.base-lock-test")
         try #require(t.start())
 
-        let entered = DispatchSemaphore(value: 0)
+        let entered = Flag()
         let release = DispatchSemaphore(value: 0)
-        t.beforeScheduleForTesting = { entered.signal(); release.wait() }
+        t.beforeScheduleForTesting = { entered.value = true; release.wait() }
 
         let enqueueResult = Flag()
-        let enqueueDone = DispatchSemaphore(value: 0)
+        let enqueueReturned = Flag()
         DispatchQueue.global().async {
             enqueueResult.value = t.enqueue({}, tracked: false)
-            enqueueDone.signal()
+            enqueueReturned.value = true
         }
-        entered.wait()
+        await SuiteWait.until("the enqueue is parked between its base check and the schedule") {
+            entered.value
+        }
 
+        let stopBlocked = Flag()
+        t.stopFoundBaseLockHeldForTesting = { stopBlocked.value = true }
         let stopReturned = Flag()
-        let stopDone = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
             t.stop()
             stopReturned.value = true
-            stopDone.signal()
         }
-
-        Thread.sleep(forTimeInterval: 0.3)
+        // The hook fires only when stop() finds the base lock still held by the
+        // parked enqueue. An enqueue that let go of the lock after its base check
+        // would let stop() take it at once and free the base.
+        await SuiteWait.until("stop() finds the base lock held by the parked enqueue") {
+            stopBlocked.value
+        }
         #expect(!stopReturned.value, "stop() freed the base underneath an enqueue that had already passed its base check")
 
         release.signal()
-        #expect(stopDone.wait(timeout: .now() + 5) == .success, "stop() did not return within 5s")
-        #expect(stopReturned.value)
-        #expect(enqueueDone.wait(timeout: .now() + 5) == .success, "enqueue did not return within 5s")
+        await SuiteWait.until("stop() returns once the enqueue lets go") { stopReturned.value }
+        await SuiteWait.until("the enqueue returns") { enqueueReturned.value }
         #expect(enqueueResult.value == true)
     }
 }

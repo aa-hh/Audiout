@@ -31,7 +31,7 @@ struct NativeDiscoveryLiveTests {
     /// and assert at least one AP2 device resolves with a well-formed descriptor:
     /// non-empty name, non-empty numeric address, a plausible RTSP port, and a
     /// colon-hex `deviceid` that round-trips to a nonzero `OutputID`.
-    @Test func liveScanFindsAtLeastOneAP2Device() throws {
+    @Test func liveScanFindsAtLeastOneAP2Device() async throws {
         let discovery = NativeDiscovery() // production NetworkFrameworkBrowser
         let collector = LiveEventCollector()
         discovery.onEvent = { collector.append($0) }
@@ -40,10 +40,9 @@ struct NativeDiscoveryLiveTests {
 
         // Passive browse window. 12s is generous for mDNS resolves to settle
         // (multiple probes/announcements) without hanging the suite.
-        let deadline = Date().addingTimeInterval(12)
-        while Date() < deadline {
-            if collector.devices().contains(where: { $0.isAirPlay2Supported }) { break }
-            Thread.sleep(forTimeInterval: 0.25)
+        // Expiry is silent here; the guard below records the miss.
+        await SuiteWait.until("an AP2 device resolves on the LAN", timeout: 12) {
+            collector.devices().contains(where: { $0.isAirPlay2Supported })
         }
 
         let devices = collector.devices()
@@ -87,7 +86,7 @@ struct NativeDiscoveryLiveTests {
         discovery.start()
         defer { discovery.stop() }
 
-        Thread.sleep(forTimeInterval: 15)
+        Thread.sleep(forTimeInterval: 15) // real-time-ok: fixed browse window on the real LAN; it collects whatever answers, with no condition to stop on
 
         let devices = collector.devices().sorted { $0.descriptor.name < $1.descriptor.name }
         print("[NativeDiscoveryLiveTests] full fleet snapshot (\(devices.count) device(s)):")

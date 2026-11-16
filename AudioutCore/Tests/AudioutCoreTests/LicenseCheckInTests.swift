@@ -10,7 +10,7 @@ import Testing
 /// devices than one buyer plausibly owns), so it cannot be something an
 /// abuser opts out of (owner's call, 2026-08-24). Covers the two-gate no-op
 /// paths (no URL configured; no key on file) and the one path that actually
-/// sends, asserting the JSON body carries exactly the three documented fields.
+/// sends, asserting the JSON body carries exactly the four documented fields.
 /// A recording `send` closure + a throwaway `UserDefaults` suite (the
 /// `AppSettingsTests` pattern) keep this off both the network and `.standard`.
 @Suite struct LicenseCheckInTests {
@@ -39,7 +39,8 @@ import Testing
         #expect(sent.isEmpty)
     }
 
-    @Test func keyPlusURLSendsExactlyOneRequestWithTheThreeFieldsNoConsentRequired() throws {
+    /// Red if a field is renamed, dropped or added; the server matches paid history on `device_hash`.
+    @Test func keyPlusURLSendsExactlyOneRequestWithTheFourFieldsNoConsentRequired() throws {
         let settings = AppSettings(defaults: defaults)
         settings.licenseKey = "ABCD-1234"
         settings.checkInURL = URL(string: "https://example.com/checkin")
@@ -58,6 +59,7 @@ import Testing
         #expect(obj["license_key"] as? String == "ABCD-1234")
         #expect(obj["install_id"] as? String == installID)
         #expect(obj["app_version"] as? String != nil)
-        #expect(obj.count == 3, "exactly the three documented fields, nothing else")
+        #expect(obj["device_hash"] as? String == DeviceIdentity.deviceHash())
+        #expect(obj.count == 4, "exactly the four documented fields, nothing else")
     }
 }

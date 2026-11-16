@@ -102,10 +102,17 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
     private let fallbackSuggestionDelay: TimeInterval
     private let endpointAppearWindow: TimeInterval
     private let endpointPollInterval: TimeInterval
+    /// Runs the fallback nudge, the hard timeout and the endpoint poll's waits:
+    /// `work` on `queue` once `delaySeconds` have passed. The same shape as
+    /// `NativeBackend.DelayClock`, spelled out so this file names nothing from
+    /// a GPL file.
+    private let delayClock: @Sendable (_ delaySeconds: Double, _ queue: DispatchQueue,
+                                       _ work: DispatchWorkItem) -> Void
+    /// Monotonic seconds: "now" for the poll deadline and the reported `elapsed`.
+    private let uptimeClock: @Sendable () -> TimeInterval
 
     /// Production defaults touch real IOBluetooth / the HAL; tests inject all
-    /// four seams (and shrink the timing knobs so nothing costs wall-clock
-    /// seconds).
+    /// four seams and a manual clock, so nothing waits on the wall clock.
     init(
         isBluetoothAuthorized: @escaping @Sendable () -> Bool = { CBManager.authorization == .allowedAlways },
         openConnection: @escaping @Sendable (String) async -> Int32 = BTConnectionManager.systemOpenConnection,
@@ -114,7 +121,12 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
         connectTimeout: TimeInterval = BTConnectionManager.defaultConnectTimeout,
         fallbackSuggestionDelay: TimeInterval = BTConnectionManager.defaultFallbackSuggestionDelay,
         endpointAppearWindow: TimeInterval = BTConnectionManager.defaultEndpointAppearWindow,
-        endpointPollInterval: TimeInterval = BTConnectionManager.defaultEndpointPollInterval
+        endpointPollInterval: TimeInterval = BTConnectionManager.defaultEndpointPollInterval,
+        delayClock: @escaping @Sendable (_ delaySeconds: Double, _ queue: DispatchQueue,
+                                         _ work: DispatchWorkItem) -> Void
+            = { delaySeconds, queue, work in queue.asyncAfter(deadline: .now() + delaySeconds, execute: work) },
+        uptimeClock: @escaping @Sendable () -> TimeInterval
+            = { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000 }
     ) {
         self.isBluetoothAuthorized = isBluetoothAuthorized
         self.openConnection = openConnection
@@ -124,6 +136,8 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
         self.fallbackSuggestionDelay = fallbackSuggestionDelay
         self.endpointAppearWindow = endpointAppearWindow
         self.endpointPollInterval = endpointPollInterval
+        self.delayClock = delayClock
+        self.uptimeClock = uptimeClock
     }
 
     deinit {
@@ -140,35 +154,35 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
             Telemetry.log(.localPlayback, "bt_connect_unauthorized", ["address": address])
             return .unauthorized
         }
-        let began = Date()
+        let began = uptimeClock()
         // The fallback nudge: armed for the whole attempt, claimed on the way
         // out so it can never fire after the outcome resolved.
         let fallbackOnce = OnceFlag()
         let fallback = onFallbackSuggested
-        let fallbackTask = Task { [fallbackSuggestionDelay] in
-            try? await Task.sleep(nanoseconds: UInt64(fallbackSuggestionDelay * 1_000_000_000))
-            guard !Task.isCancelled, fallbackOnce.claim() else { return }
+        let fallbackWork = DispatchWorkItem {
+            guard fallbackOnce.claim() else { return }
             fallback?(address)
         }
+        delayClock(fallbackSuggestionDelay, .global(), fallbackWork)
         defer {
             _ = fallbackOnce.claim()
-            fallbackTask.cancel()
+            fallbackWork.cancel()
         }
 
-        guard let openReturn = await Self.race(timeout: connectTimeout, operation: { [openConnection] in
+        guard let openReturn = await Self.race(timeout: connectTimeout, delayClock: delayClock, operation: { [openConnection] in
             await openConnection(address)
         }) else {
             // The ceiling elapsed. The abandoned OS attempt keeps blocking its
             // own worker thread until IOBluetooth gives up — accepted: it holds
             // no lock of ours and resolves within the OS's own horizon.
-            let elapsed = Date().timeIntervalSince(began)
+            let elapsed = uptimeClock() - began
             Telemetry.fail(.localPlayback, "bt:connect_failed",
                            local: ["address": address, "elapsed": String(format: "%.1f", elapsed)],
                            shared: ["reason": "timeout"])
             return .failed(elapsed: elapsed, reason: "timeout")
         }
         guard openReturn == 0 else {
-            let elapsed = Date().timeIntervalSince(began)
+            let elapsed = uptimeClock() - began
             let reason = String(format: "0x%08x", UInt32(bitPattern: openReturn))
             Telemetry.fail(.localPlayback, "bt:connect_failed",
                            local: ["address": address, "elapsed": String(format: "%.1f", elapsed)],
@@ -177,19 +191,21 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
         }
 
         // Baseband is up; the audio endpoint follows (~0.6 s live-measured).
-        let pollDeadline = Date().addingTimeInterval(endpointAppearWindow)
+        let pollDeadline = uptimeClock() + endpointAppearWindow
         while true {
             if endpointExists(address) {
                 Telemetry.log(.localPlayback, "bt_connect_succeeded", [
                     "address": address,
-                    "elapsed": String(format: "%.1f", Date().timeIntervalSince(began)),
+                    "elapsed": String(format: "%.1f", uptimeClock() - began),
                 ])
                 return .connected
             }
-            guard Date() < pollDeadline else { break }
-            try? await Task.sleep(nanoseconds: UInt64(endpointPollInterval * 1_000_000_000))
+            guard uptimeClock() < pollDeadline else { break }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                delayClock(endpointPollInterval, .global(), DispatchWorkItem { continuation.resume() })
+            }
         }
-        let elapsed = Date().timeIntervalSince(began)
+        let elapsed = uptimeClock() - began
         Telemetry.fail(.localPlayback, "bt:connect_failed",
                        local: ["address": address, "elapsed": String(format: "%.1f", elapsed)],
                        shared: ["reason": "no_audio_endpoint"])
@@ -295,6 +311,7 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
     /// no cancellation), so the continuation is single-resume-guarded.
     private static func race<T: Sendable>(
         timeout: TimeInterval,
+        delayClock: (Double, DispatchQueue, DispatchWorkItem) -> Void,
         operation: @escaping @Sendable () async -> T
     ) async -> T? {
         await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
@@ -303,10 +320,9 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
                 let value = await operation()
                 if once.claim() { continuation.resume(returning: value) }
             }
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            delayClock(timeout, .global(), DispatchWorkItem {
                 if once.claim() { continuation.resume(returning: nil) }
-            }
+            })
         }
     }
 

@@ -30,7 +30,9 @@ import AudioutProtocol
 /// a phone that walks out of range takes whatever it left playing down with it.
 @MainActor
 public struct CompanionAlignmentActions {
-    public var startProbe: (_ targetID: String, _ clientID: UUID?) -> String?
+    /// Readies the speakers for a `startProbe` that follows; same arguments.
+    public var prepareProbe: (_ targetID: String, _ referenceID: String?, _ clientID: UUID?) -> String?
+    public var startProbe: (_ targetID: String, _ referenceID: String?, _ clientID: UUID?) -> String?
     /// Carries the asking client, like `startProbe` does: cancel is the
     /// owner's own exit, and without the id one phone's cancel can end
     /// another phone's run.
@@ -43,7 +45,8 @@ public struct CompanionAlignmentActions {
     public var playDemo: (_ targetID: String, _ clientID: UUID?) -> String?
 
     public init(
-        startProbe: @escaping (String, UUID?) -> String?,
+        prepareProbe: @escaping (String, String?, UUID?) -> String?,
+        startProbe: @escaping (String, String?, UUID?) -> String?,
         cancelProbe: @escaping (String, UUID?) -> String?,
         reportMeasurement: @escaping (String, Double, Double) -> String?,
         setTick: @escaping (String, Bool, UUID?) -> String?,
@@ -52,6 +55,7 @@ public struct CompanionAlignmentActions {
         clearTuning: @escaping (String) -> String?,
         playDemo: @escaping (String, UUID?) -> String?
     ) {
+        self.prepareProbe = prepareProbe
         self.startProbe = startProbe
         self.cancelProbe = cancelProbe
         self.reportMeasurement = reportMeasurement
@@ -135,6 +139,9 @@ public final class CompanionCommandDispatcher {
     /// The alignment family's actuators — see ``CompanionAlignmentActions``.
     /// `nil` on a backend with no Bluetooth sink of its own.
     private let alignmentActions: CompanionAlignmentActions?
+    /// The Mac's remembered speakers, for `setSpeakerVisibility` and
+    /// `forgetSpeakers`. `nil` refuses both.
+    private let speakerLibrary: SpeakerLibraryController?
 
     /// True while a `setStartBufferMs` apply Task is running. The apply tears
     /// every AirPlay stream down and back (~3-5s); overlapping runs would keep
@@ -157,7 +164,8 @@ public final class CompanionCommandDispatcher {
         isExcluded: @escaping (String) -> Bool,
         setLocalPlaybackVolume: @escaping (Int, String) -> Void,
         applyStartBuffer: @escaping (Int) async -> Void,
-        alignmentActions: CompanionAlignmentActions? = nil
+        alignmentActions: CompanionAlignmentActions? = nil,
+        speakerLibrary: SpeakerLibraryController? = nil
     ) {
         self.groupController = groupController
         self.appRouting = appRouting
@@ -166,6 +174,7 @@ public final class CompanionCommandDispatcher {
         self.setLocalPlaybackVolume = setLocalPlaybackVolume
         self.applyStartBuffer = applyStartBuffer
         self.alignmentActions = alignmentActions
+        self.speakerLibrary = speakerLibrary
     }
 
     /// Execute one command, mapping it to the exact controller method the
@@ -307,17 +316,21 @@ public final class CompanionCommandDispatcher {
             // applied so the phone doesn't surface a spurious refusal toast.
             return .ok
 
-        case .startAlignmentProbe(let targetID):
-            return alignment(targetID) { actions, id in actions.startProbe(id, clientID) }
+        case .prepareAlignmentProbe(let targetID, let referenceID):
+            return alignment(targetID) { actions, id in actions.prepareProbe(id, referenceID, clientID) }
+
+        case .startAlignmentProbe(let targetID, let referenceID):
+            return alignment(targetID) { actions, id in actions.startProbe(id, referenceID, clientID) }
 
         case .cancelAlignmentProbe(let targetID):
             return alignment(targetID) { actions, id in actions.cancelProbe(id, clientID) }
 
         case .reportAlignmentMeasurement(let targetID, let offsetMs, let confidence):
             // A measurement turns straight into a persisted latency, so the
-            // numbers are bounded here rather than trusted. `maxOffsetMs` is
-            // generous over any staggered run's own separation; a value past
-            // it is a peer bug or a hostile one, never a room.
+            // numbers are bounded here rather than trusted. The phone's
+            // offset arrives with the lane spacing already removed, so
+            // `maxOffsetMs` only has to be generous over a real room; a value
+            // past it is a peer bug or a hostile one, never a room.
             // Signed on purpose: the phone reports what its microphone heard,
             // and a speaker that arrives AHEAD of the reference is a real
             // result, not a bad one.
@@ -335,7 +348,7 @@ public final class CompanionCommandDispatcher {
                 actions.reportMeasurement(id, offsetMs, confidence)
             }
 
-        case .setAlignmentTick(let targetID, let active):
+        case .setAlignmentTick(let targetID, let active, _):
             return alignment(targetID) { actions, id in actions.setTick(id, active, clientID) }
 
         case .nudgeAlignmentTrim(let targetID, let deltaMs):
@@ -369,6 +382,33 @@ public final class CompanionCommandDispatcher {
             return .refused("Unknown command: transportNext.")
         case .transportPrevious:
             return .refused("Unknown command: transportPrevious.")
+
+        case .setSpeakerVisibility(let id, let visibility):
+            guard let choice = SpeakerMixerVisibility(rawValue: visibility) else {
+                return .refused("That isn't a Show in Mixer choice.")
+            }
+            guard let speakerLibrary, let record = speakerLibrary.record(for: id) else {
+                return .refused("Unknown speaker.")
+            }
+            if record.isLocalDevice { return .refused("This Mac is always shown in the Mixer.") }
+            guard speakerLibrary.setVisibility(choice, for: id) else {
+                return .refused("The Mac couldn't save that change.")
+            }
+            return .ok
+
+        case .forgetSpeakers(let ids):
+            guard !ids.isEmpty, !ids.contains(where: { $0.count > Limits.maxMemberIDChars }) else {
+                return .refused("Unknown speaker.")
+            }
+            guard let speakerLibrary else { return .refused("This Mac can't forget speakers right now.") }
+            do {
+                try speakerLibrary.forget(Set(ids), scenes: groupController)
+            } catch GroupController.GroupError.emptyMembership {
+                return .refused("Forgetting it would leave a scene with no speakers.")
+            } catch {
+                return .refused("The Mac couldn't save that change.")
+            }
+            return .ok
 
         case .unknown(let name):
             return .refused("Unknown command: \(name).")
@@ -548,7 +588,7 @@ public final class CompanionCommandDispatcher {
         switch device.connectionState {
         case .connected, .reconnecting:
             return nil
-        case .off, .connecting, .failed:
+        case .off, .connecting, .awaitingPassword, .failed:
             return .refused("\(device.name) isn't connected yet, so it can't take volume changes.")
         }
     }

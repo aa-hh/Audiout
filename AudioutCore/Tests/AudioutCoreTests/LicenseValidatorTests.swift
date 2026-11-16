@@ -249,6 +249,70 @@ import Testing
         #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
     }
 
+    /// The trials a key can be typed over and stored while the server was
+    /// unreachable.
+    enum TrialUnderATypedKey: CaseIterable {
+        case registeredRunning, registeredEnded, unregisteredRunning
+    }
+
+    /// Red if a later plain check of a key typed over a trial, which the
+    /// server says does not exist, ended the trial (that answer carries no
+    /// expiry) or left the Mac on the dead key instead of the trial's own
+    /// key (none, for a trial that never registered).
+    @Test(arguments: TrialUnderATypedKey.allCases)
+    func aTypedKeyTheServerSaysDoesNotExistGivesTheTrialBack(_ trial: TrialUnderATypedKey) async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        let trialKey = "AUDT-TTTTT-TTTTT-TTTTT-TTTTT"
+        switch trial {
+        case .registeredRunning:
+            TrialClock.apply(settings: settings, startedAt: Date(timeIntervalSinceNow: -86_400),
+                             expiresAt: Date(timeIntervalSinceNow: 13 * 86_400), key: trialKey)
+            settings.licenseStatus = .active
+        case .registeredEnded:
+            TrialClock.apply(settings: settings, startedAt: Date(timeIntervalSinceNow: -20 * 86_400),
+                             expiresAt: Date(timeIntervalSinceNow: -6 * 86_400), key: trialKey)
+            settings.licenseStatus = .revoked
+            settings.licenseReason = "trial_expired"
+        case .unregisteredRunning:
+            TrialClock.start(settings: settings)
+        }
+        let expires = settings.trialExpiresAt
+        // Typed while the server was unreachable: stored, unanswered.
+        settings.licenseStatus = nil
+        settings.licenseKey = Self.key
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"unknown"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.unknown))
+        #expect(settings.licenseKey == (trial == .unregisteredRunning ? nil : trialKey))
+        #expect(settings.trialExpiresAt == expires)
+        #expect(TrialClock.state(settings: settings) != .none)
+        #expect(TrialClock.hasEnded(settings: settings) == (trial == .registeredEnded))
+    }
+
+    /// The trial key is kept after the trial ends so a purchase made later
+    /// still converts it: the server answers the ENDED trial key with the paid
+    /// key. Red if that answer stopped swapping the paid key in, or left the
+    /// Mac reading as an ended trial.
+    @Test func aConvertedEndedTrialKeySwapsInThePaidKey() async {
+        let settings = settingsMidTrial()
+        settings.licenseStatus = .revoked
+        settings.licenseReason = "trial_expired"
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.paidKey)","max_major":1}"#)
+
+        let afterTheTrial = Self.trialExpires.addingTimeInterval(6 * 86_400)
+        #expect(TrialClock.hasEnded(settings: settings, now: afterTheTrial), "precondition: an ended trial")
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.licenseKey == Self.paidKey, "the paid key replaces the ended trial key")
+        #expect(settings.licenseStatus == .active)
+        #expect(settings.licenseReason == nil)
+        #expect(!TrialClock.hasEnded(settings: settings, now: afterTheTrial))
+        #expect(!TrialClock.holdsKey(settings: settings, now: afterTheTrial))
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
     /// A trial ends by the server saying so, and the one-speaker limit is what
     /// the user then meets, never the gate (2026-09-26). Red if the reason
     /// stopped being stored — the standing note cannot tell a spent trial from
@@ -283,5 +347,152 @@ import Testing
 
         settings.licenseKey = nil
         #expect(settings.licenseStatus == nil, "only a deleted key clears the verdict")
+    }
+
+    // MARK: The paid-licence mark
+
+    /// Red if an active answer without `kind` stops marking the Mac, which
+    /// would let a refunded buyer start a trial.
+    @Test func anActivePaidAnswerMarksTheMac() async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.key)","max_major":1}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.hasHeldPaidLicense)
+    }
+
+    /// Red if a live trial's answer marked the Mac as paid.
+    @Test func anActiveTrialAnswerDoesNotMarkTheMac() async {
+        let settings = settingsMidTrial()
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.key)","max_major":1,"kind":"trial","expires_at":"2027-01-29T08:00:00Z"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(!settings.hasHeldPaidLicense)
+    }
+
+    /// Red if a trial that converted stops counting as a paid licence.
+    @Test func aConvertedTrialMarksTheMac() async {
+        let settings = settingsMidTrial()
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.paidKey)","max_major":1}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.hasHeldPaidLicense)
+    }
+
+    /// Red if a refused key marked a Mac that never held it active, or a
+    /// refund cleared the mark.
+    @Test func aRevokedAnswerNeitherSetsNorClearsTheMark() async {
+        let revoked = #"{"status":"revoked","key":"\#(Self.key)","max_major":1,"reason":"refund"}"#
+
+        let fresh = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        fresh.licenseKey = Self.key
+        let first = Transport()
+        first.stub(status: 200, json: revoked)
+        #expect(await validate(fresh, first) == .verified(.revoked))
+        #expect(fresh.hasHeldPaidLicense == false)
+
+        let other = TestIsolation(owner: "LicenseValidatorTests.marked")
+        let marked = AppSettings(defaults: other.isolatedDefaults, licenseServerURL: Self.server)
+        marked.licenseKey = Self.key
+        marked.hasHeldPaidLicense = true
+        let second = Transport()
+        second.stub(status: 200, json: revoked)
+        #expect(await validate(marked, second) == .verified(.revoked))
+        #expect(marked.hasHeldPaidLicense == true)
+    }
+
+    /// Red if the port drifts from `src/keys.ts`, so the snapshot's key hash
+    /// stops matching the proof's `key_hash`.
+    @Test func canonicalKeyMatchesTheServersCanonicalizeKey() {
+        #expect(LicenseValidator.canonicalKey("audt-aaaaa-bbbbb-ccccc-ddddd") == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        #expect(LicenseValidator.canonicalKey("AUDT AAAAO BBBBI CCCCL DDDDD") == "AUDT-AAAA0-BBBB1-CCCC1-DDDDD")
+        #expect(LicenseValidator.canonicalKey("AUDTAAAAABBBBBCCCCCDDDDD") == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        #expect(LicenseValidator.canonicalKey("AUDT-AAAAA-BBBBB-CCCCC-DDDD") == nil)
+        #expect(LicenseValidator.canonicalKey("XUDT-AAAAA-BBBBB-CCCCC-DDDDD") == nil)
+        #expect(LicenseValidator.canonicalKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDU") == nil)
+    }
+
+    // MARK: Local price
+
+    private func fetchPrice(_ price: LocalPrice) async -> String? {
+        await withCheckedContinuation { continuation in
+            price.fetchOnce { continuation.resume(returning: $0) }
+        }
+    }
+
+    /// Red if the price request gains a country query, a licence key, a header
+    /// or a body, or stops reading `formatted` from the server's answer.
+    @Test func localPriceAsksPlainlyAndKeepsTheFormattedPrice() async {
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"country":"DE","currency":"EUR","total":"24.99","formatted":"€24.99"}"#)
+        let price = LocalPrice(settings: AppSettings(defaults: defaults, licenseServerURL: Self.server),
+                               transport: transport.closure)
+
+        #expect(await fetchPrice(price) == "€24.99")
+        #expect(price.formatted == "€24.99")
+        #expect(transport.requests.count == 1)
+        let request = transport.requests.first
+        #expect(request?.httpMethod == "GET")
+        #expect(request?.url?.absoluteString == "https://license.example.com/v1/price")
+        #expect(request?.url?.query == nil)
+        #expect(request?.httpBody == nil)
+        #expect(request?.allHTTPHeaderFields?.isEmpty ?? true)
+    }
+
+    /// Red if any reply other than a 200 carrying a short, printable
+    /// `formatted` string ends up shown as a price.
+    @Test(arguments: [
+        (400, #"{"error":"bad_country"}"#, nil),
+        (503, #"{"error":"unavailable"}"#, nil),
+        (200, #"{"currency":"EUR","total":"24.99"}"#, nil),
+        (200, #"{"formatted":24.99}"#, nil),
+        (200, #"{"formatted":""}"#, nil),
+        (200, #"{"formatted":"\#(String(repeating: "9", count: 25))"}"#, nil),
+        (200, #"{"formatted":"€24\n.99"}"#, nil),
+        (200, "€24.99", nil),
+        (nil, nil, nil),
+        (200, #"{"formatted":"\#(String(repeating: "9", count: 24))"}"#, String(repeating: "9", count: 24)),
+    ] as [(Int?, String?, String?)])
+    func localPriceAcceptsOnlyAValidFormattedString(status: Int?, body: String?, expected: String?) {
+        let response = status.flatMap {
+            HTTPURLResponse(url: Self.server, statusCode: $0, httpVersion: nil, headerFields: nil)
+        }
+        #expect(LocalPrice.formattedPrice(data: body.map { Data($0.utf8) }, response: response) == expected)
+    }
+
+    /// Red if `fetchOnce` asks the server more than once a launch, or a failed
+    /// answer frees the instance to ask again.
+    @Test func localPriceAsksOncePerLaunch() async {
+        let answered = Transport()
+        answered.stub(status: 200, json: #"{"formatted":"€24.99"}"#)
+        let price = LocalPrice(settings: AppSettings(defaults: defaults, licenseServerURL: Self.server),
+                               transport: answered.closure)
+        #expect(await fetchPrice(price) == "€24.99")
+        #expect(await fetchPrice(price) == "€24.99")
+        #expect(answered.requests.count == 1)
+
+        let failed = Transport()
+        failed.stub(status: 503, json: #"{"error":"unavailable"}"#)
+        let unpriced = LocalPrice(settings: AppSettings(defaults: defaults, licenseServerURL: Self.server),
+                                  transport: failed.closure)
+        #expect(await fetchPrice(unpriced) == nil)
+        #expect(await fetchPrice(unpriced) == nil)
+        #expect(failed.requests.count == 1)
+    }
+
+    /// Red if a build with no licence server asks anyone for a price.
+    @Test func localPriceWithNoLicenseServerAsksNothing() async {
+        let transport = Transport()
+        let price = LocalPrice(settings: AppSettings(defaults: defaults), transport: transport.closure)
+
+        #expect(await fetchPrice(price) == nil)
+        #expect(transport.requests.isEmpty)
     }
 }

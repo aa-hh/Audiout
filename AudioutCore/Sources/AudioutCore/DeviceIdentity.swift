@@ -11,6 +11,8 @@ import IOKit
 /// but sending it raw would hand the server a permanent, cross-app machine
 /// identifier, so only a hash of it leaves the Mac. The salt below is in
 /// public GPL source and hides nothing by itself — the hash does the hiding.
+/// ``LicenseCheckIn`` sends the same hash, so the server can refuse a trial to
+/// a Mac that has checked in with a paid key.
 public enum DeviceIdentity {
 
     private static let salt = "audiout-trial:"

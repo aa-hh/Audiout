@@ -41,12 +41,12 @@ extension SerializedEngineState {
         /// (a) Writes whose per-stream backlog stays under the cap all admit — no
         /// drops, and the tracked backlog grows by exactly the audio-time added.
         @Test func writesUnderCapAllAdmit() {
-            let guardUnit = WriteBacklogGuard(capSeconds: 1.0)
-            let add: Additions = [(streamId: 1, audioSeconds: 0.1)] // 100ms/write
+            let guardUnit = WriteBacklogGuard(capSeconds: 10)
+            let add: Additions = [(streamId: 1, audioSeconds: 1)] // 1 s/write
 
             for i in 1...9 {
                 #expect(guardUnit.admit(add), "write \(i) under cap must admit")
-                #expect(abs(guardUnit.inFlightSeconds(streamId: 1) - Double(i) * 0.1) <= 1e-9)
+                #expect(abs(guardUnit.inFlightSeconds(streamId: 1) - Double(i)) <= 1e-9)
             }
             #expect(guardUnit.snapshot().droppedWrites == 0, "nothing under the cap should drop")
         }
@@ -55,11 +55,11 @@ extension SerializedEngineState {
         /// false) and the drop is observable via the snapshot's dropped counter. The
         /// backlog is not grown by a dropped write.
         @Test func writeAtCapIsDroppedAndObservable() {
-            let guardUnit = WriteBacklogGuard(capSeconds: 0.1)
-            let add: Additions = [(streamId: 1, audioSeconds: 0.05)] // 50ms/write
+            let guardUnit = WriteBacklogGuard(capSeconds: 2)
+            let add: Additions = [(streamId: 1, audioSeconds: 1)] // 1 s/write
 
-            #expect(guardUnit.admit(add))  // 50ms
-            #expect(guardUnit.admit(add))  // 100ms == cap
+            #expect(guardUnit.admit(add))  // 1 s
+            #expect(guardUnit.admit(add))  // 2 s == cap
             let atCap = guardUnit.inFlightSeconds(streamId: 1)
 
             #expect(!guardUnit.admit(add), "a write for a stream at the cap must be dropped")
@@ -72,17 +72,17 @@ extension SerializedEngineState {
         /// trip. Once a briefly-congested stream drains back below the cap (a body
         /// actually RAN, i.e. `release`), the very next write admits again.
         @Test func capSelfHealsAfterDrain_notOneShot() {
-            let guardUnit = WriteBacklogGuard(capSeconds: 0.1)
-            let add: Additions = [(streamId: 1, audioSeconds: 0.05)]
+            let guardUnit = WriteBacklogGuard(capSeconds: 2)
+            let add: Additions = [(streamId: 1, audioSeconds: 1)]
 
-            #expect(guardUnit.admit(add))   // 50ms
-            #expect(guardUnit.admit(add))   // 100ms == cap
+            #expect(guardUnit.admit(add))   // 1 s
+            #expect(guardUnit.admit(add))   // 2 s == cap
             #expect(!guardUnit.admit(add))  // dropped
             #expect(!guardUnit.admit(add))  // still dropping while at the ceiling
             #expect(guardUnit.snapshot().droppedWrites == 2)
 
             // A body drains (release) -> backlog falls below the cap.
-            guardUnit.release(add)                // back to 50ms
+            guardUnit.release(add)                // back to 1 s
             #expect(guardUnit.inFlightSeconds(streamId: 1) < guardUnit.capSeconds)
 
             // ...and the stream accepts writes again with no further drop. This is the
@@ -98,8 +98,8 @@ extension SerializedEngineState {
         /// stream. Guards against a subtle one-shot the "would exceed after adding"
         /// formulation would introduce.
         @Test func oversizedSingleWriteNeverPermanentlyWedges() {
-            let guardUnit = WriteBacklogGuard(capSeconds: 0.1)
-            let big: Additions = [(streamId: 1, audioSeconds: 0.5)] // 5x the cap in one write
+            let guardUnit = WriteBacklogGuard(capSeconds: 1)
+            let big: Additions = [(streamId: 1, audioSeconds: 5)] // 5x the cap in one write
 
             #expect(guardUnit.admit(big), "an empty stream must admit even an oversized write")
             #expect(!guardUnit.admit(big), "now over cap -> drop")
@@ -110,9 +110,9 @@ extension SerializedEngineState {
         /// A stalled stream at the cap must NOT block writes for an unrelated stream:
         /// per-stream isolation, the reason the guard keys on `streamId`.
         @Test func perStreamIsolation() {
-            let guardUnit = WriteBacklogGuard(capSeconds: 0.1)
-            let s1: Additions = [(streamId: 1, audioSeconds: 0.1)] // fills stream 1 to the cap
-            let s2: Additions = [(streamId: 2, audioSeconds: 0.05)]
+            let guardUnit = WriteBacklogGuard(capSeconds: 2)
+            let s1: Additions = [(streamId: 1, audioSeconds: 2)] // fills stream 1 to the cap
+            let s2: Additions = [(streamId: 2, audioSeconds: 1)]
 
             #expect(guardUnit.admit(s1))    // stream 1 at cap
             #expect(!guardUnit.admit(s1), "stream 1 is at the cap -> dropped")
@@ -120,14 +120,14 @@ extension SerializedEngineState {
             // Stream 2 is untouched by stream 1's congestion.
             #expect(guardUnit.admit(s2), "an unrelated stream must not be blocked by a stalled one")
             #expect(guardUnit.admit(s2))
-            #expect(abs(guardUnit.inFlightSeconds(streamId: 2) - 0.1) <= 1e-9)
+            #expect(abs(guardUnit.inFlightSeconds(streamId: 2) - 2) <= 1e-9)
         }
 
         /// Balanced admit/release returns the backlog to exactly zero and PRUNES the
         /// stream from the tracking dictionary (so it stays bounded by active streams).
         @Test func balancedAdmitReleaseReturnsToZeroAndPrunes() {
-            let guardUnit = WriteBacklogGuard(capSeconds: 5.0)
-            let add: Additions = [(streamId: 7, audioSeconds: 0.05)]
+            let guardUnit = WriteBacklogGuard(capSeconds: 20)
+            let add: Additions = [(streamId: 7, audioSeconds: 1)]
 
             for _ in 0..<10 { #expect(guardUnit.admit(add)) }
             #expect(guardUnit.snapshot().streamsTracked == 1)
@@ -142,33 +142,33 @@ extension SerializedEngineState {
         /// admitted or dropped as a UNIT: if any one of its streams is at the cap, the
         /// whole call is dropped (a phase-aligned batch can't be partially delivered).
         @Test func batchAdmittedOrDroppedAsAUnit() {
-            let guardUnit = WriteBacklogGuard(capSeconds: 0.1)
+            let guardUnit = WriteBacklogGuard(capSeconds: 5)
 
             // Push stream 2 to the cap on its own.
-            #expect(guardUnit.admit([(streamId: 2, audioSeconds: 0.1)]))
+            #expect(guardUnit.admit([(streamId: 2, audioSeconds: 5)]))
 
             // A batch touching streams 1, 2, 3 must be dropped because stream 2 is full
             // — and streams 1 and 3 must NOT have been charged for the dropped batch.
             let batch: Additions = [
-                (streamId: 1, audioSeconds: 0.02),
-                (streamId: 2, audioSeconds: 0.02),
-                (streamId: 3, audioSeconds: 0.02),
+                (streamId: 1, audioSeconds: 1),
+                (streamId: 2, audioSeconds: 1),
+                (streamId: 3, audioSeconds: 1),
             ]
             #expect(!guardUnit.admit(batch), "a batch with any at-cap stream is dropped as a unit")
             #expect(guardUnit.inFlightSeconds(streamId: 1) == 0, "an under-cap member of a dropped batch is not charged")
             #expect(guardUnit.inFlightSeconds(streamId: 3) == 0)
 
             // With stream 2 drained, the same batch now admits and charges every member.
-            guardUnit.release([(streamId: 2, audioSeconds: 0.1)])
+            guardUnit.release([(streamId: 2, audioSeconds: 5)])
             #expect(guardUnit.admit(batch))
-            #expect(abs(guardUnit.inFlightSeconds(streamId: 1) - 0.02) <= 1e-9)
-            #expect(abs(guardUnit.inFlightSeconds(streamId: 3) - 0.02) <= 1e-9)
+            #expect(abs(guardUnit.inFlightSeconds(streamId: 1) - 1) <= 1e-9)
+            #expect(abs(guardUnit.inFlightSeconds(streamId: 3) - 1) <= 1e-9)
         }
 
         /// `reset()` clears backlog, dropping-state, and counters (fresh session).
         @Test func resetClearsEverything() {
-            let guardUnit = WriteBacklogGuard(capSeconds: 0.1)
-            let add: Additions = [(streamId: 1, audioSeconds: 0.1)]
+            let guardUnit = WriteBacklogGuard(capSeconds: 1)
+            let add: Additions = [(streamId: 1, audioSeconds: 1)]
             #expect(guardUnit.admit(add))
             #expect(!guardUnit.admit(add)) // one drop recorded, stream at cap
 
@@ -267,7 +267,11 @@ extension SerializedEngineState {
             // Write to the saturated stream 1 (dropped) and the free stream 2 (lands).
             engine.write(pcm: pcm(samples: 100), streamId: 1, pts: pts)
             engine.write(pcm: pcm(samples: 40), streamId: 2, pts: pts)
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            // Headless bodies run inline and in call order, so once stream 2's
+            // later write has landed, stream 1's earlier one has had its chance.
+            await SuiteWait.until("stream 2's write to reach the fan-out") {
+                airplay_test_master_session_input_buffer_samples(ams2) >= 40
+            }
 
             #expect(airplay_test_master_session_input_buffer_samples(ams1) == 0,
                        "a write for a stream at the cap must be dropped before the fan-out")

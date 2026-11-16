@@ -32,6 +32,9 @@ if [ "$(git symbolic-ref -q --short HEAD || true)" = main ]; then
     fi
     if git merge -q --ff-only origin/main 2>/dev/null; then
         echo "sync-main: main -> $(git rev-parse --short HEAD)"
+        # Gitignored internal docs the fast-forward deleted come back from
+        # history; they are meant to stay on this Mac.
+        bash scripts/restore-internal-docs.sh >/dev/null 2>&1 || true
     else
         echo "sync-main: left main alone: it has commits origin/main lacks" >&2
     fi

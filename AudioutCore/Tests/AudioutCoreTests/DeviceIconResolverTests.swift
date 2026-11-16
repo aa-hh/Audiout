@@ -57,6 +57,31 @@ import Testing
         #expect(controller.symbolName(for: device) == Device.Kind.homePod.symbolName)
     }
 
+    /// Turns red if a HomePod mini stops drawing its own glyph, if a full-size
+    /// HomePod or a HomePod with a missing or unrecognised model is drawn as a
+    /// mini, or if the mini glyph stops resolving on this AppKit.
+    @Test func aHomePodMiniDrawsItsOwnGlyphOnlyForItsModelCode() {
+        func glyph(_ model: String?) -> String {
+            Device(id: "h", name: "Kitchen", kind: .homePod, model: model).symbolName
+        }
+        #expect(glyph("AudioAccessory5,1") == "homepodmini.fill")
+        #expect(glyph("AudioAccessory1,1") == "homepod.fill")
+        #expect(glyph("AudioAccessory6,1") == "homepod.fill")
+        #expect(glyph(nil) == "homepod.fill")
+        #expect(glyph("SomethingElse9,9") == "homepod.fill")
+        #expect(DeviceIcon.isValid("homepodmini.fill"))
+    }
+
+    /// Turns red if the HomePod mini's model-derived glyph starts beating the
+    /// user's own icon choice.
+    @Test func anOverrideBeatsTheHomePodMiniGlyph() {
+        let controller = DeviceIconController(store: DeviceIconStore(directory: directory), loadPersisted: false)
+        let device = Device(id: "mini", name: "Kitchen", kind: .homePod, model: "AudioAccessory5,1")
+        #expect(controller.symbolName(for: device) == "homepodmini.fill")
+        controller.setSymbolName("airpods", for: device.id)
+        #expect(controller.symbolName(for: device) == "airpods")
+    }
+
     @Test func setSymbolNamePersistsAndResolves() {
         let store = DeviceIconStore(directory: directory)
         let controller = DeviceIconController(store: store, loadPersisted: false)

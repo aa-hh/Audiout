@@ -118,12 +118,15 @@ let package = Package(
         // Offscreen PNG renderer for the alignment-wizard window (v2 visual
         // verification). Run: `swift run wizard-snapshot [output-dir]`.
         .executable(name: "wizard-snapshot", targets: ["wizard-snapshot"]),
-        // Opens the real first-open licence gate and nothing else — no
-        // backend, no permissions, no network. The one surface a snapshot
-        // tool CANNOT stand in for: its ground is a live Metal shader, and
-        // Metal is off under `HeadlessRuntime`, so an offscreen render of this
-        // window is a flat colour. Run: `swift run license-gate-preview`.
+        // Opens the real one surface with the first-open licence gate over a
+        // mock fleet — no real backend, no permissions, no network — so the
+        // gate can be clicked through on screen. Run:
+        // `swift run license-gate-preview`.
         .executable(name: "license-gate-preview", targets: ["license-gate-preview"]),
+        // A window listing the shared AppKit components and the screens, each
+        // shown as the real view over the mock fleet. Run:
+        // `AUDIOUT_RUN_PRODUCT=component-catalog bash scripts/run-app.sh`.
+        .executable(name: "component-catalog", targets: ["component-catalog"]),
         // Silent read-only Core Audio diagnostic for enumerating process objects and
         // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
         .executable(name: "core-audio-diagnostic", targets: ["core-audio-diagnostic"]),
@@ -164,7 +167,7 @@ let package = Package(
         // protocol — CompanionServer / CompanionSnapshotBuilder /
         // CompanionCommandDispatcher are the consumers) and AudioutField (the
         // emitter field's numbers, which the marketing site's shader reads
-        // from the same file — `EmitterFieldView` is its consumer here). MIT,
+        // from the same file — `SettledLightLayer` is its consumer here). MIT,
         // so the closed-source iPhone companion can link the same code, and a
         // repository of its own because SwiftPM cannot depend on a package
         // that lives inside a subdirectory of another repo — and the phone
@@ -178,9 +181,29 @@ let package = Package(
         // whitens the passive-drift correlation, makes a peak clear two more
         // gates before it counts (its height over the nearest rival lag, and
         // its score against the lags right around it), votes four sub-bands,
-        // and lets each speaker own its own peak inside a shared search window.
+        // and lets each speaker own its own peak inside a shared search window;
+        // 0.18.0 added the `submitSpeakerPassword` command and the failure
+        // cause and `credentialKind` on `ConnectionInfo`; 0.19.0 adds the
+        // speaker's `access` kind to `ConnectionInfo`, which
+        // `CompanionSnapshotBuilder` fills so the phone draws the same lock the
+        // Mac does; 0.20.0 adds per-speaker Mixer visibility, missing speakers,
+        // the note slot, and the `setSpeakerVisibility`/`forgetSpeakers`
+        // commands; 0.21.0 replaces the two sweeps with one glide probe both
+        // speakers play in turn (`SyncProbe.Layout`, ADR 0002 there); 0.22.0
+        // carries the room delay on `alignmentProbeStarted`; 0.23.0 each
+        // speaker's total delay; 0.24.0 and 0.25.0 the Mac app version and the
+        // speaker's product model in the snapshot; 0.26.0 is protocol version 2
+        // (TLS, the phone's signed `hello`, `CompanionPairing`); 0.27.0 adds
+        // `hello`'s optional `checksPairingCode`; 0.28.0 adds the `removed`
+        // goodbye reason; 0.29.0 adds the run's `referenceID` on
+        // `startAlignmentProbe`/`setAlignmentTick` and the snapshot's
+        // `referenceCandidateIDs`; 0.30.0 is protocol version 3 (no pairing
+        // window, `awaitingApproval`'s `screenLocked`, the `pairingPaused`
+        // goodbye); 0.31.0 adds `prepareAlignmentProbe`; 0.32.0 the Mac model code in the
+        // Bonjour record; 0.33.0 the Mac's licence state on the snapshot and
+        // `commandResult`'s refusal code.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 from: "0.19.0"),
+                 from: "0.33.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
@@ -241,7 +264,8 @@ let package = Package(
             // compiles it into `Contents/Resources/Assets.car` instead, beside
             // the wordmark font, and the app reads it through `Bundle.main`.
             exclude: ["Resources/Symbols.xcassets"],
-            resources: [.copy("Resources/Audiout-Hero-1024.svg")],
+            resources: [.copy("Resources/Audiout-Hero-1024.svg"),
+                        .copy("Resources/Audiout-Remote-QR.pdf")],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit popover dropdown (SPEC §9 revised — NSMenu → NSPopover):
@@ -300,13 +324,7 @@ let package = Package(
             name: "AudioutOnboardingUI",
             // AudioutSharedUI: the Tokens design-token layer (Wave 2 of the
             // Warm Signal redesign) — onboarding styles through Tokens.* now.
-            // AudioutField: the emitter field's shared numbers, which
-            // `EmitterFieldView` generates its Metal shader from rather than
-            // retyping them (the licence gate's ground).
-            dependencies: [
-                "AudioutCore", "AudioutSharedUI",
-                .product(name: "AudioutField", package: "audiout-shared"),
-            ],
+            dependencies: ["AudioutCore", "AudioutSharedUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Pure AppKit (SPEC §9). The app shell (status item, backend wiring,
@@ -345,7 +363,10 @@ let package = Package(
         // verification) — see the product comment above.
         .executableTarget(
             name: "popover-snapshot",
-            dependencies: ["AudioutCore", "AudioutPopoverUI", "AudioutSharedUI"],
+            // AudioutOnboardingUI + AudioutSettingsUI: the `license-gate`
+            // scene renders the real surface with the gate over it.
+            dependencies: ["AudioutCore", "AudioutPopoverUI", "AudioutSharedUI",
+                           "AudioutOnboardingUI", "AudioutSettingsUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the Settings window — see the product
@@ -373,7 +394,15 @@ let package = Package(
         // above.
         .executableTarget(
             name: "license-gate-preview",
-            dependencies: ["AudioutCore", "AudioutOnboardingUI"],
+            dependencies: ["AudioutCore", "AudioutOnboardingUI", "AudioutPopoverUI",
+                           "AudioutSettingsUI", "AudioutSharedUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
+        ),
+        // Component catalog — see the product comment above.
+        .executableTarget(
+            name: "component-catalog",
+            dependencies: ["AudioutCore", "AudioutOnboardingUI", "AudioutPopoverUI",
+                           "AudioutSettingsUI", "AudioutSharedUI", "AudioutWindowUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the mixer window (group-creation design

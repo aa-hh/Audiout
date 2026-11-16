@@ -34,7 +34,7 @@ the model, never the reverse.
 - [AudioutCore](Sources/AudioutCore/AGENTS.md) → model and backends
 - [AudioutSharedUI](Sources/AudioutSharedUI/AGENTS.md) → shared row views
 - [AudioutPopoverUI](Sources/AudioutPopoverUI/AGENTS.md) → menu-bar popover
-- [AudioutWindowUI](Sources/AudioutWindowUI/AGENTS.md) → Groups screen
+- [AudioutWindowUI](Sources/AudioutWindowUI/AGENTS.md) → Scenes, Speakers
 - [AudioutSettingsUI](Sources/AudioutSettingsUI/AGENTS.md) → Settings screen
 - [AudioutOnboardingUI](Sources/AudioutOnboardingUI/AGENTS.md) → Setup window
 - [AudioutApp](Sources/AudioutApp/AGENTS.md) → shipping executable

@@ -186,6 +186,23 @@ final class CompletionRegistry: @unchecked Sendable {
         return waiters[callbackId] != nil
     }
 
+    /// Test-only: reschedule `callbackId`'s armed timeout timer to fire now,
+    /// so a test drives the real timer path without waiting out the timeout.
+    /// Returns `false` when no timer is armed for `callbackId`.
+    func expireTimeoutForTest(callbackId: Int32) -> Bool {
+        lock.lock()
+        let timer = waiters[callbackId]?.timer
+        lock.unlock()
+        timer?.schedule(deadline: .now(), repeating: .never)
+        return timer != nil
+    }
+
+    /// Test-only: run the timeout handler for `callbackId` the way a timer
+    /// firing late would.
+    func fireTimeoutForTest(callbackId: Int32) {
+        fireTimeout(callbackId: callbackId)
+    }
+
     /// Drop a waiter without delivering, cancelling, or timing out (used if arming
     /// an op is aborted before the backend was invoked — the caller resolves it
     /// directly). Cancels the timeout timer so it can't fire for a spent id.

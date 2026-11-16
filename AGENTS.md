@@ -76,7 +76,7 @@ closed-source iPhone app links the same code, and a repository of its own
 because SwiftPM cannot depend on a package inside a subdirectory of another
 repo. `AudioutCore` pins it by version.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for
-  research briefs and phase write-ups.
+  research briefs and phase write-ups, kept in the main checkout only (gitignored, never on GitHub).
 - [scripts/make-app.sh](scripts/make-app.sh) — wraps the executable into a real
   `.app` with a stable bundle id, signed with a Developer ID identity when one
   is present in the keychain (auto-detected, override with `CODESIGN_IDENTITY`),
@@ -94,7 +94,6 @@ repo. `AudioutCore` pins it by version.
   as failed unless you check its actual exit code, never a file-freshness
   heuristic.
 - [docs/SPEC.md](docs/SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
-- `docs/plans/PLAN-*.md` — the phased execution plans and their resolved decisions.
 
 ## Rules (all targets)
 
@@ -111,16 +110,19 @@ repo. `AudioutCore` pins it by version.
   `AirPlayEngine/docs/VENDORED-DIFFS.md` with license, rationale and hunk.
 - **UI targets depend on the model, never the reverse.** The
   `AudioutCore` library target imports no AppKit, and that is verified.
-- **The iPhone companion is switched off at the build level** until Audiout
-  Remote is approved: `AppSettings.remoteAppIsOffered`. Everything that names
-  the phone app reads the resolution it feeds — the Setup card, the Settings
-  switch with its QR row and phone list, the alignment wizard's iPhone panel,
-  and the companion server itself. A NEW surface mentioning the phone must ask
-  it too, or a release ships an invitation to an app nobody can download.
-  `AUDIOUT_COMPANION=on` still overrides it, which is how a dev build tests
-  against a TestFlight phone.
+- **Every build runs the iPhone companion server, but shows the phone app only
+  when `app-config.json` says so.** `AppSettings.remoteAppIsOffered` is `true`,
+  so the server follows the Allow switch as before. Everything that names the
+  phone app — the Setup card, the Settings › Audiout Remote section, the
+  alignment wizard's iPhone link, the licence gate's phone line — asks
+  `AppSettings.remoteAppIsVisible(settings:)` instead, which is true only for
+  `"mac": {"remote": {"visible": true}}` in the website's file, a dev build, or
+  `AUDIOUT_COMPANION=on`. A NEW surface mentioning the phone must ask it too. A
+  dev build (bundle id `com.audiout.Audiout.<suffix>`) has the Settings switch
+  defaulting OFF; `AUDIOUT_COMPANION=on`/`off` still overrides everything.
 - **Read `dev/notes/` before a non-trivial phase** — briefs exist to de-risk work
-  before it starts.
+  before it starts. They live in the main checkout only, so a worktree reads them
+  at `~/Projects/AirPlay Controller/dev/notes/`.
 - **"Does this code exist anywhere?" needs more than `git grep`.**
   `git rev-list --all` and `git grep <branch>` cannot see unreachable commits or
   other worktrees' uncommitted work — a dropped stash once made a shipped feature
@@ -157,13 +159,45 @@ repo. `AudioutCore` pins it by version.
      just wrote. One review found six in a single day's work; they read as
      coverage and cover nothing. If the intent is real, rewrite it to read the
      DRAWN or observed result.
+  5. A test that waits for time drives the backend's `uptimeClock`/`delayClock`
+     through `ManualDelayClock.advance(by:)`, never the wall clock. Guard 11
+     refuses sleeps, `asyncAfter`, `SuiteWait.settle(`, every `.wait(timeout:`
+     and fractional-second Timeout/Delay/Deadline/Interval/Grace/Window/Seconds
+     values; a hang ceiling is a valid `real-time-ok:` reason.
+- **How a test waits without the wall clock.** Each case has one helper:
+  1. When the delay is a background queue rather than a timer, wait for the
+     event with `pollUntil` or `SuiteWait.until`. Both return the moment the
+     condition holds; the 120 s ceiling only bites when it never does. The
+     test telemetry sink delivers on its own queue, so wait for a log line
+     before reading it.
+  2. `ManualDelayClock` runs fired jobs on the caller's thread. When the job
+     touches state owned by `stateQueue`, `captureControlQueue` or main, pass
+     its `queueHoppingClock` instead of `clock`.
+  3. A fake engine call has finished only when `opsInFlight(for:)` reads 0,
+     not when its side effects show.
+  4. Drain a queue that holds a lock before acting on what it guards, as
+     `test_waitForPendingRebuild()` drains the Bluetooth sink's graph queue.
+  5. UI timers do not run in tests: they check `HeadlessRuntime.isActive`.
+  6. When real-time timing is the thing under test, keep it real and mark the
+     line `// real-time-ok: <reason>`; never fake it.
+- **Touching code a real-time test drives means fixing that test.** When a
+  change edits production code that a test still exercises through the real
+  clock (a line Guard 11 would refuse today, or one carrying `real-time-ok:`),
+  the same PR converts that test to the helpers above. If that is out of
+  scope, add a roadmap entry naming the test (file:line), its wait, and the
+  code that drives it:
+  `echo '{"title":"...","why":"...","what":"...","source":"claude-suggested","status":"planned"}' | node ~/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js add`.
+  Never hand-edit `ROADMAP.jsonl`. `bash scripts/real-time-tests.sh <changed
+  source files>` lists those tests' waits: it matches the types the files
+  declare at top level against test files, so read each hit before acting.
+  `bash scripts/test-real-time-tests.sh` tests it.
 - **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
   worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
   `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`
   and `scripts/make-app.sh` whenever a build starts) does two things: it
   removes any worktree whose root contains a `.prunable` marker — but only if
-  it is clean, unreferenced by any running process, and its HEAD is merged
-  into `main` or pushed — and it sweeps build caches machine-wide. What counts
+  it is clean, holds no gitignored internal docs, is unreferenced by any
+  running process, and its HEAD is merged into `main` or pushed — and it sweeps build caches machine-wide. What counts
   as a cache: every `.build` under any checkout (found by search, so the
   spike packages under `dev/` are included, not just the three top-level
   ones), plus Xcode's own `iOS DeviceSupport` and `DerivedData` directories,
@@ -189,9 +223,12 @@ repo. `AudioutCore` pins it by version.
   Mule pool (remote M3 Air): `git config audiout.remoteSlots` (set to 2).
   Entry points: `scripts/run-tests.sh`, `scripts/build.sh`, `scripts/make-app.sh`,
   `scripts/ios.sh`, `scripts/run-app.sh`, and pre-commit Guard 6 all acquire a
-  permit before work starts. Mule-full falls back to local at once (no wait).
-  Local-full waits up to 600s, printing progress; ceiling reached → proceeds
-  uncapped with a loud warning (never refuses). Sweep on acquire reclaims stale
+  permit before work starts. A full suite run on the mule takes one permit per
+  shard (up to three). Mule-full falls back to local at once (no wait).
+  Local-full waits up to 1800s, printing progress; ceiling reached → proceeds
+  uncapped with a loud warning (never refuses). While it waits, a build or test
+  run checks the mule once a minute and moves there if a mule permit frees
+  first (build.sh and run-tests.sh only). Sweep on acquire reclaims stale
   permits (dead holder, unrecognised job, or held >45 min). `bash scripts/capacity.sh status`
   shows local and mule permits; `bash scripts/test-capacity.sh` self-tests the pool.
 - **A green run is reused, not repeated.** `run-tests.sh` stamps each pass by
@@ -232,14 +269,15 @@ repo. `AudioutCore` pins it by version.
   human can enter the password. Never `--apply` while a live Audiout session is
   actively streaming: it unloads the running helper too. It only ever touches
   `*.ptphelper` jobs. `--keep <label>` spares one exact label.
-- **Uninstall dead hand-off builds with `scripts/purge-dev-installs.sh`.** The
-  one-bundle-id-per-build rule above is correct and stays, but each throwaway id
-  leaves permanent residue that trashing the `.app` does not remove: a
+- **Uninstall dead hand-off builds with `scripts/purge-dev-installs.sh`.** Each
+  throwaway id leaves permanent residue that trashing the `.app` does not remove: a
   preferences domain, TCC grants (a dead row in System Settings › Privacy &
   Security forever), a PUBLIC aggregate audio device that keeps appearing in
-  Sound settings, and a root PTP-helper daemon. This script finds every
-  non-shipping `com.audiout.*` identity across all four surfaces, unions
-  them, and removes the lot — plus the preference domains leaked by the test
+  Sound settings, a root PTP-helper daemon, and, in the login keychain, a stored
+  AirPlay speaker password plus the licence key and companion token under
+  `<bundle id>.license`. This script finds every non-shipping
+  `com.audiout.*` identity across all five surfaces, unions them, and removes
+  the lot — plus the preference domains leaked by the test
   suites (`swift test` creates a per-test `UserDefaults` suite and never
   removes it; this had reached **48,769 plists**, 98% of everything in
   `~/Library/Preferences`). Dry-run by default; `--apply` to act. The shipping
@@ -295,7 +333,11 @@ queues the PR to land on its own once both are green, which is why it waits for
 the owner's yes. The merge-approval hook asks on `gh pr merge` either way.
 
 **Do not work in the `main` checkout at all.** Merely *editing* it starts the
-accident, even if you never commit.
+accident, even if you never commit. The one exception is the gitignored internal
+docs (handoffs, `.scratch/`, `dev/notes/`, `docs/plans/`, `docs/notes/`): write
+those in the main checkout, because an ignored file in a worktree dies with it.
+Only the main session writes there; a subagent cannot write outside its
+worktree, so it returns the text to the session that started it.
 
 **If you find uncommitted edits in the `main` checkout that are in your way:
 stop and ask.** Never `reset --hard` / `checkout --` / `stash` them away. They
@@ -334,7 +376,12 @@ warn-only 3/5) are documented in the hook file itself:
   [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md)).
 - **Guard 11 blocks** a commit whose new `@Test` has no comment sentence naming
   the code change that turns it red, a `print(` in a test (`print-ok` exempts),
-  or a new test file holding one test (`new-suite-ok` exempts);
+  a new test file holding one test (`new-suite-ok` exempts), or a real-time
+  wait in a test (`Task.sleep`, `Thread.sleep`, `usleep`, `sleep(`,
+  `asyncAfter`, `SuiteWait.settle(`, any `.wait(timeout:`, or a
+  Timeout/Delay/Deadline/Interval/Grace/Window/Seconds value set to a fraction
+  of a second; `real-time-ok: <reason>` exempts a line, and a hang ceiling is a
+  reason);
   `bash scripts/test-guard-test-discipline.sh` self-tests it.
 - **Guard 12 blocks** a folder AGENTS.md that gains ruling phrasing or grows
   while over its 300-word budget, and any removed line in an AGENTS-HISTORY.md;
@@ -396,7 +443,7 @@ This app must feel like a native macOS citizen, not a cross-platform port.
   dot, meter, bus control, fader skin, shell bubble fill) the design authority
   is `DESIGN.md` at the repo root once the 2026-09-03 migration lands it, and
   until then the iPhone companion's `DESIGN.md` (`aa-hh/audiout-remote`) plus
-  `dev/notes/design-migration-scoping/01-decisions.md`. `dev/notes/warm-signal-v3.md`
+  `docs/design-migration-decisions.md`. `docs/warm-signal-v3.md`
   is the historical spec, not the authority. Stock AppKit behavior, controls,
   and accessibility remain mandatory regardless: the design record governs
   paint, not interaction model.
@@ -415,7 +462,7 @@ This app must feel like a native macOS citizen, not a cross-platform port.
   2. All custom color lives in `Tokens` and nowhere else.
   3. Every `Tokens.Color` case ships light + dark + Increase Contrast variants
      with a documented contrast rationale.
-  4. Warm Signal spec (`dev/notes/warm-signal-v3.md`) governs the sanctioned
+  4. Warm Signal spec (`docs/warm-signal-v3.md`) governs the sanctioned
      custom pieces; Control Center is no longer the reference.
   5. SF Symbols, template-rendered, for every glyph.
   6. Respect Reduce Motion, Increase Contrast, Reduce Transparency.

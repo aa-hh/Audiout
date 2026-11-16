@@ -184,4 +184,33 @@ import AppKit
         #expect(abs(iconMidY - visibleMidY(button)) <= 0.5, "icon and button share one centre")
         #expect(abs(iconMidY - visibleMidY(link)) <= 0.5, "icon and text action share one centre")
     }
+
+    /// Red if an info or question banner's button stopped being the gold
+    /// call to action, or if a warning banner's button turned gold on the
+    /// failure tint.
+    @Test(arguments: [(SystemAirPlayNoteBannerView.Severity.info, true),
+                      (.question, true),
+                      (.warning, false)])
+    func onlyNonWarningBannersWearTheGoldButton(severity: SystemAirPlayNoteBannerView.Severity, gold: Bool) {
+        let banner = SystemAirPlayNoteBannerView(
+            text: "Note", maxTextWidth: 400,
+            action: .init(title: "Answer", accessibilityLabel: "Answer", handler: {}),
+            severity: severity)
+        #expect((banner.test_actionButton is ProminentButton) == gold)
+    }
+
+    /// Red if a one-line info banner with its gold button shrank below the
+    /// library's 44 pt, or if the gold went back to the automatic tint that
+    /// macOS 26+ draws as a dark olive.
+    @Test func anInfoBannersGoldButtonMatchesTheLibrary() {
+        let banner = SystemAirPlayNoteBannerView(
+            text: "What’s missing from Audiout? Two quick questions.", maxTextWidth: 600,
+            action: .init(title: "Answer", accessibilityLabel: "Answer", handler: {}),
+            severity: .question)
+        #expect(banner.fittingSize.height >= 44)
+        #expect(banner.test_actionButton?.controlSize == .large)
+        if #available(macOS 26.0, *) {
+            #expect(banner.test_actionButton?.tintProminence == .primary)
+        }
+    }
 }

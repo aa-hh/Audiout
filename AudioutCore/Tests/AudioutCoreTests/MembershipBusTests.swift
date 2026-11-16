@@ -49,7 +49,8 @@ import AudioutCore
         let row = makeBusRow()
         // Even a held (selected) membership renders hollow while unavailable —
         // the device is not currently in the mix (matrix §3.6 "Unavailable").
-        row.apply(makeDevice(isAvailable: false), selected: true)
+        // .off on purpose: a connected-but-undiscovered device is a live Cast session and renders live.
+        row.apply(makeDevice(connectionState: .off, isAvailable: false), selected: true)
         #expect(row.test_busNode == .nonMember, "an unavailable device's node is hollow")
         // The dim flag rides along; it reaches only a FILL, and a hollow node
         // has none — the rim is the rail's and stays ember.
@@ -254,7 +255,7 @@ import AudioutCore
 
     @Test func rowHoverNeverResizesADisabledCheckbox() {
         let row = makeBusRow()
-        row.apply(makeDevice(isAvailable: false), selected: false)
+        row.apply(makeDevice(connectionState: .off, isAvailable: false), selected: false)
         row.test_setHovered(true)
         #expect(!row.test_nodePreviewsClick, "never preview a click the checkbox would refuse")
     }

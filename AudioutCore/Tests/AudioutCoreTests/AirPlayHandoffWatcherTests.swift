@@ -89,12 +89,15 @@ import Testing
     @Test("start() twice is idempotent")
     func startTwiceIsIdempotent() async {
         let fake = FakeLogStream()
+        let manual = ManualDelayClock()
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: {}
+            onBlockedAttempt: {},
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
@@ -106,23 +109,24 @@ import Testing
     @Test("matching line fires onBlockedAttempt once")
     func matchingLineFiresOnBlockedAttemptOnce() async {
         let fake = FakeLogStream()
+        let manual = ManualDelayClock()
         var fireCount = 0
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: { fireCount += 1 }
+            onBlockedAttempt: { fireCount += 1 },
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
-        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms for async setup
 
         let line = """
         {"subsystem":"com.apple.airplay","category":"APSNetworkClockPTP","eventMessage":"Failed to add peer: kIOReturnExclusiveAccess"}
         """
         fake.pushLine(line)
-        await SuiteWait.until("the watcher to fire for the pushed line") { fireCount >= 1 }
 
         #expect(fireCount == 1)
     }
@@ -130,29 +134,24 @@ import Testing
     @Test("rate limiting: two lines within window fires once")
     func rateLimitingTwoLinesWithinWindowFiresOnce() async {
         let fake = FakeLogStream()
+        let manual = ManualDelayClock()
         var fireCount = 0
-        // Wide window (R4 #5): pushes land ~10ms apart against a 2s window, so
-        // even heavy suite-contention oversleep cannot push the second line past
-        // the limit and flip the expectation (Task.sleep only ever oversleeps).
+        // The manual clock never moves, so the two pushes are 0 s apart against a 2 s window.
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 2.0,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: { fireCount += 1 }
+            onBlockedAttempt: { fireCount += 1 },
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
-        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
 
         let line = """
         {"subsystem":"com.apple.airplay","category":"APSNetworkClockPTP","eventMessage":"Failed to add peer: kIOReturnExclusiveAccess"}
         """
-        // NO await between the two pushes: pushLine→handleLine→callback is fully
-        // synchronous, and any Task.sleep here can stretch past ANY finite window
-        // under full-suite load (found live: a "10ms" sleep exceeded the window
-        // and double-fired). Back-to-back pushes land microseconds apart —
-        // deterministic against a 2s window regardless of machine load.
         fake.pushLine(line)
         fake.pushLine(line)
 
@@ -162,30 +161,26 @@ import Testing
     @Test("rate limiting: third line after window fires second")
     func rateLimitingThirdLineAfterWindowFiresSecond() async {
         let fake = FakeLogStream()
+        let manual = ManualDelayClock()
         var fireCount = 0
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: { fireCount += 1 }
+            onBlockedAttempt: { fireCount += 1 },
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
-        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
 
         let line = """
         {"subsystem":"com.apple.airplay","category":"APSNetworkClockPTP","eventMessage":"Failed to add peer: kIOReturnExclusiveAccess"}
         """
-        let firstPush = ProcessInfo.processInfo.systemUptime
         fake.pushLine(line)
         fake.pushLine(line) // back-to-back: within window by construction, ignored
-        // Cross the window against the SAME monotonic clock the limiter reads —
-        // sleeping a fixed interval is load-dependent in both directions, but
-        // "loop until the clock says the window has provably elapsed" cannot lie.
-        while ProcessInfo.processInfo.systemUptime - firstPush < 0.25 { // rateLimit 0.15 + margin
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
+        manual.advance(by: 0.25) // past rateLimit 0.15, on the clock the limiter reads
         fake.pushLine(line) // outside window, should fire (synchronous)
 
         #expect(fireCount == 2)
@@ -194,23 +189,24 @@ import Testing
     @Test("non-matching lines fire nothing")
     func nonMatchingLinesFireNothing() async {
         let fake = FakeLogStream()
+        let manual = ManualDelayClock()
         var fireCount = 0
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: { fireCount += 1 }
+            onBlockedAttempt: { fireCount += 1 },
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
-        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
 
         let benignLine = """
         {"subsystem":"com.apple.airplay","category":"APSNetworkClockPTP","eventMessage":"[0xB198] APSNetworkClock PTP started"}
         """
         fake.pushLine(benignLine)
-        try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
 
         #expect(fireCount == 0)
     }
@@ -218,16 +214,18 @@ import Testing
     @Test("stop() calls spawn.stop()")
     func stopCallsSpawnStop() async {
         let fake = FakeLogStream()
+        let manual = ManualDelayClock()
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: {}
+            onBlockedAttempt: {},
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
-        await SuiteWait.until("the watcher's log stream to start") { fake.startCallCount >= 1 }
 
         watcher.stop()
 
@@ -237,25 +235,25 @@ import Testing
     @Test("line after stop() fires nothing")
     func lineAfterStopFiresNothing() async {
         let fake = FakeLogStream()
+        let manual = ManualDelayClock()
         var fireCount = 0
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: { fireCount += 1 }
+            onBlockedAttempt: { fireCount += 1 },
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
-        try? await Task.sleep(nanoseconds: 50_000_000)
         watcher.stop()
-        try? await Task.sleep(nanoseconds: 10_000_000)
 
         let line = """
         {"subsystem":"com.apple.airplay","category":"APSNetworkClockPTP","eventMessage":"Failed to add peer: kIOReturnExclusiveAccess"}
         """
         fake.pushLine(line)
-        try? await Task.sleep(nanoseconds: 10_000_000)
 
         #expect(fireCount == 0)
     }
@@ -263,23 +261,22 @@ import Testing
     @Test("unexpected termination schedules respawn")
     func unexpectedTerminationSchedulesRespawn() async {
         let fake = FakeLogStream()
+        let manual = ManualDelayClock()
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: {}
+            onBlockedAttempt: {},
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
-        try? await Task.sleep(nanoseconds: 50_000_000)
 
         let initialCount = fake.startCallCount
         fake.pushTermination()
-
-        await SuiteWait.until("the watcher to respawn its log stream") {
-            fake.startCallCount >= initialCount + 1
-        }
+        manual.advance(by: 0.02)
 
         #expect(fake.startCallCount == initialCount + 1)
     }
@@ -287,42 +284,22 @@ import Testing
     @Test("respawn gives up after max attempts")
     func respawnGivesUpAfterMaxAttempts() async {
         let fake = FakeLogStream(alwaysThrows: true)
+        let manual = ManualDelayClock()
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: {}
+            onBlockedAttempt: {},
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
 
-        // Poll for stabilization at 5 attempts (backoff sequence: 0.02, 0.04,
-        // 0.08, 0.16, 0.32 = ~0.62s total). TRAP: the deadline must be the
-        // shared hang-stop, not a multiple of that sum — what starves this loop
-        // is scheduler latency under suite contention, which no margin over the
-        // backoff can cover. A deadline that expires first ends the loop at 5
-        // spawns, and the assertion below then reads as a give-up that never ran.
-        let deadline = Date().addingTimeInterval(SuiteWait.timeout)
-        var lastCount = fake.startCallCount
-        var stableCount = 0
-        while Date() < deadline {
-            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
-            let currentCount = fake.startCallCount
-            if currentCount == lastCount {
-                stableCount += 1
-                // Stability must OUTLAST the largest backoff gap (0.32s before
-                // the 6th spawn), or the loop declares "done" mid-sequence at 5
-                // spawns and asserts before give-up ever runs — the exact flake
-                // this suite's first real execution caught. 10 polls = 500ms.
-                if stableCount >= 10 {
-                    break
-                }
-            } else {
-                stableCount = 0
-            }
-            lastCount = currentCount
-        }
+        // Backoff sequence 0.02, 0.04, 0.08, 0.16, 0.32: each advance fires the one
+        // respawn that came due, which fails and schedules the next.
+        for step in 0..<5 { manual.advance(by: 0.02 * pow(2, Double(step))) }
 
         #expect(fake.startCallCount == 6) // 1 initial + 5 respawn attempts
         #expect(watcher.test_isRunning == false, "give-up must leave the watcher stopped (R4 #9)")
@@ -331,26 +308,27 @@ import Testing
     @Test("termination after stop() does not respawn")
     func terminationAfterStopDoesNotRespawn() async {
         let fake = FakeLogStream()
+        let manual = ManualDelayClock()
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: {}
+            onBlockedAttempt: {},
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
-        try? await Task.sleep(nanoseconds: 50_000_000)
 
         let countAfterStart = fake.startCallCount
         watcher.stop()
         #expect(watcher.test_isRunning == false, "stop() must mark the watcher stopped (R4 #9)")
-        try? await Task.sleep(nanoseconds: 10_000_000)
         // The fake deliberately keeps its captured onTermination closure after
         // stop() (see FakeLogStream.stop), so this push genuinely reaches the
         // watcher's own stale-generation guard — the behavior under test.
         fake.pushTermination()
-        try? await Task.sleep(nanoseconds: 300_000_000) // 15x the 0.02s backoff — a scheduled respawn would have fired
+        manual.advance(by: 0.3) // 15x the 0.02s backoff — a scheduled respawn would have fired
 
         #expect(fake.startCallCount == countAfterStart)
     }
@@ -358,22 +336,23 @@ import Testing
     @Test("failed start() does not crash and schedules respawn")
     func failedStartDoesNotCrashAndSchedulesRespawn() async {
         let fake = FakeLogStream()
+        let manual = ManualDelayClock()
         fake.throwsOnce = true
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.02,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: {}
+            onBlockedAttempt: {},
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
         let countAfterFailure = fake.startCallCount
         #expect(countAfterFailure == 1)
 
-        await SuiteWait.until("the watcher to respawn after the failed start") {
-            fake.startCallCount >= 2
-        }
+        manual.advance(by: 0.02)
 
         #expect(fake.startCallCount == 2)
     }
@@ -381,29 +360,24 @@ import Testing
     @Test("stop() cancels pending respawn")
     func stopCancelsPendingRespawn() async {
         let fake = FakeLogStream()
-        // R4 #7: a LARGE backoff (0.4s) for this one test buys real headroom —
-        // the 5ms gap between termination and stop() is now 80x inside the
-        // backoff window, so stop() provably lands while the respawn is still
-        // pending rather than racing it.
+        let manual = ManualDelayClock()
+        // Backoff 0.4 s on the manual clock: the respawn only fires when the test advances it.
         let watcher = AirPlayHandoffWatcher(
             spawn: fake,
             rateLimit: 0.15,
             respawnBaseDelay: 0.4,
             respawnMaxAttempts: 5,
-            onBlockedAttempt: {}
+            onBlockedAttempt: {},
+            uptime: manual.uptime,
+            delay: manual.clock
         )
 
         watcher.start()
-        try? await Task.sleep(nanoseconds: 50_000_000)
 
         let countAfterStart = fake.startCallCount
-        // NO await between the termination and stop(): a sleep here can stretch
-        // past the 0.4s backoff under full-suite load (found live), letting the
-        // respawn fire before stop() ever ran. Both calls are synchronous —
-        // back-to-back guarantees stop() lands while the respawn is pending.
         fake.pushTermination() // schedules a respawn at +0.4s
         watcher.stop()          // cancels it (generation bump) microseconds later
-        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s — well past the 0.4s backoff
+        manual.advance(by: 1) // well past the 0.4s backoff
 
         #expect(fake.startCallCount == countAfterStart)
     }

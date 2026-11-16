@@ -410,13 +410,20 @@ public protocol OutputBackend: AnyObject {
     ///
     /// Required contract: a still-desired `.failed` id gets a fresh attempt;
     /// an id the backend doesn't currently desire, or one already `.connected`,
-    /// is a no-op. Other non-connected states are CONFORMER LATITUDE:
-    /// `NativeBackend` re-kicks any still-desired non-`.connected` id (a retry
+    /// is a no-op. `NativeBackend` also re-drives, without membership, a
+    /// per-app route target that waits for a password (the per-app counterpart
+    /// of its Bluetooth arm); `MockBackend` does not. Other non-connected
+    /// states are CONFORMER LATITUDE: `NativeBackend` re-kicks any
+    /// still-desired non-`.connected` id (a retry
     /// mid-`.reconnecting` restates `.connecting` — the user pressed the
     /// button, so the attempt marker wins), while `MockBackend` acts only on
     /// `.failed` and no-ops otherwise (scripted tests want no surprise
     /// attempts). Don't tighten either direction without checking both.
     func retryOutput(_ id: String)
+
+    /// The `speaker` property of the connection analytics events: a number
+    /// this install gives each speaker, never its id or name. Nil sends none.
+    func analyticsSpeakerKey(forDevice id: String) -> String?
 
     /// Store `password` as speaker `id`'s AirPlay password, then call
     /// `completion` on the main thread; the caller retries the speaker from it,
@@ -466,6 +473,9 @@ public extension OutputBackend {
     func submitAirPlayPassword(_ password: String, for id: String, source: String,
                                completion: @escaping @Sendable () -> Void) { completion() }
     func forgetAirPlayPassword(for id: String) {}
+
+    /// Only ``NativeBackend`` keeps the per-install speaker numbers.
+    func analyticsSpeakerKey(forDevice id: String) -> String? { nil }
 
     /// Backends with no real streaming sessions (the mock) have nothing to
     /// disconnect on sleep and no capture gate/watchdog to drive, so they inherit
@@ -533,6 +543,13 @@ public protocol MeteringControlling: AnyObject {
     /// leave it `false` again — a closed popover has nobody to render a meter for,
     /// so there's no reason to keep spending a per-buffer RMS pass on it.
     func setMeteringActive(_ active: Bool)
+
+    /// Keep per-device `.level` flowing while the popover is closed, for a host
+    /// that only needs to know whether sound is coming out (the app's Touch Bar
+    /// play/pause glyph). Unlike ``setMeteringActive(_:)`` it starts no
+    /// metering-only per-app tap: those exist only for the popover's app rows.
+    /// Independent of the popover gate; levels flow while either is on.
+    func setDeviceLevelsWanted(_ wanted: Bool)
 }
 
 /// The optional per-app routing capability (T6/T7). A backend that can stream a
@@ -735,6 +752,29 @@ public func makeBackend(
         let captureCoordinator = NativeCaptureCoordinator(
             engine: engine, processResolver: resolver)
         nativeBackend.captureCoordinator = captureCoordinator
+        // Closures copied from `NativeCaptureCoordinator`'s convenience init.
+        nativeBackend.localMeterCapture = NativeCaptureCoordinator(
+            makeTap: {
+                if #available(macOS 14.2, *) {
+                    return CoreAudioSystemTap(name: "AudioutLocalMeter")
+                } else {
+                    return UnavailableSystemTap()
+                }
+            },
+            sink: DiscardingPCMSink(),
+            makeConverter: { AVFormatConverter(from: $0) },
+            resolveDefaultOutputDeviceID: {
+                if #available(macOS 14.2, *) {
+                    guard let raw = try? CoreAudioSystemTap.defaultOutputDeviceID() else { return nil }
+                    return EffectiveCaptureDevice.resolve(
+                        default: raw,
+                        uidOf: { try? CoreAudioSystemTap.readDeviceUID($0) },
+                        mainSubDeviceOf: CoreAudioSystemTap.aggregateMainSubDeviceID)
+                }
+                return nil
+            },
+            processResolver: resolver,
+            muteBehavior: .unmuted)
         // Passive drift tracking (roadmap 085 ticket 05). Wired here because
         // the reference it correlates the microphone against is this
         // coordinator's retained outgoing audio, and this is the only place
@@ -867,4 +907,9 @@ func nativeStartBufferMs(
     settings: AppSettings = AppSettings()
 ) -> Int {
     nativeStartBufferEnvOverrideMs(environment: environment) ?? settings.startBufferMs
+}
+
+/// The listen-only tap's sink: it meters the Mac and sends nothing anywhere.
+private struct DiscardingPCMSink: PCMSink {
+    func write(pcm: Data, pts: timespec) {}
 }

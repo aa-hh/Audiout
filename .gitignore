@@ -70,3 +70,17 @@ ClashDisplay-*
 # scripts/release.sh refuses to cut a release.
 .agents/
 .codex/
+
+# Internal working docs: handoffs, tickets, work orders, research notes, plans.
+# They stay on the Mac that wrote them and never reach GitHub. The `tests`
+# workflow fails any PR that leaves a file matching this file tracked, so
+# `git add -f` cannot sneak one in. Bracketed letters match either case,
+# because the CI runner's git is case-sensitive.
+.scratch/
+dev/notes/
+docs/plans/
+docs/notes/
+/PROGRESS.md
+/docs-delta.md
+*[Hh][Aa][Nn][Dd][Oo][Ff][Ff]*.md
+*[Hh][Aa][Nn][Dd][Oo][Vv][Ee][Rr]*.md

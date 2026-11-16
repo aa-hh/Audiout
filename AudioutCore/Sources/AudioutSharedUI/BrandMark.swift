@@ -43,7 +43,7 @@ public enum BrandMark {
     /// swift-testing runner finds it — its `Bundle.main` is the toolchain's test
     /// helper, so only the module's own bundle locates anything), and the
     /// directory holding a plain `swift run` binary.
-    private static let resourceBundle: Bundle? = {
+    static let resourceBundle: Bundle? = {
         let name = "AudioutCore_AudioutSharedUI.bundle"
         let own = Bundle(for: BundleToken.self)
         let roots = [own.resourceURL, own.bundleURL.deletingLastPathComponent(),

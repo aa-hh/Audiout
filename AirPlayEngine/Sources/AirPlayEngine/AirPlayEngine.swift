@@ -152,7 +152,7 @@ public actor AirPlayEngine {
     // path can read without an actor hop. `nil` before the first start / after
     // stop.
     private nonisolated let engineThreadHolder = EngineThreadHolder()
-    private let completions = CompletionRegistry()
+    private nonisolated let completions = CompletionRegistry()
     private let stateHub = StateStreamHub()
     private let remoteHub = RemoteEventHub()
 
@@ -174,6 +174,10 @@ public actor AirPlayEngine {
     // waiter can block at most that long behind an in-flight op on the same id.
     private var opsInFlight: Set<OutputID> = []
     private var opWaiters: [OutputID: [CheckedContinuation<Void, Never>]] = [:]
+    // Test-only nonisolated copy of `opWaiters[id]?.count`, so a `SuiteWait.until`
+    // condition can see an op parked at the gate without awaiting the actor.
+    // `acquireOp`/`releaseOp` keep it current.
+    private nonisolated let opWaiterCounts = OSAllocatedUnfairLock<[OutputID: Int]>(initialState: [:])
     // A nonisolated mirror of `started` the hot write path can read without an
     // actor hop. Kept in lock-step with `started`.
     private nonisolated let startedFlag = AtomicBool(false)
@@ -733,6 +737,16 @@ public actor AirPlayEngine {
                 }
             }
         }
+
+        // The pairing key lives in the app's store; the device holds whatever the
+        // latest feed carried (a value replaces, nil clears).
+        if appearing, let id = descriptor.parsedID, let device = outputs_device_get(id.rawValue) {
+            let held = device.pointee.auth_key.map { String(cString: $0) }
+            if held != descriptor.authKey {
+                free(device.pointee.auth_key)
+                device.pointee.auth_key = descriptor.authKey.map { strdupC($0) }
+            }
+        }
     }
 
     // MARK: - Device-state stream (T-ENG-STATESTREAM-1)
@@ -934,6 +948,37 @@ public actor AirPlayEngine {
     /// dispatcher drops it. Primitive for `NativeBackend.removeOutput`.
     public func removeOutput(_ id: OutputID) async throws {
         try await unbind(id, serialize: true)
+    }
+
+    /// Run `pair-setup` with the code the receiver is showing. Returns the pairing
+    /// key to store and feed back as `DeviceDescriptor.authKey`. Throws
+    /// `.passwordRequired` when the receiver refuses the code (a back-off or
+    /// max-tries answer reads the same, the vendored handler only logs them), and
+    /// `.sessionFailed` when no key was earned.
+    public func authorize(_ id: OutputID, pin: String) async throws -> String {
+        try requireStarted()
+        guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
+
+        let terminal = try await startOp(id: id) { device, cbId in
+            pin.withCString { outputs_device_authorize(device, $0, cbId) }
+        }
+        switch terminal {
+        case .passwordRequired:
+            throw AirPlayEngineError.passwordRequired
+        case .stopped:
+            let read: () -> String? = {
+                guard let device = outputs_device_get(id.rawValue) else { return nil }
+                return device.pointee.auth_key.map { String(cString: $0) }
+            }
+            let key: String?
+            if issueOverride != nil { key = read() }
+            else if let t = engineThreadHolder.current { key = (try? await t.run(read)) ?? nil }
+            else { key = nil }
+            guard let key else { throw AirPlayEngineError.sessionFailed }
+            return key
+        default:
+            throw AirPlayEngineError.sessionFailed
+        }
     }
 
     private func unbind(_ id: OutputID, serialize: Bool) async throws {
@@ -1625,6 +1670,8 @@ public actor AirPlayEngine {
         while opsInFlight.contains(id) {
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 opWaiters[id, default: []].append(cont)
+                let count = opWaiters[id]?.count ?? 0
+                opWaiterCounts.withLock { $0[id] = count }
             }
         }
         opsInFlight.insert(id)
@@ -1635,6 +1682,7 @@ public actor AirPlayEngine {
     private func releaseOp(_ id: OutputID) {
         opsInFlight.remove(id)
         if let waiters = opWaiters.removeValue(forKey: id) {
+            opWaiterCounts.withLock { $0[id] = nil }
             for w in waiters { w.resume() }
         }
     }
@@ -1747,6 +1795,30 @@ public actor AirPlayEngine {
     /// exists (which would be dropped and hang/time-out the op).
     func hasArmedWaiterForTest(callbackId: Int32) -> Bool {
         completions.hasWaiter(callbackId: callbackId)
+    }
+
+    /// Test-only: the synchronous twin of ``hasArmedWaiterForTest(callbackId:)``,
+    /// for a `SuiteWait.until` condition, which cannot await the actor.
+    nonisolated func waiterIsArmedForTest(callbackId: Int32) -> Bool {
+        completions.hasWaiter(callbackId: callbackId)
+    }
+
+    /// Test-only: how many ops are parked at the per-output gate for `id`
+    /// (`opWaiters[id]?.count`), readable from a `SuiteWait.until` condition.
+    nonisolated func opWaiterCountForTest(_ id: OutputID) -> Int {
+        opWaiterCounts.withLock { $0[id] ?? 0 }
+    }
+
+    /// Test-only: make the armed op's real timeout timer fire now. Returns
+    /// `false` when `callbackId` has no armed timer.
+    nonisolated func expireOpTimeoutForTest(callbackId: Int32) -> Bool {
+        completions.expireTimeoutForTest(callbackId: callbackId)
+    }
+
+    /// Test-only: run the op-timeout handler for `callbackId` as a timer that
+    /// fired after the op already resolved would.
+    nonisolated func fireOpTimeoutForTest(callbackId: Int32) {
+        completions.fireTimeoutForTest(callbackId: callbackId)
     }
 
     /// Test-only: map C descriptor -> keyval feed WITHOUT the engine thread, so a
@@ -2672,8 +2744,8 @@ final class StreamLevelTracker: @unchecked Sendable {
     }
 
     /// Reports every stream written since the last call and resets each
-    /// window peak; the silence run and write count persist. A stream that
-    /// stopped being written drops out on the next call.
+    /// window peak; the silence run and write count persist. The tracker never
+    /// drops a stream it has seen; the host decides which rows to report.
     func snapshot(sampleRate: Int) -> [StreamLevelSnapshot] {
         lock.lock()
         defer { lock.unlock() }

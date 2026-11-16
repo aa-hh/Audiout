@@ -10,6 +10,8 @@ import Foundation
 /// "License activation check-ins — identified by purchase... not anonymous").
 /// GPL-2.0-or-later forbids a usage-restricting lock on this codebase, so
 /// there is no enforcement path here to build even if one were wanted.
+/// The hardware hash (``DeviceIdentity/deviceHash()``) rides along so the
+/// server can refuse a trial to a Mac that has checked in with a paid key.
 ///
 /// razor: fires once per launch, fire-and-forget — no retry, no schedule, no
 /// queue. The endpoint is derived from the bundle's license server
@@ -39,7 +41,7 @@ public struct LicenseCheckIn {
     /// licence check. Either gate missing is a silent no-op — this must
     /// never surface as an error or a prompt, since it gates no feature. When
     /// both hold, POSTs exactly `{"license_key", "install_id",
-    /// "app_version"}` and ignores the response: fire-and-forget, not a
+    /// "app_version", "device_hash"}` and ignores the response: fire-and-forget, not a
     /// round-trip the app waits on.
     public func checkInIfNeeded() {
         guard let key = settings.licenseKey, !key.isEmpty,
@@ -52,6 +54,7 @@ public struct LicenseCheckIn {
             "license_key": key,
             "install_id": settings.installID,
             "app_version": Self.appVersion,
+            "device_hash": DeviceIdentity.deviceHash(),
         ])
         send(request)
     }

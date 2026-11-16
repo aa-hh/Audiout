@@ -2,15 +2,13 @@
 
 import Foundation
 
-/// Codable, versioned JSON persistence for the hidden-speakers list — the
-/// device ids the user took out of the Output Speakers card via the footer's
-/// "−" (they come back through the "+" menu's "Hidden speakers" section).
-/// Hiding is DISPLAY-ONLY: it never touches selection, groups, or routing, and
-/// a hidden speaker that IS selected (e.g. through a saved scene) still renders
-/// — nothing may play invisibly. A sibling of `ExcludedAppsStore`/`GroupStore`:
-/// same Application Support directory, its own file so the stores evolve
-/// independently. The directory is injectable so tests never touch the real
-/// `~/Library/Application Support`.
+/// The hidden-speakers list an older build wrote (`hidden-speakers.json`):
+/// the device ids the user took out of the Output Speakers card. Kept only as
+/// a legacy import: `SpeakerLibraryController` reads it when it starts with no
+/// speaker library file (nor a quarantined copy of one), and turns each id
+/// into a "Hide when not in use" visibility. Nothing in the app writes it any
+/// more; `save` remains for tests. The directory is injectable so tests never
+/// touch the real `~/Library/Application Support`.
 public struct HiddenSpeakersStore: Sendable {
 
     struct Envelope: Codable {

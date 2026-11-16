@@ -303,7 +303,7 @@ APP_PID=$!
 
 # Give dyld time to resolve the whole graph and the app to reach steady state.
 # A dyld image-not-found abort happens within the first moment of exec; a menu-
-# bar (LSUIElement) app that clears that has "launched" — there's no window to
+# bar app that clears that has "launched" — it opens no window at launch to
 # check, so "still alive after the settle window, no dyld error logged" is the
 # correct success signal.
 SETTLE_SECS=5

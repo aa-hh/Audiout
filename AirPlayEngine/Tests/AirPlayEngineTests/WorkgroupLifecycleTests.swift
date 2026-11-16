@@ -34,14 +34,11 @@ import Testing
         var fired: Bool { lock.withLock { _fired } }
     }
 
-    /// Polls `fence.fired` for up to `timeout`.
-    private func awaitFence(_ fence: Fence, timeout: Duration = .seconds(5)) async throws {
-        var remainingMs = Int(timeout.components.seconds * 1000)
-        while !fence.fired && remainingMs > 0 {
-            try await Task.sleep(for: .milliseconds(10))
-            remainingMs -= 10
+    /// Returns once the engine thread has run the fence closure.
+    private func awaitFence(_ fence: Fence, sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        await SuiteWait.until("the engine thread runs the fence closure", sourceLocation: sourceLocation) {
+            fence.fired
         }
-        #expect(fence.fired, "timed out waiting for the engine thread to run the fence closure")
     }
 
     /// A device id that cannot possibly publish a workgroup: `kAudioObjectUnknown`.

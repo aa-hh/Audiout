@@ -2,10 +2,9 @@
 //
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// This is a menu-bar-only ("accessory") app: no Dock icon, no main menu bar,
-// no window on launch — just an NSStatusItem. Per RESOLVED Q1 the app is a
-// SwiftPM executable; scripts/make-app.sh wraps this binary into a real
-// double-clickable `.app` (Info.plist with LSUIElement=true, ad-hoc signed).
+// A regular app with a Dock icon and menu bar beside its NSStatusItem, and no
+// window on launch. Per RESOLVED Q1 the app is a SwiftPM executable;
+// scripts/make-app.sh wraps this binary into a real double-clickable `.app`.
 //
 // SwiftPM treats `main.swift` as the executable's top-level entry, so the
 // bootstrap lives here rather than behind `@main` (which SwiftPM executable
@@ -53,10 +52,8 @@ NSSetUncaughtExceptionHandler { exception in
 // actor explicitly to build the (MainActor-isolated) `AppDelegate` and set it
 // on the shared application. `AppDelegate` is retained by the app.
 MainActor.assumeIsolated {
-    // One shared application instance. `.accessory` is set in the delegate's
-    // applicationWillFinishLaunching (before the app finishes launching) so the
-    // process never briefly shows a Dock icon (belt-and-suspenders alongside
-    // the bundle's LSUIElement=true — see the brief §4 "App runs .accessory").
+    // One shared application instance. The activation policy is set in the
+    // delegate's applicationWillFinishLaunching.
     let app = NSApplication.shared
     let delegate = AppDelegate()
     app.delegate = delegate

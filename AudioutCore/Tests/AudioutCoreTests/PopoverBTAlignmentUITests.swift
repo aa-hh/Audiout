@@ -181,6 +181,16 @@ import AppKit
                 "a re-offer in the same session stays hidden")
     }
 
+    /// Escape on the open Mixer runs `AppSurfaceController`'s order (ruled
+    /// 2026-08-07: Escape closes the bubble), so the note's ✕ carries no key
+    /// equivalent. Passing Escape to the note's shared dismiss button lets a
+    /// visible note eat Escape ahead of that order, and this test turns red.
+    @Test func theNoteDoesNotClaimEscape() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        #expect(popover.test_btAlignmentNoteView("bt-a:output")?.test_hideKeyEquivalent == "")
+    }
+
     /// Decision 3: the note stands until the speaker is MEASURED. A run
     /// stopped before it measures anything leaves the speaker exactly as
     /// unaligned as the note said, so the invitation has to come back.
@@ -239,9 +249,9 @@ import AppKit
                 "a deselected speaker has nothing to align against")
     }
 
-    /// The tick's two timbres are split by TRANSPORT, not by role: the
-    /// Bluetooth fan-out gets the bright click, the engine feed (AirPlay + the
-    /// Mac's own output) the low knock. So a Bluetooth target against the Mac
+    /// The tick's two notes are split by TRANSPORT, not by role: the
+    /// Bluetooth fan-out gets the higher note, the engine feed (AirPlay + the
+    /// Mac's own output) the lower one. So a Bluetooth target against the Mac
     /// really does make two sounds and the intro says which is which — while
     /// Bluetooth-against-Bluetooth plays one identical click on both sides and
     /// the copy stays exactly as it was, because promising a cue the run isn't
@@ -251,7 +261,7 @@ import AppKit
         showNote(popover)
         popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
         #expect(popover.test_btWizardView()?.test_bodyText
-                == "You’ll hear a bright click from Move 2 and a low knock from "
+                == "You’ll hear a higher note from Move 2 and a lower note from "
                 + "This Mac. Tap the one you hear first.")
 
         // Two Bluetooth speakers and nothing else: both sides are on the same
@@ -283,48 +293,37 @@ import AppKit
                 "the door answers with the limit note")
     }
 
-    // MARK: The wizard's iPhone panel (`shape-mac-invites.md` §2.2)
+    // MARK: The wizard's iPhone link
 
-    /// Defect this names: the page showing a QR to someone it cannot help —
-    /// a Mac whose Allow switch is off, or a user whose phone is already
-    /// connected and only needs telling what to tap. Each state is read
-    /// through the panel the user sees, not through the pushed value.
-    @Test func theIPhonePanelSaysSomethingUsefulInEveryState() {
+    /// Turns red if the intro's iPhone link opens anything but the App Store
+    /// page, or if the QR column it replaced comes back in the middle of the
+    /// page. Read through the page the user sees.
+    @Test func theIPhoneLinkOpensTheAppStoreFromTheTitleRow() {
         let (popover, _) = makePopover()
         showNote(popover)
         popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
         let wizard = popover.test_btWizardView()
+        var opened: [URL] = []
+        wizard?.openURL = { opened.append($0) }
 
-        #expect(wizard?.test_remotePanelHeading == "Measure with your iPhone")
-        #expect(wizard?.test_remotePanelLine == BTAlignmentWizardView.remotePanelLine)
-        #expect(wizard?.test_remoteInviteTileSide == RemoteInviteView.wizardTileSide)
+        #expect(wizard?.test_remoteLinkTitle == "Measure with your iPhone")
         #expect(wizard?.test_byEarPanelHeading == "Align by ear",
-                "the trailing panel names the Mac's own run")
+                "the panel names the Mac's own run, and it is the only one")
+        #expect(wizard?.test_byEarPanelLines.contains(
+            BTAlignmentWizardView.remoteLinkTitle) == false)
 
-        wizard?.remoteInvite = .allowOff
-        #expect(wizard?.test_remoteInviteTileSide == nil,
-                "no code on a Mac that refuses phones")
-        #expect(wizard?.test_remotePanelLine == BTAlignmentWizardView.remoteAllowOffLine)
+        wizard?.test_clickRemoteLink()
+        #expect(opened.map(\.absoluteString) == [RemoteInviteView.codeURLString])
 
         wizard?.remoteInvite = .connected(phoneName: "Alec's iPhone")
-        #expect(wizard?.test_remoteInviteTileSide == nil,
-                "no code where the phone is already here")
-        #expect(wizard?.test_remotePanelLine
-                == "Open Audiout Remote on Alec's iPhone and tap the tuning fork beside Move 2.")
-
-        wizard?.remoteInvite = .connected(phoneName: nil)
-        #expect(wizard?.test_remotePanelLine
-                == "Open Audiout Remote on your iPhone and tap the tuning fork beside Move 2.",
-                "several phones, or no name on file: the Mac never guesses which one")
+        #expect(wizard?.test_remoteLinkTitle == "Measure with your iPhone",
+                "a phone already here changes nothing on the page")
     }
 
-    /// Defect this names: a release built before Audiout Remote is approved
-    /// still offering "Measure with your iPhone" on the wizard's first page —
-    /// a heading, a line and a QR for an app nobody can download. The second
-    /// half pins the panel lookup: with the iPhone panel gone, reading the
-    /// leading panel by POSITION returns the by-ear panel's lines and reports
-    /// them as the iPhone panel's.
-    @Test func aBuildWithoutTheCompanionDropsTheIPhonePanel() {
+    /// Turns red if a release built before Audiout Remote is approved still
+    /// offers "Measure with your iPhone" on the wizard's first page — a link
+    /// to an app nobody can download.
+    @Test func aBuildWithoutTheCompanionDropsTheIPhoneLink() {
         let (popover, _) = makePopover()
         showNote(popover)
         popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
@@ -332,17 +331,35 @@ import AppKit
         let byEarBody = wizard?.test_bodyText
 
         wizard?.remoteInvite = .unavailable
-        #expect(wizard?.test_remotePanelHeading == nil)
-        #expect(wizard?.test_remotePanelLine == nil)
-        #expect(wizard?.test_remoteInviteTileSide == nil)
-        #expect(wizard?.test_byEarPanelHeading == "Align by ear",
-                "the Mac's own run is left as the intro's one column")
-        #expect(wizard?.test_bodyText == byEarBody,
-                "carrying the same instructions it did beside the iPhone panel")
+        #expect(wizard?.test_remoteLinkTitle == nil)
+        #expect(wizard?.test_bodyText == byEarBody, "the panel itself is untouched")
 
         wizard?.remoteInvite = .notConnected
-        #expect(wizard?.test_remotePanelHeading == "Measure with your iPhone",
-                "the panel comes back when the build carries the phone app")
+        #expect(wizard?.test_remoteLinkTitle == "Measure with your iPhone",
+                "the link comes back when the build carries the phone app")
+    }
+
+    /// Turns red if the iPhone link follows the run past the intro, where the
+    /// title row's right slot belongs to the click count.
+    @Test func theIPhoneLinkIsIntroOnly() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        #expect(wizard?.test_remoteLinkTitle == nil, "got \(screenName(wizard))")
+    }
+
+    /// Turns red if a speaker that goes away while the intro is up leaves the
+    /// iPhone link standing on the "went away" screen.
+    @Test func theIPhoneLinkLeavesWithALostTarget() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
+        let wizard = popover.test_btWizardView()
+        #expect(wizard?.test_remoteLinkTitle != nil)
+        wizard?.showTargetLost()
+        #expect(wizard?.test_remoteLinkTitle == nil)
     }
 
     /// Defect this names: a by-ear sheet left standing over a measurement the
@@ -391,8 +408,7 @@ import AppKit
     /// entirely and is delivered to the window's FIRST RESPONDER as an
     /// ordinary `keyDown`. A test that calls `performKeyEquivalent` directly
     /// therefore says nothing about what a real key press does — so the
-    /// unmodified keys are driven through this window's `sendEvent`, and only
-    /// ⌘Z keeps the key-equivalent seam.
+    /// keys are driven through this window's `sendEvent`.
     private func hostSheetInWindow(_ popover: PopoverController) -> NSWindow? {
         guard let sheet = popover.test_btWizardSheet() else {
             Issue.record("expected a wizard sheet to host in a window")
@@ -510,10 +526,8 @@ import AppKit
                 "the interval is on the stage's tooltip, got \(String(describing: wizard?.test_stage.toolTip))")
         #expect(wizard?.test_buttonTitles
                 == ["Move 2", "This Mac", BTAlignmentWizardView.togetherTitle,
-                    BTAlignmentWizardView.backTitle, BTAlignmentWizardView.stopTitle],
+                    BTAlignmentWizardView.stopTitle],
                 "the which-side buttons carry the ACTUAL device names, and there is a way out")
-        #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == false,
-                "there is nothing to go back to yet")
         // The progress bar is gone: the stage above the question IS the
         // readout, showing the live belief as a lit interval rather than a
         // fraction of a run that has no fixed length.
@@ -547,19 +561,6 @@ import AppKit
         #expect(reference.blueComponent > reference.redComponent + 0.15
                     && reference.greenComponent > reference.redComponent,
                 "the reference plate is blue-led, got \(reference)")
-    }
-
-    @Test func backUndoesTheLastAnswerAndReAsksThatTrial() {
-        let (popover, recorder) = makePopover()
-        let wizard = openWizard(popover)
-        wizard?.test_clickButton(titled: "Start")
-        let first = recorder.previews[0].ms
-        wizard?.test_clickButton(titled: "Move 2")
-        #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == true)
-
-        wizard?.test_clickButton(titled: BTAlignmentWizardView.backTitle)
-        #expect(recorder.previews.last?.ms == first, "the undone question is asked again")
-        #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == false)
     }
 
     @Test func answersNarrowToAProposalThenSoundsRightPersists() {
@@ -999,13 +1000,13 @@ import AppKit
         let (popover, _) = makePopover()
         let row = selectMixedBT(popover)
         let menu = row?.test_contextMenu()
-        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align by ear…"],
+        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align by ear…", "", "Show in Mixer", "When available", "Always", "Hide when not in use", "", "Speaker settings…"],
                 "the discoverable route — ⌥ alone is invisible")
         #expect(fireAlignItem(menu))
         #expect(popover.test_btWizardIsOpen())
 
         #expect(popover.test_deviceRow(for: "office")?.test_contextMenu()?.items.map(\.title)
-                == ["Equalizer…"],
+                == ["Equalizer…", "", "Show in Mixer", "When available", "Always", "Hide when not in use", "", "Speaker settings…"],
                 "AirPlay rows carry the Equalizer door but no alignment item")
     }
 
@@ -1129,39 +1130,30 @@ import AppKit
         }
     }
 
-    /// Real menu dispatch on the picker: the new reference is engaged, the old
-    /// one released, and the answers so far are DROPPED — they were given
-    /// against a different speaker.
-    @Test func changingTheReferenceMidRunSwapsTheSelectionAndResetsTheRun() {
+    /// Once Start is pressed the reference is locked: the pop-up is disabled
+    /// and a pick that still arrives (real menu dispatch) changes nothing.
+    @Test func theReferenceIsLockedOnceTheRunStarts() {
+        // Turns red if setBTWizardReference or the pop-up's enabled state stops checking for the intro screen.
         let fleet = [local(), airplay("office"), bt()]
         let (popover, recorder) = makePopover(fleet: fleet)
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
         popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         let wizard = popover.test_btWizardView()
+        #expect(wizard?.test_referencePickerIsEnabled == true, "switching works before Start")
         wizard?.test_clickButton(titled: "Start")
-        wizard?.test_clickButton(titled: "Move 2")
-        #expect(recorder.previews.count == 2)
+        #expect(wizard?.test_referencePickerIsEnabled == false)
 
         wizard?.test_selectReference(titled: "Office")
-        #expect(popover.test_btWizardReferenceID() == "office")
-        #expect(popover.test_isSpeakerSelected("office"), "the new reference is engaged")
-        #expect(popover.test_isSpeakerSelected("mac") == false, "…and the old one released")
-        #expect(popover.test_btWizardEngagedReferenceID() == "office")
-        guard case .question(_, _, let answers)? = wizard?.test_screen, answers == 0 else {
-            Issue.record("the answers about the old speaker are dropped, got \(screenName(wizard))")
-            return
-        }
-        #expect(recorder.previews.count == 3, "a fresh run's first candidate is applied")
-        #expect(wizard?.test_buttonTitles
-                == ["Move 2", "Office", BTAlignmentWizardView.togetherTitle,
-                    BTAlignmentWizardView.backTitle, BTAlignmentWizardView.stopTitle])
+        #expect(popover.test_btWizardReferenceID() == "mac")
+        #expect(popover.test_isSpeakerSelected("office") == false)
+        #expect(recorder.ticks == [true], "nothing re-pushed, got \(recorder.ticks)")
+        #expect(recorder.tickReferences == ["mac"])
     }
 
     /// The tick gate carries BOTH participants, so the backend can hold every
-    /// other Bluetooth speaker silent — and a reference swapped mid-run re-pushes
-    /// it, or the new reference would be the one left silent.
-    @Test func theTickCarriesBothParticipantsAndARefSwapRePushesThem() {
+    /// other Bluetooth speaker silent.
+    @Test func theTickCarriesBothParticipants() {
         let fleet = [local(), airplay("office"), bt()]
         let (popover, recorder) = makePopover(fleet: fleet)
         popover.update(devices: fleet)
@@ -1171,11 +1163,6 @@ import AppKit
         wizard?.test_clickButton(titled: "Start")
         #expect(recorder.tickTargets == ["bt-a:output"])
         #expect(recorder.tickReferences == ["mac"], "the Mac is the default reference")
-
-        wizard?.test_selectReference(titled: "Office")
-        #expect(recorder.ticks == [true, true], "a live run re-pushes rather than re-arming")
-        #expect(recorder.tickReferences == ["mac", "office"],
-                "the backend hears about the swap, got \(recorder.tickReferences)")
 
         wizard?.test_clickButton(titled: BTAlignmentWizardView.stopTitle)
         #expect(recorder.ticks.last == false)
@@ -1311,8 +1298,11 @@ import AppKit
     /// A microphone that records nothing, so the probe completes with no
     /// result and no system prompt is ever raised.
     private final class SilentRecorder: MicProbeRecording {
+        let roomSlices: [Double]
+        init(roomSlices: [Double] = []) { self.roomSlices = roomSlices }
         func start() throws -> Double { 48_000 }
         func stop() -> [Float] { [] }
+        func recentRMSdBFS(seconds: Double, slices: Int) -> [Double] { Array(roomSlices.prefix(slices)) }
     }
 
     /// Wire a popover for a listening run: a probe stager that fires straight
@@ -1325,8 +1315,8 @@ import AppKit
         popover.makeMicProbe = {
             MicProbeSession(recorder: SilentRecorder(), timeout: 1, pipelineTail: 0.05)
         }
-        popover.onStageBTMicProbe = { started, finished in
-            started()
+        popover.onStageBTMicProbe = { _, started, finished in
+            started(0)
             finished()
         }
     }
@@ -1342,6 +1332,13 @@ import AppKit
         // The intro's right panel leads with the automatic measurement, which
         // is what makes the mic prompt on Start expected rather than a surprise
         // (the denial only happens once Start is pressed).
+        #expect(wizard?.test_byEarPanelHeading == "Hands-free alignment")
+        #expect(wizard?.test_byEarPanelLines.contains {
+            $0.contains(BTAlignmentWizardView.listeningFailedLead) || $0.contains("No clear read")
+        } == false, "the intro promises a hands-free run and does not hedge it")
+        #expect(wizard?.test_byEarPanelLines == [BTAlignmentWizardView.autoPanelTitle,
+                                                 BTAlignmentWizardView.autoLeadCopy],
+                "no click count on a run that asks for no clicks")
         #expect(wizard?.test_byEarPanelLines.contains(BTAlignmentWizardView.autoLeadCopy)
                 == true, "got \(String(describing: wizard?.test_byEarPanelLines))")
         wizard?.test_clickButton(titled: "Start")
@@ -1350,6 +1347,11 @@ import AppKit
             return
         }
         #expect(recorder.ticks == [true])
+        // The intro promised a hands-free run, so the first question says why
+        // it is asking — and which note is which speaker.
+        #expect(wizard?.test_bandLabels.contains {
+            $0.hasPrefix(BTAlignmentWizardView.micRefusedLead)
+        } == true, "got \(String(describing: wizard?.test_bandLabels))")
     }
 
     /// Defect this would catch: a probe that finds nothing leaving the user
@@ -1369,6 +1371,9 @@ import AppKit
         #expect(wizard?.test_bandLabels.contains(BTAlignmentWizardView.listeningHeadlineFirst)
                 == true, "got \(String(describing: wizard?.test_bandLabels))")
         #expect(wizard?.test_bandLabels.contains(BTAlignmentWizardView.listeningBody) == true)
+        // Turns red if the listening screen stops adding its probe progress
+        // bar (B13's `addProbeProgress`).
+        #expect(wizard?.test_hasProgressBar == true, "the listening screen shows a progress bar")
         // The probe's completion lands on the MAIN QUEUE, which this suite's
         // run-loop pumping never drains — only an `await` lets it through.
         await SuiteWait.until("the failed listen to reach the questions") {
@@ -1376,6 +1381,114 @@ import AppKit
             return false
         }
         #expect(recorder.ticks == [true, false, true])
+        // Only now does the page say why it is asking.
+        #expect(wizard?.test_bandLabels.contains {
+            $0.hasPrefix(BTAlignmentWizardView.listeningFailedLead)
+        } == true, "got \(String(describing: wizard?.test_bandLabels))")
+    }
+
+    /// Turns red if the host stops forwarding the probe's lane verdicts into
+    /// the session.
+    @Test func theProbesLaneVerdictsReachTheSession() async {
+        let (popover, _) = makePopover()
+        armListening(popover, granted: true)
+        let clock = ManualDelayClock()
+        popover.makeMicProbe = {
+            let probe = MicProbeSession(recorder: SilentRecorder(), timeout: 60, pipelineTail: 1.5)
+            probe.delayClock = clock.queueHoppingClock
+            return probe
+        }
+        popover.onStageBTMicProbe = { _, started, _ in started(0) }
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        popover.test_btWizardView()?.test_clickButton(titled: "Start")
+        await SuiteWait.until("the timeout and both lane checks to be scheduled") {
+            clock.pendingCount == 3
+        }
+        clock.advance(by: 10)
+        await SuiteWait.until("both lanes to reach the session") {
+            popover.test_btWizardSession()?.probeSpeakerVerdicts.count == 2
+        }
+        #expect(popover.test_btWizardSession()?.probeSpeakerVerdicts == [.target: false, .reference: false],
+                "a silent mic misses both speakers")
+    }
+
+    /// Turns red if the host stops handing the session the probe's live level read.
+    @Test func theSessionReadsTheProbesLiveLevel() async {
+        let (popover, _) = makePopover()
+        armListening(popover, granted: true)
+        popover.makeMicProbe = {
+            MicProbeSession(recorder: SilentRecorder(roomSlices: [-40, -70, -70]), timeout: 60, pipelineTail: 0.05)
+        }
+        popover.onStageBTMicProbe = { levelStepDB, started, _ in _ = levelStepDB(); started(0) }
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        popover.test_btWizardView()?.test_clickButton(titled: "Start")
+        await SuiteWait.until("the live level read to answer") {
+            popover.test_btWizardSession()?.probeLevelAboveRoomDB?() != nil
+        }
+        let above = popover.test_btWizardSession()?.probeLevelAboveRoomDB?()
+        #expect(above != nil && abs(above! - 30) < 0.01, "newest −40 over the quietest −70 is 30 dB")
+    }
+
+    /// Turns red if the view stops forwarding a speaker's verdict to the stage.
+    @Test func theViewForwardsEachSpeakersVerdictToTheStage() async {
+        let (popover, _) = makePopover()
+        armListening(popover, granted: true)
+        let clock = ManualDelayClock()
+        popover.makeMicProbe = {
+            let probe = MicProbeSession(recorder: SilentRecorder(), timeout: 60, pipelineTail: 1.5)
+            probe.delayClock = clock.queueHoppingClock
+            return probe
+        }
+        popover.onStageBTMicProbe = { _, started, _ in started(0) }
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        popover.test_btWizardView()?.test_clickButton(titled: "Start")
+        await SuiteWait.until("the timeout and both lane checks to be scheduled") {
+            clock.pendingCount == 3
+        }
+        clock.advance(by: 10)
+        await SuiteWait.until("both lanes to reach the session") {
+            popover.test_btWizardSession()?.probeSpeakerVerdicts.count == 2
+        }
+        let phases = popover.test_btWizardView()?.test_stage.test_listeningPhases
+        #expect(phases?.target == .missed && phases?.reference == .missed,
+                "a silent mic misses both speakers, and the stage shows it")
+    }
+
+    /// Turns red if a repaint of the same listening screen (the host pushing a
+    /// new picker list on reconcile) sends the lights home again, as
+    /// `render` calling `resetListening` did.
+    @Test func aPickerRefreshDuringTheListenKeepsTheVerdicts() async {
+        let (popover, _) = makePopover()
+        armListening(popover, granted: true)
+        let clock = ManualDelayClock()
+        popover.makeMicProbe = {
+            let probe = MicProbeSession(recorder: SilentRecorder(), timeout: 60, pipelineTail: 1.5)
+            probe.delayClock = clock.queueHoppingClock
+            return probe
+        }
+        popover.onStageBTMicProbe = { _, started, _ in started(0) }
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        popover.test_btWizardView()?.test_clickButton(titled: "Start")
+        await SuiteWait.until("the timeout and both lane checks to be scheduled") {
+            clock.pendingCount == 3
+        }
+        clock.advance(by: 10)
+        await SuiteWait.until("both lanes to reach the session") {
+            popover.test_btWizardSession()?.probeSpeakerVerdicts.count == 2
+        }
+        guard let view = popover.test_btWizardView(),
+              case .listening = popover.test_btWizardSession()?.screen else {
+            Issue.record("the run should still be listening")
+            return
+        }
+        view.referenceOptions += [.init(id: "late-speaker", name: "Late Speaker")]
+        #expect(view.test_stage.test_listeningPhases.target == .missed
+                    && view.test_stage.test_listeningPhases.reference == .missed,
+                "a picker refresh repaints the screen but keeps both verdicts")
     }
 
     /// Defect this would catch: "Try again" re-entered listening but the host
@@ -1398,9 +1511,9 @@ import AppKit
         // whether that queue was scheduled before the next line — asserting it
         // synchronously lost that race under a loaded full-suite run.
         let stages = StageCounter()
-        popover.onStageBTMicProbe = { started, _ in
+        popover.onStageBTMicProbe = { _, started, _ in
             stages.increment()
-            started()
+            started(0)
         }
         showNote(popover)
         popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
@@ -1545,7 +1658,7 @@ import AppKit
 
     /// The locked key map, each key through the seam AppKit really uses for
     /// it — the unmodified three as a first-responder `keyDown` delivered by a
-    /// real window, ⌘Z as a genuine key equivalent, and each carrying the
+    /// real window, each carrying the
     /// flags AppKit itself stamps on it (`sendKey` — the arrows arrive
     /// `.function` + `.numericPad`, never bare). See `hostSheetInWindow` for
     /// why the old `performKeyEquivalent`-only version of this test could pass
@@ -1566,15 +1679,7 @@ import AppKit
             return
         }
         #expect(answers == 3, "three keys, three answers")
-
-        #expect(wizard?.test_sendKey(keyCode: 6, characters: "z", modifiers: .command) == true,
-                "⌘Z is Undo — carrying a modifier, it really is a key equivalent")
-        guard case .question(_, _, let afterBack)? = wizard?.test_screen else {
-            Issue.record("expected a question, got \(String(describing: wizard?.test_screen))")
-            return
-        }
-        #expect(afterBack == 2)
-        #expect(recorder.previews.count == 5, "each key applied a fresh candidate")
+        #expect(recorder.previews.count == 4, "each key applied a fresh candidate")
     }
 
     /// Escape belongs to the WIZARD while its sheet is up — the view's own

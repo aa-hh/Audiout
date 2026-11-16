@@ -49,25 +49,8 @@ import AppKit
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
-        let stream = backend.makeEventStream()
-        let box = PopoverIconTestCountBox()
-        try await confirmation("fleet discovered") { received in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceAdded = event, await box.increment() >= count {
-                        received(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
-        }
+        backend.start()
+        await SuiteWait.until("the fleet to be discovered") { backend.devices.count >= count }
     }
 
     private func tempDirectory() -> URL {
@@ -238,6 +221,19 @@ import AppKit
         return far / Self.scale
     }
 
+    /// Turns red if a glyph `Device.symbolName` can return has no `rowGlyphFits`
+    /// entry, which draws it at the default size and keeps it out of the
+    /// ring-clearance check below.
+    @Test func everyDeviceGlyphHasARowFit() {
+        let mini = Device(id: "m", name: "Kitchen", kind: .homePod, model: Device.homePodMiniModel).symbolName
+        let names = Device.Kind.allCases.map(\.symbolName)
+            + Device.bluetoothProductGlyphs.map(\.symbol)
+            + ["headphones", "car.fill", mini]
+        for name in names {
+            #expect(DeviceIcon.rowGlyphFits[name] != nil, "\(name) has no row fit")
+        }
+    }
+
     /// Turns red if a `rowGlyphFits` size or offset pushes a glyph within 1 pt of its ring.
     @Test func noRowGlyphTouchesItsRing() throws {
         let names = Set(DeviceIcon.rowGlyphFits.keys).union(DeviceIcon.curated.filter(DeviceIcon.isValid))
@@ -251,9 +247,4 @@ import AppKit
             #expect(clearance >= 1.0, "\(name) is \(clearance) pt from its ring's inner edge")
         }
     }
-}
-
-private actor PopoverIconTestCountBox {
-    private var count = 0
-    func increment() -> Int { count += 1; return count }
 }

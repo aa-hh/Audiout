@@ -394,8 +394,8 @@ import AVFoundation
         #expect(tap.creates == 1)
         #expect(tap.excludes(pid: sinkRenderPID))
 
+        // `setSyncedLocalSink` runs any rebuild it decides on before it returns.
         coordinator.setSyncedLocalSink(SpySyncedSink(), renderProcessPID: sinkRenderPID)
-        SuiteWait.settle(0.3)
         #expect(tap.creates == 1,
                 "an already-excluded render pid must not force a tap recreate (the Mac-join feed hole)")
     }
@@ -553,8 +553,11 @@ import AVFoundation
         // surviving `lastEndPts` would inject ~66 000 frames of stale-pts silence
         // ahead of the new capture session's very first write.
         tap.deliverMix(frames: 4, phaseStart: 4, pts: timespec(tv_sec: 2, tv_nsec: 500_000_000))
-        waitFor { engineSink.forwarded.count >= 2 }
-        SuiteWait.settle(0.3)
+        // A fill is forwarded ahead of buffer 2 in the same delivery, so once
+        // buffer 2 is the last thing forwarded any fill is already in.
+        waitFor {
+            engineSink.forwarded.count >= 2 && engineSink.forwarded.last?.pcm == FixedConverter.payload
+        }
 
         let forwarded = engineSink.forwarded
         #expect(forwarded.count == 2, "a new session must start from 'nothing ever delivered'")

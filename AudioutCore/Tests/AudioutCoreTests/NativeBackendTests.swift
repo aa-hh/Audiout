@@ -64,10 +64,13 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// Ids that should THROW on `addOutput` (best-effort partial-failure test).
     var addFailures: Set<UInt64> = []
     /// The error `addFailures` throws — defaults to the generic session
-    /// failure; the auth-mapping test sets `.passwordRequired` to prove the
-    /// connect path surfaces `.authRequired` instead of flattening to
-    /// `.unknown`.
+    /// failure; the password tests set `.passwordRequired` to prove the
+    /// connect path parks the speaker in `.awaitingPassword` when no password
+    /// was fed and surfaces `.authRequired` when one was, instead of
+    /// flattening to `.unknown`.
     var addFailureError: AirPlayEngineError = .sessionFailed
+    /// When set, `updateDiscovery` throws it before recording the feed.
+    var updateDiscoveryError: Error?
     /// When set, an `addFailures` add also reports its failure on the state
     /// stream, as the real engine does (shims/outputs.c fires the completion
     /// hook, then the state hook). The hook is awaited after that report and
@@ -115,10 +118,11 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// `liveStreams`, so a concurrent read sees no stale stream).
     var onRebindBody: (@Sendable (OutputID, UInt32) async -> Void)?
 
-    /// Artificial per-op latency (ns). Used by the toggle-spam test to force
-    /// slow op completions to race fast toggle flips, so a broken (unserialized)
-    /// converge would issue overlapping ops for the same device.
-    var opDelayNanos: UInt64 = 0
+    /// When set, every add, remove and rebind waits here before it runs. A race
+    /// test closes it, fires the toggles or rebuilds that must land while an op
+    /// is in flight, then opens it — so a broken (unserialized) converge would
+    /// issue overlapping ops for the same device.
+    var opGate: HoldPoint?
 
     /// Count of `updateDiscovery` calls per parsed OutputID (root cause 2: assert
     /// no re-feed of an unchanged descriptor per toggle).
@@ -127,6 +131,9 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// any single device — must stay 1 with per-device serialization.
     private var inFlightByID: [UInt64: Int] = [:]
     private(set) var maxConcurrentPerDevice = 0
+    /// Adds or removes for `id` still running, so a test can wait for a
+    /// scripted failure to have actually thrown.
+    func opsInFlight(for id: OutputID) -> Int { lock.withLock { inFlightByID[id.rawValue] ?? 0 } }
 
     private var continuation: AsyncStream<(OutputID, OutputState)>.Continuation?
     private var remoteContinuation: AsyncStream<RemoteEvent>.Continuation?
@@ -138,6 +145,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
 
     @discardableResult
     func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
+        if let updateDiscoveryError { throw updateDiscoveryError }
         let id = descriptor.parsedID ?? OutputID(rawValue: 0)
         lock.withLock {
             discoveryFed.append(id)
@@ -159,12 +167,13 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     private var liveStreams: [UInt64: UInt32] = [:]
     /// The stream `id`'s live session is on, or `nil` if it has none.
     func liveStream(of id: OutputID) -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
-    /// One level row per LIVE stream, which is what the `stream_health` poll
-    /// reads. The real engine reports a row per stream it has written to; the
-    /// spy reports a row per live session, so a test can assert what that row
-    /// says about the speakers on it. Levels themselves are fixtures.
+    /// The level rows the `stream_health` poll reads. The real tracker keeps a
+    /// row for every stream it was ever written and never drops one, so the spy
+    /// reports each live session's stream plus every stream a whole-system add
+    /// asked for; a retired home stream keeps reporting, as in the live log of
+    /// 2026-10-07. Levels themselves are fixtures.
     nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] {
-        let ids = Set(lock.withLock { Array(liveStreams.values) })
+        let ids = lock.withLock { Set(liveStreams.values).union(wholeSystemAdds.map(\.1)) }
         return ids.sorted().map {
             StreamLevelSnapshot(streamId: $0, peakDBFS: -6, silentSeconds: 0, writes: 1)
         }
@@ -201,10 +210,9 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
 
     /// Records every FLUSH (F-REANCHOR) attempt (T-A, whole-system rebind
     /// recovery's new default path). Deliberately NOT routed through `runOp`'s
-    /// artificial `opDelayNanos` latency — the race-window tests apply that
-    /// delay to model the removeOutput→addOutput fallback specifically, and a
-    /// flush that fails does so immediately, same as a real receiver's fast
-    /// NACK.
+    /// `opGate` — the race-window tests hold that gate to model the
+    /// removeOutput→addOutput fallback specifically, and a flush that fails
+    /// does so immediately, same as a real receiver's fast NACK.
     func flushOutput(_ id: OutputID) async throws -> Bool {
         lock.withLock { flushed.append(id); opLog.append("flush:\(id.rawValue)") }
         if lock.withLock({ flushFailures.contains(id.rawValue) }) {
@@ -327,7 +335,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     }
 
     /// Run a device op, tracking concurrent-in-flight-per-device (to catch
-    /// overlapping ops) and applying the artificial latency. The body is
+    /// overlapping ops) and waiting at `opGate` when one is set. The body is
     /// async (008) so the hold-open hooks can be awaited at their exact
     /// placement points instead of blocking a cooperative-pool thread.
     private func runOp(_ id: OutputID, _ body: () async throws -> Void) async throws {
@@ -337,12 +345,26 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
             maxConcurrentPerDevice = max(maxConcurrentPerDevice, n)
         }
         defer { lock.withLock { inFlightByID[id.rawValue, default: 1] -= 1 } }
-        let delay = lock.withLock { opDelayNanos }
-        if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+        if let gate = lock.withLock({ opGate }) { await gate.hold() }
         try await body()
     }
 
     func feedCount(for id: OutputID) -> Int { lock.withLock { feedCounts[id.rawValue] ?? 0 } }
+
+    /// Scripted `authorize` answers per output id; an unscripted id fails as `.sessionFailed`.
+    var authorizeResults: [UInt64: Result<String, AirPlayEngineError>] = [:]
+    /// Every `authorize` call, in order: the output and the code typed.
+    private(set) var authorizeCalls: [(OutputID, String)] = []
+    /// When set, `authorize` waits here before answering.
+    var authorizeGate: HoldPoint?
+    func authorize(_ id: OutputID, pin: String) async throws -> String {
+        let (result, gate) = lock.withLock { () -> (Result<String, AirPlayEngineError>, HoldPoint?) in
+            authorizeCalls.append((id, pin))
+            return (authorizeResults[id.rawValue] ?? .failure(.sessionFailed), authorizeGate)
+        }
+        if let gate { await gate.hold() }
+        return try result.get()
+    }
     func setVolume(_ id: OutputID, _ volume: Double) async throws {
         lock.withLock { volumes.append((id, volume)); opLog.append("volume:\(id.rawValue)") }
         if volumeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
@@ -414,8 +436,8 @@ private final class FakeDiscovery: DiscoverySource, @unchecked Sendable {
 /// `applyDacpVolume`/`applyDacpVolumeStep` — the exact closures
 /// `NativeBackend.start()` wires to `onVolume`/`onVolumeStep` — directly.
 private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-    var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-    var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+    var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
+    var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
     private(set) var startCount = 0
     private(set) var stopCount = 0
     func start(dacpID: UInt64) { startCount += 1 }
@@ -649,9 +671,27 @@ private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Exp
                        access: AirPlayAccess = .open) -> DiscoveredDevice {
     let txt = ["deviceid": id, "model": "AirPort4,107"]
     let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
-    let desc = DeviceDescriptor(name: name, address: "192.168.1.20", family: .ipv4, port: 5000, txtRecord: txt)
+    let desc = DeviceDescriptor(name: name, address: "192.168.1.20", family: .ipv4, port: 5000, kind: .raop, txtRecord: txt)
     return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false,
                             access: access)
+}
+
+/// Waits until the backend has recorded the descriptor it fed the engine for
+/// `device` (`fedDescriptors`), the address a DACP report is checked against.
+private func awaitFed(_ backend: NativeBackend, _ device: DiscoveredDevice) async {
+    await pollUntil { backend.stateQueue.sync { backend.fedDescriptors[device.id] != nil } }
+}
+
+/// An AP1-only receiver as the real ones advertise: its product sits under the
+/// `_raop._tcp` TXT key `am`, with no `model` key anywhere in the record. An
+/// AirPort Express and shairport-sync both look like this.
+private func raopAMOnlyDevice(id: String = "AA:BB:CC:DD:EE:98", name: String = "Study Express",
+                              am: String = "AirPort10,115") -> DiscoveredDevice {
+    let txt = ["deviceid": id, "am": am]
+    let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
+    let desc = DeviceDescriptor(name: name, address: "192.168.1.21", family: .ipv4, port: 5000, kind: .raop, txtRecord: txt)
+    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false,
+                            access: .open)
 }
 
 /// `systemVolume` defaults to a fresh ``FakeSystemVolume`` so EVERY call
@@ -682,11 +722,16 @@ private func makeBackend(
     /// The Mac's default-output UID. `nil` by default — no device, so the
     /// volume-ownership gate reads "not our aggregate" unless a test says otherwise.
     currentDefaultOutputUID: @escaping @Sendable () -> String? = { nil },
-    /// The synced-local settle timing. The rapid-toggle tests shrink these; the
-    /// production defaults are pinned by tests that construct the backend directly.
-    syncedLocalSettleWindow: TimeInterval = 0.5,
+    /// The synced-local settle timing. Only `makeSyncedLocalBackend`'s tests
+    /// reach the settle, and they run it on a `ManualDelayClock`, so the window
+    /// here only has to be positive; the production defaults are pinned by tests
+    /// that construct the backend directly.
+    syncedLocalSettleWindow: TimeInterval = 1,
     syncedLocalTransitionHorizon: TimeInterval = 2.0,
-    delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
+    delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
+    uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock,
+    levelDelayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
+    levelUptimeNanos: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
 ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
     let engine = SpyEngine()
     let discovery = FakeDiscovery()
@@ -703,6 +748,9 @@ private func makeBackend(
         captureRetryDelay: captureRetryDelay,
         captureRetryMaxBackoff: captureRetryMaxBackoff,
         delayClock: delayClock,
+        uptimeClock: uptimeClock,
+        levelDelayClock: levelDelayClock,
+        levelUptimeNanos: levelUptimeNanos,
         // 0 = the old synchronous `.takingOver` emit. The suite's scripted
         // activators resolve instantly, so the production debounce (which
         // exists to SUPPRESS the strip on fast resolutions) would hide the
@@ -917,37 +965,25 @@ private final class FlakyThenSucceedsTap: ProcessAudioTap, @unchecked Sendable {
     var attemptsMade: Int { lock.withLock { attempts } }
 }
 
-/// Collect non-level events until `predicate` holds or timeout.
+/// Collect non-level events until `predicate` holds. A predicate that never
+/// holds fails at `SuiteWait`'s ceiling instead of hanging the suite.
 private func collect(
     from backend: NativeBackend,
-    timeout: Duration = .seconds(3),
     until predicate: @escaping @Sendable ([BackendEvent]) -> Bool
 ) async -> [BackendEvent] {
     let stream = backend.makeEventStream()
     let box = EventBox()
+    let satisfied = LockedBool(false)
     await confirmation("predicate satisfied") { done in
         let task = Task {
             for await event in stream {
                 if case .level = event { continue }
                 let all = await box.append(event)
-                if predicate(all) { done(); break }
+                if predicate(all) { done(); satisfied.set(true); break }
             }
         }
         defer { task.cancel() }
-        try? await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { _ = await task.value }
-            group.addTask { try await Task.sleep(for: timeout) }
-            try await group.next()
-            // Cancel the STREAM task, not just the group's children. `cancelAll()`
-            // cancels the child that is `await task.value`, but `Task.value` does
-            // not observe its awaiter's cancellation — it waits for `task` itself.
-            // Without this the group's implicit scope-exit await never returns when
-            // the timeout wins, and the `defer { task.cancel() }` that would free it
-            // can't run because we are still inside this closure: a test whose
-            // predicate never fires HANGS THE WHOLE SUITE instead of failing.
-            task.cancel()
-            group.cancelAll()
-        }
+        await SuiteWait.until("the collected events to satisfy the predicate") { satisfied.get() }
     }
     return await box.snapshot()
 }
@@ -1198,16 +1234,32 @@ private func telemetryLines(
 
 /// A test-controlled hold point for the SpyEngine's async hooks: `hold()`
 /// (called from inside an engine op) marks `entered` and suspends until the
-/// test calls `open()` — the explicit open IS the synchronization.
+/// test calls `open()` — the explicit open IS the synchronization. Once open
+/// it stays open, so every later `hold()` returns at once.
 private final class HoldPoint: @unchecked Sendable {
     private let lock = NSLock()
     private var _entered = false
     private var _open = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
     var entered: Bool { lock.withLock { _entered } }
-    func open() { lock.withLock { _open = true } }
+    func open() {
+        let released = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            _open = true
+            defer { waiting = [] }
+            return waiting
+        }
+        for continuation in released { continuation.resume() }
+    }
     func hold() async {
-        lock.withLock { _entered = true }
-        while !(lock.withLock { _open }) { try? await Task.sleep(nanoseconds: 2_000_000) }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let passes = lock.withLock { () -> Bool in
+                _entered = true
+                if _open { return true }
+                waiting.append(continuation)
+                return false
+            }
+            if passes { continuation.resume() }
+        }
     }
 }
 
@@ -1227,9 +1279,16 @@ private final class ScriptedPasswordStore: AirPlayPasswordStoring, @unchecked Se
     private let lock = NSLock()
     private var removes = 0
     let dropsWrites: Bool
+    /// Makes `removePairingKey` leave the key in place (a Keychain delete that failed).
+    let keepsPairingKeys: Bool
     var onWillSet: (@Sendable () -> Void)?
     var onSet: (@Sendable () -> Void)?
-    init(dropsWrites: Bool = false) { self.dropsWrites = dropsWrites }
+    /// Runs after every `removePassword`.
+    var onRemove: (@Sendable () -> Void)?
+    init(dropsWrites: Bool = false, keepsPairingKeys: Bool = false) {
+        self.dropsWrites = dropsWrites
+        self.keepsPairingKeys = keepsPairingKeys
+    }
     var removeCount: Int { lock.withLock { removes } }
     func password(for deviceID: String) -> String? { inner.password(for: deviceID) }
     func setPassword(_ password: String, for deviceID: String) {
@@ -1241,6 +1300,13 @@ private final class ScriptedPasswordStore: AirPlayPasswordStoring, @unchecked Se
     func removePassword(for deviceID: String) {
         lock.withLock { removes += 1 }
         inner.removePassword(for: deviceID)
+        onRemove?()
+    }
+    func pairingKey(for deviceID: String) -> String? { inner.pairingKey(for: deviceID) }
+    func setPairingKey(_ key: String, for deviceID: String) { inner.setPairingKey(key, for: deviceID) }
+    func removePairingKey(for deviceID: String) {
+        guard !keepsPairingKeys else { return }
+        inner.removePairingKey(for: deviceID)
     }
 }
 
@@ -1402,6 +1468,10 @@ private final class SpyLocalPlayback: LocalPlaybackControlling, @unchecked Senda
     func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
     var meteringActive: Bool { lock.withLock { _meteringActive } }
 
+    private var _outputGains: [Float] = []
+    func setOutputGain(_ gain: Float) { lock.withLock { _outputGains.append(gain) } }
+    var outputGains: [Float] { lock.withLock { _outputGains } }
+
     var addedApps: [(bundleID: String, volume: Float)] { lock.withLock { _added } }
     var removedApps: [String] { lock.withLock { _removed } }
     var volumeSets: [(bundleID: String, volume: Float)] { lock.withLock { _volumes } }
@@ -1447,18 +1517,47 @@ func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>)
 /// backed-off retry or a deadline waits in `pending` until `fireAll()`, so a
 /// slow machine can no longer fire one between two of the test's own steps.
 /// Shared with the BT-alignment suite, whose audition deadlines run on it too.
+/// It also keeps a manual "now" (`uptime`) that only `advance(by:)` moves, firing
+/// each job whose delay that move covers.
 final class ManualDelayClock: @unchecked Sendable {
     private let lock = NSLock()
-    private var jobs: [DispatchWorkItem] = []
+    private var now: TimeInterval = 0
+    private var jobs: [(due: TimeInterval, work: DispatchWorkItem)] = []
     var clock: NativeBackend.DelayClock {
-        { [self] _, _, work in lock.withLock { jobs.append(work) } }
+        { [self] delaySeconds, _, work in lock.withLock { jobs.append((now + delaySeconds, work)) } }
+    }
+    /// Like `clock`, but each fired job runs on the queue the backend named, which
+    /// backend state owned by `stateQueue`, `captureControlQueue` or main requires.
+    var queueHoppingClock: NativeBackend.DelayClock {
+        { [self] delaySeconds, queue, work in
+            clock(delaySeconds, queue, DispatchWorkItem { queue.async(execute: work) })
+        }
+    }
+    var uptime: NativeBackend.UptimeClock {
+        { [self] in lock.withLock { now } }
+    }
+    /// The same manual "now" in whole nanoseconds, for the backend's
+    /// `levelUptimeNanos`.
+    var uptimeNanos: @Sendable () -> UInt64 {
+        { [self] in lock.withLock { UInt64((now * 1_000_000_000).rounded()) } }
     }
     /// Jobs scheduled and not yet fired or cancelled.
-    var pendingCount: Int { lock.withLock { jobs.filter { !$0.isCancelled }.count } }
+    var pendingCount: Int { lock.withLock { jobs.filter { !$0.work.isCancelled }.count } }
     /// Run every job scheduled so far, on the caller's thread, as if its delay
     /// had passed. A cancelled job is skipped, as `asyncAfter` would skip it.
     func fireAll() {
-        let due = lock.withLock { () -> [DispatchWorkItem] in defer { jobs = [] }; return jobs }
+        let due = lock.withLock { () -> [DispatchWorkItem] in defer { jobs = [] }; return jobs.map(\.work) }
+        for work in due where !work.isCancelled { work.perform() }
+    }
+    /// Move "now" forward, then run, on the caller's thread in scheduling order,
+    /// every job now due. A cancelled job is skipped.
+    func advance(by seconds: TimeInterval) {
+        let due = lock.withLock { () -> [DispatchWorkItem] in
+            now += seconds
+            let ready = jobs.filter { $0.due <= now }.map(\.work)
+            jobs.removeAll { $0.due <= now }
+            return ready
+        }
         for work in due where !work.isCancelled { work.perform() }
     }
 }
@@ -1537,14 +1636,21 @@ private final class LockedBool: @unchecked Sendable {
 /// `selectedDevicesQuery` reporting the Mac's membership from `macSelected`
 /// — everything `setOutputSet`'s "Mac + ≥1 AirPlay" decision needs, with no
 /// `AVAudioEngine`/real Core Audio in the loop.
+/// `delayClock` has no default: the settle runs on it, so every caller says
+/// how the settle fires — a `ManualDelayClock`'s `queueHoppingClock`, since the
+/// settle runs on `stateQueue`.
 private func makeSyncedLocalBackend(
     macSelectedByDefault: Bool,
-    syncedLocalSettleWindow: TimeInterval = 0.5,
-    syncedLocalTransitionHorizon: TimeInterval = 2.0
+    syncedLocalTransitionHorizon: TimeInterval = 2.0,
+    delayClock: @escaping NativeBackend.DelayClock,
+    uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock,
+    levelDelayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
 ) -> (NativeBackend, SpyEngine, FakeDiscovery, FakeCapture, SpySyncedLocalSink, LockedBool) {
     let (backend, engine, discovery) = makeBackend(
-        syncedLocalSettleWindow: syncedLocalSettleWindow,
-        syncedLocalTransitionHorizon: syncedLocalTransitionHorizon)
+        syncedLocalTransitionHorizon: syncedLocalTransitionHorizon,
+        delayClock: delayClock,
+        uptimeClock: uptimeClock,
+        levelDelayClock: levelDelayClock)
     let capture = FakeCapture()
     backend.captureCoordinator = capture
     let sink = SpySyncedLocalSink()
@@ -1576,6 +1682,100 @@ private func pollUntil(timeout: TimeInterval? = nil,
     _ condition: @escaping () -> Bool
 ) async {
     await SuiteWait.until(timeout: timeout, sourceLocation: sourceLocation, condition)
+}
+
+/// Runs every job already queued on `stateQueue`, then every job those queued
+/// on `captureControlQueue` (the capture gate, tap starts and stops).
+private func drainQueues(_ backend: NativeBackend) {
+    backend.stateQueue.sync {}
+    backend.captureControlQueue.sync {}
+}
+
+/// Waits for every per-app bind, unbind and rebind queued on `bindTail` so far,
+/// twice over, so a bind that a finished op queued in turn has run too.
+private func awaitBindsSettled(_ backend: NativeBackend) async {
+    for _ in 0..<2 {
+        drainQueues(backend)
+        let tail = backend.stateQueue.sync { backend.bindTail }
+        await tail.value
+    }
+    drainQueues(backend)
+}
+
+/// Waits until no converge holds a `converging` slot and no volume push is in
+/// flight, after draining both queues. A converge claims its slot inside the
+/// same `stateQueue` block that decides it, and releases it only after its
+/// engine op and post-op write, so a negative check read after this sees every
+/// op such a converge would have issued.
+private func awaitConvergesSettled(
+    _ backend: NativeBackend, sourceLocation: SourceLocation = #_sourceLocation
+) async {
+    drainQueues(backend)
+    await SuiteWait.until("every converge and volume push to finish", sourceLocation: sourceLocation) {
+        backend.stateQueue.sync { backend.converging.isEmpty && backend.volumeInFlight.isEmpty }
+    }
+    drainQueues(backend)
+}
+
+/// Records every event a backend emits from the moment `recordEvents` returns.
+/// Reads are synchronous so `pollUntil` can inspect them. `flush(_:)` makes a
+/// negative check exact: it emits a marker on `stateQueue` and waits for it, and
+/// the stream delivers in emit order, so every event emitted before the call
+/// has been recorded when it returns.
+private final class EventRecorder: @unchecked Sendable {
+    /// No real system volume is negative, so the marker cannot be mistaken
+    /// for a real event.
+    static let marker = -1
+    private let lock = NSLock()
+    private var recorded: [BackendEvent] = []
+    private var markersSeen = 0
+    private var markersSent = 0
+    /// Every event so far, markers left out.
+    var events: [BackendEvent] { lock.withLock { recorded } }
+    func record(_ event: BackendEvent) {
+        lock.withLock {
+            if case .systemVolumeChanged(let volume) = event, volume == Self.marker {
+                markersSeen += 1
+            } else {
+                recorded.append(event)
+            }
+        }
+    }
+    func flush(_ backend: NativeBackend, sourceLocation: SourceLocation = #_sourceLocation) async {
+        let target = lock.withLock { () -> Int in markersSent += 1; return markersSent }
+        backend.stateQueue.sync { backend.emit(.systemVolumeChanged(volume: Self.marker)) }
+        await SuiteWait.until("the flush marker to come through the event stream",
+                              sourceLocation: sourceLocation) {
+            self.lock.withLock { self.markersSeen >= target }
+        }
+    }
+}
+
+/// Subscribe an `EventRecorder`. The caller cancels the task.
+private func recordEvents(_ backend: NativeBackend) -> (EventRecorder, Task<Void, Never>) {
+    let recorder = EventRecorder()
+    let stream = backend.makeEventStream()
+    let task = Task { for await event in stream { recorder.record(event) } }
+    return (recorder, task)
+}
+
+/// A speaker a test discovers and never selects, so `awaitStateReportsApplied`
+/// has a report whose effect it can see.
+private func discoverMarker(_ backend: NativeBackend, _ discovery: FakeDiscovery) async -> DiscoveredDevice {
+    let marker = ap2Device(id: "AA:BB:CC:DD:EE:FE", name: "Marker")
+    discovery.fire(.appeared(marker))
+    await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == true }
+    return marker
+}
+
+/// Pushes a `.failed` report for `marker` and waits until the backend shows it
+/// unavailable. The backend applies the engine's state reports one at a time,
+/// in order, so every report pushed before this one has been applied by then.
+private func awaitStateReportsApplied(
+    _ backend: NativeBackend, _ engine: SpyEngine, marker: DiscoveredDevice
+) async {
+    engine.pushState(marker.outputID, .failed)
+    await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == false }
 }
 
 /// Poll the spy until a `setVolume(outputID, value)` call lands (the push is
@@ -1731,6 +1931,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(d?.isAvailable == true)
         #expect(d?.name == "Sonos Move")
         #expect(d?.kind == .sonos)
+        // The advertised TXT `model` is KEPT, not just used to guess the kind
+        // and thrown away: the phone's sync events report it.
+        #expect(d?.model == "S13")
 
         // The engine got the AP2 descriptor.
         await pollUntil { engine.fedIDs.contains(device.outputID) }
@@ -1758,6 +1961,34 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Fed to the engine so it becomes addOutput-able, same as an AP2 device.
         await pollUntil { engine.fedIDs.contains(ap1.outputID) }
         #expect(engine.fedIDs.contains(ap1.outputID), "AP1 device must be fed to the shared engine (T7)")
+    }
+
+    /// A `_raop._tcp` receiver that names its product only under TXT `am` still
+    /// reaches the phone with a model. Drop the `am` fallback from
+    /// `advertisedModel(for:)` and this goes red: `model` is nil for every
+    /// AirPort Express and shairport-sync on the network, because none of them
+    /// advertises the `model` key the AP2 path reads.
+    @Test func raopReceiverAdvertisingOnlyAMStillReportsItsModel() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let raop = raopAMOnlyDevice()
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == raop.id } else { return false } }
+        } after: { discovery.fire(.appeared(raop)) }
+
+        let d = events.compactMap { if case .deviceAdded(let x) = $0 { return x } else { return nil } }.first { $0.id == raop.id }
+        #expect(d?.model == "AirPort10,115", "an AP1-only receiver's `am` product must land in Device.model")
+    }
+
+    /// Turns red if a HomePod its owner renamed stops being a HomePod: its
+    /// `AudioAccessoryN,M` model code is the only thing that still says so, and
+    /// without it a mini called "Kitchen" draws the generic speaker glyph.
+    @Test func aRenamedHomePodIsStillAHomePodByItsModelCode() {
+        #expect(NativeBackend.kind(for: ap2Device(name: "Kitchen", model: "AudioAccessory5,1")) == .homePod)
+        #expect(NativeBackend.kind(for: ap2Device(name: "Kitchen", model: "AudioAccessory6,1")) == .homePod)
+        #expect(NativeBackend.kind(for: ap2Device(name: "Kitchen", model: "S13")) == .generic)
     }
 
     /// Selecting an AP1 device converges it through the SAME engine surface as AP2:
@@ -1934,7 +2165,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { backend.devices.contains { $0.isLocalDevice } }
 
         backend.setOutputSet([NativeBackend.localDeviceID])
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        await awaitConvergesSettled(backend)
 
         #expect(engine.fedIDs.isEmpty, "local device must NOT be fed to the engine")
         #expect(engine.addedIDs.isEmpty, "local device must NEVER be addOutput-ed")
@@ -2106,7 +2337,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // A REAL (non-nil) volume must ALSO be ignored — this is the new part of
         // the contract: it isn't just nil-safety any more, volume tracking is gone.
         volume.fireExternalChange(volume: 99, muted: nil)
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        backend.stateQueue.sync {}   // the handler applies the change in one `stateQueue` block
         d = backend.devices.first { $0.isLocalDevice }
         #expect(d?.volume == 100, "a non-nil volume in onExternalChange must not move the row either — Main Out owns that level")
         #expect(d?.isMuted == true, "a nil mute in onExternalChange must not reset the last-known mute state")
@@ -2125,23 +2356,15 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
 
         // Subscribe BEFORE firing so the (absence of an) emit is actually observed.
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        let task = Task {
-            for await event in stream {
-                if case .level = event { continue }
-                _ = await box.append(event)
-            }
-        }
-        try? await Task.sleep(nanoseconds: 20_000_000) // let the subscription register
+        let (recorder, task) = recordEvents(backend)
+        defer { task.cancel() }
 
         volume.fireExternalChange(volume: 42, muted: false) // == current state exactly
-        // No production interval to outlast — pure async-settle margin at the
-        // 100ms absolute floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        task.cancel()
+        // The handler applies the change in one `stateQueue` block, so anything
+        // it emitted has been recorded once the flush returns.
+        await recorder.flush(backend)
 
-        let events = await box.snapshot()
+        let events = recorder.events
         #expect(!(events.contains {
             if case .deviceUpdated(let d) = $0 { return d.isLocalDevice }
             return false
@@ -2413,26 +2636,22 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // Exactly what AppDelegate.apply(_:) does with this event, and nothing more.
         let stream = backend.makeEventStream()
-        try await confirmation("system volume mirrored") { mirrored in
+        let applied = LockedBool(false)
+        await confirmation("system volume mirrored") { mirrored in
             let task = Task {
                 for await event in stream {
                     if case .systemVolumeChanged(let v) = event {
                         controller.applyExternalSystemVolume(v)
                         mirrored()
+                        applied.set(true)
                         break
                     }
                 }
             }
             defer { task.cancel() }
-            try? await Task.sleep(nanoseconds: 20_000_000)          // let the subscription register
 
             systemVolume.fireExternalChange(volume: 25, muted: false)   // ← the volume key
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(3)) }
-                try await group.next()
-                group.cancelAll()
-            }
+            await SuiteWait.until("the volume key to reach the controller") { applied.get() }
         }
 
         // Main is now 25, Group is the identity (100) under a Selected-Devices
@@ -2503,8 +2722,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 60 }
         // The engine records the call before it can throw, so arming the failure
         // the instant the call is seen could still catch THIS push. Let the
-        // completion's confirm hop land first — it is the thing under test.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // completion's confirm hop land first — it is the thing under test. The
+        // hop records the confirmed level and clears the in-flight mark together.
+        await pollUntil { backend.stateQueue.sync { !backend.volumeInFlight.contains(device.outputID) } }
 
         // Now the receiver starts refusing. The next push echoes optimistically
         // to 25, then must snap back to the confirmed 60.
@@ -2683,9 +2903,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let callsBeforeGainChange = engine.volumeCalls.filter { $0.0 == device.outputID }.count
 
         backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
-        // setMasterGain is a plain stateQueue.async dispatch — no scheduled
-        // interval to outlast; 100ms is pure async-settle margin (absolute floor).
-        try? await Task.sleep(nanoseconds: 100_000_000)   // give a (wrong) push time to land
+        // setMasterGain is a plain stateQueue.async dispatch, and a push it
+        // issues marks the output in flight inside that block until the engine
+        // call returns — so once nothing is in flight, a (wrong) push has landed.
+        await awaitConvergesSettled(backend)
 
         #expect(engine.volumeCalls.filter { $0.0 == device.outputID }.count == callsBeforeGainChange,
                        "a muted device must be SKIPPED by the gain re-push — no new volume call for it")
@@ -2715,18 +2936,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // stored setting is: stored 50 → effective (wire) 25%.
         backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
         await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.25) < 0.001 } }
-        let callsBeforeEcho = engine.volumeCalls.count
 
         // THE ECHO: the receiver reflects back exactly what we just put on the
         // wire (0.25 = 25%).
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
-        backend.applyDacpVolume(activeRemote: token, level: 0.25)
-        // No scheduled interval here either — pure async-settle margin at the
-        // 100ms absolute floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        await awaitFed(backend, device)
+        // The gain push must have finished, so a wrong re-push shows up as a
+        // fresh `volumeInFlight` mark.
+        await pollUntil { backend.stateQueue.sync { !backend.volumeInFlight.contains(device.outputID) } }
+        let callsBeforeEcho = engine.volumeCalls.count
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.25)
+        // `applyDacpVolume` decides in one `stateQueue` block and a push it
+        // starts marks `volumeInFlight` there; the mark clears only after the
+        // engine call is recorded, so reading the mark before the call count
+        // catches a wrong push at either stage.
+        let rePushInFlight = backend.stateQueue.sync { backend.volumeInFlight.contains(device.outputID) }
 
         #expect(backend.devices.first { $0.id == device.id }?.volume == 50,
                        "an echo of our own attenuated write must NOT overwrite the user's stored setting")
+        #expect(!rePushInFlight, "an echo of our own attenuated write must NOT trigger a re-push")
         #expect(engine.volumeCalls.count == callsBeforeEcho,
                        "an echo of our own attenuated write must NOT trigger a re-push")
 
@@ -2735,7 +2963,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // (0.40 wire / 50% gain = 0.80 → stored 80) and pushed back out at that
         // same wire level — AirPlay volume is sender-owned, so the receiver's
         // audible level only moves once we write it back (SET_PARAMETER).
-        backend.applyDacpVolume(activeRemote: token, level: 0.40)
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.40)
         await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 80 }
         // The store and the re-push land on different queues — wait for the
         // push too, or the assert below races it under load.
@@ -2785,8 +3013,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.setMuted(true, for: NativeBackend.localDeviceID)
         backend.setOutputSet([NativeBackend.localDeviceID])
         await pollUntil { backend.devices.first { $0.isLocalDevice }?.volume == 80 }
-        // No scheduled interval — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        await awaitConvergesSettled(backend)
 
         #expect(engine.fedIDs.isEmpty, "local-mac must never be fed to engine.updateDiscovery")
         #expect(engine.addedIDs.isEmpty, "local-mac must never be addOutput-ed")
@@ -3108,11 +3335,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                       "the auto-recovery reconnect must still push a level to the engine (the seed fires) — the preserved 75, not skipped")
     }
 
-    /// An engine `.passwordRequired` on the STATE STREAM surfaces as
-    /// `.authRequired`, never flattened to `.unknown` (live 2026-08-06: an
-    /// auth-blocked Mac receiver — act=2 "Current User" access control — was
-    /// debugged blind because the panel said "failed for an unknown reason"
-    /// while the engine knew it wanted a password).
+    /// An engine `.passwordRequired` on the STATE STREAM with no password fed
+    /// surfaces as `.awaitingPassword`, never flattened to `.failed(.unknown)`
+    /// (live 2026-08-06: an auth-blocked Mac receiver — act=2 "Current User"
+    /// access control — was debugged blind because the panel said "failed for
+    /// an unknown reason" while the engine knew it wanted a password).
     @Test func passwordRequiredOnStateStreamSurfacesAuthRequiredCause() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
@@ -3127,24 +3354,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
 
         engine.pushState(device.outputID, .passwordRequired)
-        await pollUntil {
-            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
-                return f.cause == .authRequired
-            }
-            return false
-        }
-        guard case .failed(let failure)? =
-                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
-            Issue.record("device did not enter .failed")
-            return
-        }
-        #expect(failure.cause == .authRequired,
-                "a password rejection carries its known cause, not .unknown")
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(connectionState(backend, device.id) == .awaitingPassword,
+                "a password demand with no password fed waits for one, not .failed(.unknown)")
     }
 
     /// The same mapping on the CONNECT path: an `addOutput` that throws the
-    /// engine's `.passwordRequired` parks the device with `.authRequired` —
-    /// `convergeDevice`'s catch mirrors `applyEngineState`'s arm.
+    /// engine's `.passwordRequired` with no password fed parks the device in
+    /// `.awaitingPassword` — `convergeDevice`'s catch mirrors `applyEngineState`'s arm.
     @Test func passwordRequiredAddThrowSurfacesAuthRequiredCause() async {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device()
@@ -3159,19 +3376,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        await pollUntil {
-            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
-                return f.cause == .authRequired
-            }
-            return false
-        }
-        guard case .failed(let failure)? =
-                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
-            Issue.record("device did not enter .failed")
-            return
-        }
-        #expect(failure.cause == .authRequired,
-                "the add-throw catch maps the engine's passwordRequired, not .unknown")
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(connectionState(backend, device.id) == .awaitingPassword,
+                "the add-throw catch maps the engine's passwordRequired, not .failed(.unknown)")
     }
 
     // MARK: AirPlay passwords
@@ -3203,7 +3410,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
 
         engine.addFailures = []
         await submitAndWait(backend, "secret", for: device.id)
@@ -3238,7 +3445,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     }
 
     /// Mapping a password speaker's unexplained connect failure to `.unknown`
-    /// (AirPlay 2 reports a refused password as a plain failure) turns it red.
+    /// (AirPlay 2 reports a refused password as a plain failure), so it reads
+    /// `.failed` instead of `.awaitingPassword`, turns it red.
     @Test func passwordSpeakerConnectFailureReadsAsAuthRequired() async {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device(access: .password)
@@ -3251,15 +3459,349 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        await pollUntil { self.failureCause(backend, device.id) != nil }
-        #expect(failureCause(backend, device.id) == .authRequired)
+        await pollUntil {
+            self.failureCause(backend, device.id) != nil
+                || self.connectionState(backend, device.id) == .awaitingPassword
+        }
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
     }
 
-    /// Mapping a password demand from an on-screen-code receiver to
-    /// `.authRequired` (offering a password sheet an Apple TV can't use) turns it red.
-    @Test func passwordRequiredOnOnScreenCodeSpeakerReadsAsCodeRequired() async {
-        let (backend, engine, discovery) = makeBackend()
+    /// A code speaker with no pairing, joined, whose add the receiver answers with a code demand.
+    private func joinCodeSpeaker(_ access: AirPlayAccess, store: InMemoryAirPlayPasswordStore)
+        async -> (NativeBackend, SpyEngine, DiscoveredDevice) {
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        let device = ap2Device(access: access)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        return (backend, engine, device)
+    }
+
+    /// Keeping `awaitsPassword` to `.authRequired` only, so a code demand parks as `.failed(.codeRequired)`, turns it red.
+    @Test func aCodeDemandWithNoPairingWaitsForTheCode() async {
+        let (backend, _, device) = await joinCodeSpeaker(.onScreenCode, store: InMemoryAirPlayPasswordStore())
+        defer { backend.stop() }
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+    }
+
+    /// Dropping `.codeRequired` from `awaitsPassword`, so a code demand the
+    /// engine reports on its state stream parks as `.failed`, turns it red.
+    @Test func aCodeDemandReportedOnTheStateStreamWaitsForTheCode() async {
+        let (backend, engine, discovery) = makeBackend(passwordStore: InMemoryAirPlayPasswordStore())
+        defer { backend.stop() }
         let device = ap2Device(access: .onScreenCode)
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil {
+            self.failureCause(backend, device.id) != nil
+                || self.connectionState(backend, device.id) == .awaitingPassword
+        }
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+    }
+
+    /// Sending a typed code down the password path instead of `engine.authorize`, or not feeding the earned key on the retry, turns it red.
+    @Test func aGoodCodeStoresThePairingAndFeedsItOnTheRetry() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, device) = await joinCodeSpeaker(.onScreenCode, store: store)
+        defer { backend.stop() }
+        engine.authorizeResults[device.outputID.rawValue] = .success("KEY1")
+        engine.addFailures = []
+        await submitAndWait(backend, "1234", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(store.pairingKey(for: device.id) == "KEY1")
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+        #expect(engine.fedDescriptorList.last?.authKey == "KEY1")
+        #expect(engine.authorizeCalls.count == 1)
+        #expect(engine.authorizeCalls.first?.0 == device.outputID)
+        #expect(engine.authorizeCalls.first?.1 == "1234")
+    }
+
+    /// Forget queueing its Keychain deletes instead of running them before it
+    /// returns turns it red: the next connect's feed reads the forgotten password.
+    @Test func forgetDeletesBeforeTheNextFeedCanReadTheStore() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .password)
+        store.setPassword("right", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(engine.fedDescriptorList.last?.password == "right")
+
+        backend.forgetAirPlayPassword(for: device.id)
+        let descriptor = backend.descriptorToFeed(id: device.id)
+        #expect(descriptor != nil, "the feed still matched the engine's descriptor, so it read the forgotten password")
+        #expect(descriptor?.password == nil)
+    }
+
+    /// The queued pairing-key write in `submitCodeLocked` ignoring a Forget
+    /// tapped while `engine.authorize` was pending turns it red: the key comes back.
+    @Test func aForgetDuringAnInFlightCodeCheckWinsOverTheLateKeyWrite() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, device) = await joinCodeSpeaker(.onScreenCode, store: store)
+        defer { backend.stop() }
+        engine.authorizeResults[device.outputID.rawValue] = .success("KEY1")
+        let gate = HoldPoint()
+        engine.authorizeGate = gate
+        // Ends only once the completion runs, which it must even when the write is skipped.
+        let submitted = Task { await self.submitAndWait(backend, "1234", for: device.id) }
+        await pollUntil { gate.entered }
+        backend.forgetAirPlayPassword(for: device.id)
+        gate.open()
+        await submitted.value
+        #expect(store.pairingKey(for: device.id) == nil)
+    }
+
+    /// Retrying after a refused code, or reading the refusal as anything but `.codeRequired`, turns it red.
+    @Test func aWrongCodeFailsAsCodeDidntWork() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, device) = await joinCodeSpeaker(.onScreenCode, store: store)
+        defer { backend.stop() }
+        engine.authorizeResults[device.outputID.rawValue] = .failure(.passwordRequired)
+        let retried = OnceFlag()
+        backend.submitAirPlayPassword("0000", for: device.id, source: "mac") { _ = retried.testAndSet() }
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .codeRequired)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+        #expect(retried.testAndSet() == false, "a refused code must not run the caller's retry")
+        #expect(store.pairingKey(for: device.id) == nil)
+    }
+
+    /// `submitCodeLocked` arming no stale-report mark before `authorize`, so the
+    /// state stream's echo of the refused code reopens the code wait, turns it red.
+    @Test func aRefusedCodesEchoDoesNotReopenTheWait() async {
+        let (backend, engine, discovery) = makeBackend(passwordStore: InMemoryAirPlayPasswordStore())
+        defer { backend.stop() }
+        let device = ap2Device(access: .onScreenCode)
+        let marker = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Marker")
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscoverPair(backend, engine, discovery, device, marker)
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+
+        engine.authorizeResults[device.outputID.rawValue] = .failure(.passwordRequired)
+        backend.submitAirPlayPassword("0000", for: device.id, source: "mac") { }
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        // The dispatcher echoes the refusal on the state stream after the
+        // completion; the marker's report shows once the echo has been applied.
+        engine.pushState(device.outputID, .passwordRequired)
+        engine.pushState(marker.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == false }
+        #expect(failureCause(backend, device.id) == .codeRequired)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+    }
+
+    /// `submitCodeLocked` arming no stale-report mark before `authorize`, so the
+    /// `.stopped` echo of the accepted code turns the retry's connecting row
+    /// `.off`, turns it red.
+    @Test func aGoodCodesStoppedEchoDoesNotStopTheRetry() async {
+        let (backend, engine, discovery) = makeBackend(passwordStore: InMemoryAirPlayPasswordStore())
+        defer { backend.stop() }
+        let device = ap2Device(access: .onScreenCode)
+        let marker = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Marker")
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscoverPair(backend, engine, discovery, device, marker)
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+
+        engine.authorizeResults[device.outputID.rawValue] = .success("KEY1")
+        engine.addFailures = []
+        let retryAdd = HoldPoint()
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            await retryAdd.hold()
+        }
+        await submitAndWait(backend, "1234", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { retryAdd.entered }
+        engine.pushState(device.outputID, .stopped)
+        engine.pushState(marker.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == false }
+        #expect(connectionState(backend, device.id) != .off)
+        retryAdd.open()
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(engine.fedDescriptorList.last?.authKey == "KEY1")
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2)
+    }
+
+    /// Keeping a pairing key the receiver refused (so every join repeats it), or retrying it forever, turns it red.
+    @Test func aRejectedStoredPairingIsDroppedAndTheJoinAsksForACodeAgain() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("OLD", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(store.pairingKey(for: device.id) == nil)
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2)
+        #expect(engine.fedDescriptorList.last?.authKey == nil)
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+    }
+
+    /// The state-stream arm failing the row as `.failed(.codeRequired)` (with an
+    /// `airplay:session_failed`) when the echo of a refused stored pairing key
+    /// lands before the converge catch turns it red: the catch's extra attempt
+    /// owns that join's result, and the popover would open "Code didn't work"
+    /// for a code nobody typed.
+    @Test func aRefusedPairingEchoThatBeatsTheCatchStillEndsInTheWait() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("OLD", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        let sawRefusal = OnceFlag()
+        engine.onMirroredAddFailure = { _ in
+            // The echo is applied with the key's delete, before the add throws.
+            await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == false }
+            if self.failureCause(backend, device.id) == .codeRequired { _ = sawRefusal.testAndSet() }
+        }
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(sawRefusal.testAndSet() == false, "the row read Code didn't work before the catch's extra attempt")
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2)
+        #expect(store.pairingKey(for: device.id) == nil)
+        #expect(engine.fedDescriptorList.last?.authKey == nil)
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+    }
+
+    // Keeping the fed key in `fedDescriptors` after a plain connect failure
+    // turns it red: the sender clears its own copy when an encrypted SETUP times
+    // out, so the next join must feed the stored key again or the receiver shows a code.
+    @Test func aTimedOutSetupRefeedsTheStoredPairingOnTheNextJoin() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("KEY1", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .sessionFailed
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.addedIDs.contains(device.outputID) && self.connectionState(backend, device.id) != .connecting }
+        let fedBefore = engine.fedDescriptorList.count
+        engine.addFailures = []
+        backend.setOutputSet([])
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(engine.fedDescriptorList.dropFirst(fedBefore).last?.authKey == "KEY1")
+        #expect(store.pairingKey(for: device.id) == "KEY1")
+    }
+
+    /// Leaving the fed pairing key in place when a per-app bind fails in `handleBindFailure` turns it red.
+    @Test func aTimedOutPerAppBindRefeedsTheStoredPairingOnTheNextDiscoveryUpdate() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("KEY1", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store, injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .sessionFailed
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        let fedBefore = engine.fedDescriptorList.count
+        discovery.fire(.updated(device))
+        await pollUntil { engine.fedDescriptorList.count > fedBefore }
+        #expect(engine.fedDescriptorList.dropFirst(fedBefore).first?.authKey == "KEY1")
+        #expect(store.pairingKey(for: device.id) == "KEY1")
+    }
+
+    /// Feeding the stored pairing key again after the receiver refused it, when
+    /// the Keychain delete left it in place (no `rejectedPairingKeyIDs` skip),
+    /// turns it red: the join refeeds the stale key and loops.
+    @Test func aRejectedPairingIsNotFedAgainEvenIfTheKeychainDeleteFails() async {
+        let store = ScriptedPasswordStore(keepsPairingKeys: true)
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("OLD", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2)
+        #expect(engine.fedDescriptorList.last?.authKey == nil)
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+    }
+
+    /// The discovery re-feed falling back to the refused key still held in
+    /// `fedDescriptors` (the fallback skipping the `rejectedPairingKeyIDs` check)
+    /// turns it red: a re-announce puts the refused key back on the device.
+    @Test func aRefusedPairingIsNotFedBackByADiscoveryUpdate() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("OLD", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(engine.fedDescriptorList.last?.authKey == "OLD")
+
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == false }
+        let fedBefore = engine.fedDescriptorList.count
+        discovery.fire(.updated(ap2Device(name: "Moved Move", access: .onScreenCode)))
+        await pollUntil { engine.fedDescriptorList.count > fedBefore }
+        #expect(!engine.fedDescriptorList.dropFirst(fedBefore).contains { $0.authKey == "OLD" })
+    }
+
+    /// Mapping an every-time receiver's (status-flags bit 3) code demand to the
+    /// code wait, or sending its typed code to `engine.authorize`, turns it red:
+    /// the sender frees the key and asks for a fresh code on every start, so the
+    /// retry would wait for a code forever.
+    @Test func anEveryTimeReceiverFailsAsUnsupportedAndTakesNoCode() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .onScreenCodeEveryTime)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .codeEveryTimeUnsupported)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+
+        engine.authorizeResults[device.outputID.rawValue] = .success("KEY1")
+        let completed = OnceFlag()
+        backend.submitAirPlayPassword("1234", for: device.id, source: "mac") { _ = completed.testAndSet() }
+        backend.stateQueue.sync {}
+        await MainActor.run {}
+        #expect(engine.authorizeCalls.isEmpty)
+        #expect(store.pairingKey(for: device.id) == nil)
+        #expect(completed.testAndSet() == false, "an every-time receiver takes no code, so nothing retries")
+    }
+
+    /// Mapping a password demand from a Home-only receiver (a Mac in Current
+    /// User AirPlay mode) to `.authRequired`, offering a password sheet no
+    /// password satisfies, turns it red.
+    @Test func passwordRequiredOnHomeOnlySpeakerReadsAsHomeMembersOnly() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(access: .homeMembersOnly)
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
         _ = await collect(from: backend) { events in
@@ -3270,7 +3812,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
         engine.pushState(device.outputID, .passwordRequired)
         await pollUntil { self.failureCause(backend, device.id) != nil }
-        #expect(failureCause(backend, device.id) == .codeRequired)
+        #expect(failureCause(backend, device.id) == .homeMembersOnly)
     }
 
     /// Deleting the stored password on a plain `sessionFailed` (a guessed
@@ -3288,6 +3830,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.setOutputSet([device.id])
         await pollUntil { self.failureCause(backend, device.id) != nil }
         #expect(failureCause(backend, device.id) == .authRequired)
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+        #expect(store.password(for: device.id) == "right")
+    }
+
+    /// Reading a `.raop` password speaker's plain `sessionFailed` as `.authRequired` (the AirPlay 2 guess; the RAOP sender reports a bad password itself) turns it red.
+    @Test func sessionFailedOnAirPlay1PasswordSpeakerReadsAsUnknownAndKeepsThePassword() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap1Device(access: .password)
+        store.setPassword("right", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .sessionFailed
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .unknown)
+        #expect(engine.fedDescriptorList.last?.password == "right")
         #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
         #expect(store.password(for: device.id) == "right")
     }
@@ -3360,10 +3921,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(engine.fedDescriptorList.last?.password == "secret")
 
         backend.retryOutput(device.id)
-        await pollUntil { adds() == 3 && self.failureCause(backend, device.id) != nil }
+        await pollUntil { adds() == 3 && self.connectionState(backend, device.id) == .awaitingPassword }
         #expect(adds() == 3)
         #expect(engine.fedDescriptorList.last?.password == nil)
-        #expect(failureCause(backend, device.id) == .authRequired)
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
     }
 
     /// Setting the typed-password mark after the store write (so a
@@ -3378,23 +3939,29 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await startAndDiscover(backend, engine, discovery, device)
         let firstAdd = HoldPoint()
         let sawFirst = OnceFlag()
+        // Signalled when the catch has either deleted a password or looped
+        // into the next attempt; each wait passes the signal on, so a later
+        // `onSet` does not block.
+        let catchSettled = DispatchSemaphore(value: 0)
+        store.onRemove = { catchSettled.signal() }
         engine.addFailures = [device.outputID.rawValue]
         engine.addFailureError = .passwordRequired
         engine.onAddOutputHold = { id, _ in
             guard id == device.outputID else { return }
-            if sawFirst.testAndSet() { engine.addFailures = [] } else { await firstAdd.hold() }
+            if sawFirst.testAndSet() {
+                engine.addFailures = []
+                catchSettled.signal()
+            } else {
+                await firstAdd.hold()
+            }
         }
         // The failed add lands at the store write, after the mark: the hook
         // lets it fail and waits until the catch has either deleted a password
         // or looped into the next attempt.
         store.onSet = {
             firstAdd.open()
-            let deadline = Date().addingTimeInterval(30)
-            while store.removeCount == 0,
-                  engine.addedIDs.filter({ $0 == device.outputID }).count < 2,
-                  Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.002)
-            }
+            catchSettled.wait()
+            catchSettled.signal()
         }
 
         backend.setOutputSet([device.id])
@@ -3437,6 +4004,42 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(store.password(for: device.id) == nil)
         writeGate.signal()
         await pollUntil { store.password(for: device.id) == "secret" }
+    }
+
+    /// Dispatching the Keychain writes on a concurrent queue (the second submit's write landing while the first is still held) turns it red.
+    @Test func twoSubmitsStoreTheLastSubmittedPassword() async {
+        let store = ScriptedPasswordStore()
+        let writeGate = DispatchSemaphore(value: 0)
+        let entered = LockedBool(false)
+        let sawFirstWrite = OnceFlag()
+        store.onWillSet = {
+            guard !sawFirstWrite.testAndSet() else { return }
+            entered.set(true)
+            writeGate.wait()
+        }
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        let firstDone = LockedBool(false)
+        let secondDone = LockedBool(false)
+
+        backend.submitAirPlayPassword("first", for: device.id, source: "mac") { firstDone.set(true) }
+        backend.submitAirPlayPassword("second", for: device.id, source: "phone") { secondDone.set(true) }
+        await pollUntil { entered.get() }
+        // Both submits have queued their writes once `stateQueue` drains. On a
+        // concurrent write queue the second write would now run while the first
+        // is held, but nothing marks a write waiting behind a held one on a
+        // serial queue, so only time can give it the chance.
+        backend.stateQueue.sync {}
+        try? await Task.sleep(nanoseconds: 300_000_000) // real-time-ok: a concurrent write queue shows only by running the second write while the first is held, and no event marks a write queued behind a held one
+        writeGate.signal()
+        writeGate.signal()
+        await pollUntil { firstDone.get() }
+        await pollUntil { secondDone.get() }
+
+        #expect(store.password(for: device.id) == "second")
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
     }
 
     /// Building a discovery re-feed's password from the store alone (dropping
@@ -3690,7 +4293,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await startAndDiscover(backend, engine, discovery, device)
 
         backend.setOutputSet([device.id])
-        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
 
         await submitAndWait(backend, "wrong", for: device.id)
@@ -3699,6 +4302,168 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(engine.fedDescriptorList.last?.password == "wrong")
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
         #expect(failureCause(backend, device.id) == .authRequired)
+    }
+
+    /// Writing `.failed` instead of `.awaitingPassword` in the converge catch
+    /// (the wait times out), or counting a password-waiting speaker in
+    /// `reconcileSilenceWatchdog`'s `desiredNonLocal` (the countdown stays armed
+    /// after the wait begins), turns it red. It also turns red if
+    /// `reconcileCaptureGate` counts a speaker in `.awaitingPassword` (the tap
+    /// keeps running and the Mac stays mute until the sheet is answered), or if
+    /// the accepted password's `.connecting` no longer re-runs the gate.
+    @Test func passwordDemandWithNoPasswordFedReadsAsAwaitingPassword() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+        #expect(!scheduler.hasPending)
+        await pollUntil { !capture.isCapturing }
+        #expect(!capture.isCapturing)
+        #expect(!backend.test_silenceFallbackActive)
+
+        engine.addFailures = []
+        await submitAndWait(backend, "secret", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        await pollUntil { capture.isCapturing }
+        #expect(capture.isCapturing)
+        #expect(!scheduler.hasPending)
+    }
+
+    /// Turns red if the gate stops capture when any selected speaker waits for
+    /// a password instead of when every one does.
+    @Test func aWaitingSpeakerBesideAConnectedOneLeavesCaptureRunning() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let open = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Open Speaker")
+        let locked = ap2Device(id: "AA:BB:CC:DD:EE:03", name: "Locked Speaker", access: .password)
+        await startAndDiscoverPair(backend, engine, discovery, open, locked)
+        engine.addFailures = [locked.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+
+        backend.setOutputSet([open.id, locked.id])
+        await pollUntil {
+            self.connectionState(backend, open.id) == .connected
+                && self.connectionState(backend, locked.id) == .awaitingPassword
+        }
+        #expect(capture.isCapturing)
+        #expect(!backend.test_silenceFallbackActive)
+        #expect(!scheduler.hasPending)
+    }
+
+    /// Dropping the `.failed(.authRequired)` case from `reconcileSilenceWatchdog`'s
+    /// `desiredNonLocal` exclusion turns it red: the countdown the retry's
+    /// `.connecting` armed stays armed after the refusal.
+    @Test func refusedPasswordArmsNoSilenceCountdown() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        await submitAndWait(backend, "wrong", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        #expect(!scheduler.hasPending)
+    }
+
+    /// Turns red if the gate counts a speaker that refused its password (capture
+    /// restarts and the Mac goes mute), or if the watchdog's early return keeps
+    /// the fallback banner up for it.
+    @Test func fallbackThatAlreadyFiredEndsWithoutRestartingCaptureWhenTheLoneSpeakerRefusesItsPassword() async {
+        let scheduler = ManualWatchdogScheduler()
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .password)
+        store.setPassword("secret", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store, watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        scheduler.fireAll()
+        await pollUntil { backend.test_silenceFallbackActive && !capture.isCapturing }
+
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        backend.retryOutput(device.id)
+        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        await pollUntil { !backend.test_silenceFallbackActive }
+        #expect(!backend.test_silenceFallbackActive)
+        #expect(!capture.isCapturing)
+        #expect(!scheduler.hasPending)
+    }
+
+    /// Dropping the `lastDescriptors` gate from `retryOutput`'s per-app password
+    /// arm turns it red: the retype makes the offline speaker available and
+    /// replays the route into a bind that cannot succeed.
+    @Test func perAppOnlyPasswordSpeakerThatWentOfflineBeforeARetypeStaysUnavailable() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil {
+                self.connectionState(backend, device.id) == .awaitingPassword
+                    || self.failureCause(backend, device.id) == .authRequired
+            }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+        let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
+        // The binding drops as soon as the pushed failure is applied, while the
+        // scripted add is still in flight; waiting on the binding alone let the
+        // test retype and retry inside one poll gap of `onMirroredAddFailure`,
+        // which then never saw the failure and held the add for 120 s.
+        let unbound = {
+            engine.opsInFlight(for: device.outputID) == 0
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil { perApp.state(for: "com.foo") == .idle && unbound() }
+
+        await submitAndWait(backend, "wrong", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { binds() == 2 }
+        await pollUntil { isAvailable() == false && unbound() }
+        #expect(failureCause(backend, device.id) == .authRequired)
+
+        discovery.fire(.updated(DiscoveredDevice(
+            id: device.id, descriptor: device.descriptor, outputID: device.outputID,
+            isAirPlay2Supported: true, isAvailable: false, access: .password)))
+        await pollUntil { backend.stateQueue.sync { backend.lastDescriptors[device.id] == nil } }
+
+        engine.addFailures = []
+        await submitAndWait(backend, "right", for: device.id)
+        backend.retryOutput(device.id)
+        try? await Task.sleep(nanoseconds: 300_000_000) // real-time-ok: `retryOutput` decides in one `stateQueue` block and kicks nothing for an offline speaker; a wrong kick would be an unstructured Task with no handle to wait on
+        #expect(isAvailable() == false)
+        #expect(binds() == 2)
+        #expect(connectionState(backend, device.id) != .connecting)
     }
 
     /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
@@ -3778,15 +4543,21 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // yield.
         engine.onAddOutputBody = { [weak engine] id in
             engine?.pushState(id, .connected)
-            Thread.sleep(forTimeInterval: 0.03) // let applyEngineState run first
+        }
+        // Hold the add open until `applyEngineState` has taken the mirror (it
+        // puts the device in `added`), so it runs first.
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            await pollUntil { backend.stateQueue.sync { backend.added.contains(device.id) } }
         }
 
         backend.setOutputSet([device.id])
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
 
-        // Let any (wrongly) second fire-and-forget push land — outlasts the forced
-        // 0.03s race delay above (~3.3x).
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // Every seed push marks the output in flight inside the `stateQueue`
+        // block that issues it, so once the converge has released its slot and
+        // nothing is in flight, a (wrongly) second push has landed.
+        await awaitConvergesSettled(backend)
 
         let callsForDevice = engine.volumeCalls.filter { $0.0 == device.outputID }
         #expect(callsForDevice.count == 1,
@@ -4004,6 +4775,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Select it so it is a live engine output.
         backend.setOutputSet([ap2.id])
         await pollUntil { engine.addedIDs.contains(ap2.outputID) }
+        await pollUntil { backend.stateQueue.sync { backend.added.contains(ap2.id) } }
 
         // A still-available `.updated` for the same id (whatever the AP2 flag) must
         // NOT tear the session down.
@@ -4015,9 +4787,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             isAvailable: true)
         discovery.fire(.updated(stillAvailable))
 
-        // Give any (erroneous) teardown a window to happen, then assert it did not.
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // A teardown is decided on the caller's thread (it drops the device from
+        // `added` there) before its engine call; the update itself lands on
+        // `stateQueue`, and anything it kicks shows up as a converge.
+        await awaitConvergesSettled(backend)
+        #expect(backend.stateQueue.sync { backend.added.contains(ap2.id) },
+                "an available `.updated` must leave the session in `added` (T7)")
         #expect(!(engine.removedIDs.contains(ap2.outputID)),
                        "an available `.updated` must NOT removeOutput the live session (T7)")
         #expect(!(engine.discoveryRemovedNames.contains(ap2.descriptor.name)),
@@ -4143,7 +4918,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// IFF the final toggle was ON (no zombie session, no wedge).
     @Test func toggleSpamCoalescesToLatestNoOverlap() async {
         let (backend, engine, discovery) = makeBackend()
-        engine.opDelayNanos = 20_000_000 // 20ms/op: ops complete slower than the flips
+        let gate = HoldPoint()
+        engine.opGate = gate // ops stay in flight until every flip has been issued
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -4161,6 +4937,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
         // Final flip explicitly ON so the settled state is deterministic.
         backend.setOutputSet([device.id])
+        gate.open()
 
         // Let all ops drain.
         await pollUntil {
@@ -4191,7 +4968,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// UI shows it off.
     @Test func toggleSpamEndingOffTearsDownSession() async {
         let (backend, engine, discovery) = makeBackend()
-        engine.opDelayNanos = 15_000_000
+        let gate = HoldPoint()
+        engine.opGate = gate // ops stay in flight until every flip has been issued
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -4202,6 +4980,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         for i in 0..<10 { backend.setOutputSet((i % 2 == 0) ? [device.id] : []) }
         backend.setOutputSet([]) // final: OFF
+        gate.open()
 
         // Settled: deselected AND every add was matched by a remove (net not added).
         await pollUntil {
@@ -4221,7 +5000,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// for that id was called at most once (the initial discovery feed).
     @Test func noDiscoveryRefeedForUnchangedDescriptor() async {
         let (backend, engine, discovery) = makeBackend()
-        engine.opDelayNanos = 5_000_000
+        let gate = HoldPoint()
+        engine.opGate = gate // ops stay in flight until every toggle has been issued
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -4236,11 +5016,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Several on/off cycles with the SAME descriptor (no discovery updates).
         for i in 0..<8 { backend.setOutputSet((i % 2 == 0) ? [device.id] : []) }
         backend.setOutputSet([device.id])
+        gate.open()
 
         await pollUntil {
             backend.devices.first { $0.id == device.id }?.isSelected == true
         }
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // A re-feed happens inside a converge, before its add.
+        await awaitConvergesSettled(backend)
 
         #expect(engine.feedCount(for: device.outputID) <= 1,
                                  "an unchanged descriptor must NOT be re-fed per toggle (root cause 2), got \(engine.feedCount(for: device.outputID))")
@@ -4311,9 +5093,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let attempts = await parkDevice(backend, engine, discovery, device)
 
         backend.setOutputSet([device.id])   // membership-neutral: added:[] removed:[]
-        // The storm fix schedules no timer here at all (the whole point is that
-        // nothing gets re-kicked) — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // A re-kick would claim a converge slot inside `setOutputSet` itself, so
+        // once every converge has finished, any wrong attempt has reached the engine.
+        await awaitConvergesSettled(backend)
 
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count == attempts,
                 "a membership-neutral setOutputSet must not re-kick a parked .failed device")
@@ -4334,9 +5116,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let attempts = await parkDevice(backend, engine, discovery, device)
 
         discovery.fire(.updated(device))    // same descriptor, isAvailable == true
-        // No timer scheduled here either — pure async-settle margin at the
-        // 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // The update lands in one `stateQueue` block, which claims a converge
+        // slot for any re-kick, so once every converge has finished, a wrong
+        // attempt has reached the engine.
+        await awaitConvergesSettled(backend)
 
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count == attempts,
                 "a same-descriptor re-resolve must not re-kick a parked .failed device")
@@ -4416,6 +5199,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         _ = await collect(from: backend) { events in
             events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
         } after: { discovery.fire(.appeared(device)) }
+        let marker = await discoverMarker(backend, discovery)
 
         // Turn it ON: converge issues addOutput; it succeeds and the device selects.
         backend.setOutputSet([device.id])
@@ -4436,9 +5220,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // resolved behind the op completion). It is STALE — the user turned the
         // device off. It must NOT re-select / re-mark-available the device.
         engine.pushState(device.outputID, .streaming)
-        // Give the state-stream consumer time to (mis)handle it. No scheduled
-        // interval here — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // State reports are applied in order, so once the marker's has been,
+        // the stale one has been (mis)handled too.
+        await awaitStateReportsApplied(backend, engine, marker: marker)
+        await awaitConvergesSettled(backend)
 
         let d = backend.devices.first { $0.id == device.id }
         #expect(d?.isSelected == false,
@@ -4454,7 +5239,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// re-kick converge so the stale session is torn down, not leave it selected.
     @Test func staleStreamingWhileAddedReKicksTeardown() async {
         let (backend, engine, discovery) = makeBackend()
-        engine.opDelayNanos = 30_000_000 // slow ops so we can wedge a stale event mid-flight
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -4474,8 +5258,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // removeOutput completes. At this instant desiredOn=false and the device is
         // still in `added`. The handler must re-kick converge to tear it down rather
         // than re-selecting it.
+        // The OFF converge's removeOutput waits at the gate, so the stale
+        // `.streaming` is pushed while it is provably still in flight.
+        let gate = HoldPoint()
+        engine.opGate = gate
         backend.setOutputSet([])
+        await pollUntil { gate.entered }
         engine.pushState(device.outputID, .streaming)
+        gate.open()
 
         // Eventually the device is off and the engine holds no session.
         await pollUntil {
@@ -4511,14 +5301,18 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // post-success write executes. The post-write must respect that park.
         engine.onAddOutputBody = { [weak engine] id in
             engine?.pushState(id, .failed)
-            Thread.sleep(forTimeInterval: 0.03) // let applyEngineState park the id
+        }
+        // Hold the add open until `applyEngineState` has parked the id (it marks
+        // the device unavailable), so the park lands first.
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
         }
 
         backend.setOutputSet([device.id])
 
         // Let everything settle: the post-write should have deferred to the park.
-        // Outlasts the forced 0.03s race delay above (~3.3x).
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        await awaitConvergesSettled(backend)
 
         let d = backend.devices.first { $0.id == device.id }
         #expect(d?.isAvailable == false,
@@ -4534,7 +5328,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// once `addOutput` succeeds and the post-success write lands.
     @Test func connectionStateAddGoesConnectingThenConnected() async {
         let (backend, engine, discovery) = makeBackend()
-        engine.opDelayNanos = 30_000_000 // slow enough to observe the connecting frame
+        let gate = HoldPoint()
+        engine.opGate = gate // the add stays in flight until the connecting frame is seen
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -4554,6 +5349,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.connectionState == .connecting }
             else { return false }
         }, "a newly-desired-on device must go .connecting immediately, before the op resolves")
+        gate.open()
 
         await pollUntil {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
@@ -4770,14 +5566,16 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
-        // start() alone: nothing selected yet. No scheduled interval — pure
-        // async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // start() alone: nothing selected yet. Its engine task wires the capture
+        // callbacks last, so once they are in place and both queues have
+        // drained, any tap start it made has landed.
+        await pollUntil { capture.onDeviceRateRebuild != nil }
+        drainQueues(backend)
         #expect(capture.ops == [], "start() must not run the tap — nothing is selected, so it would mute the Mac and send audio nowhere")
 
         // ...and the empty set GroupController sends for {local Mac} passthrough.
         backend.setOutputSet([])
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        drainQueues(backend)
         #expect(capture.ops == [], "passthrough (empty output set) must not run the tap")
         #expect(!(capture.isCapturing))
     }
@@ -4804,10 +5602,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // then nothing — the whole no-Cast half of the reduction table.
         backend.setOutputSet([device.id])
         await pollUntil { capture.isCapturing }
+        // The pre-delay is published from `stateQueue` onto `captureControlQueue`.
         backend.setOutputSet([device.id, NativeBackend.localDeviceID])
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        drainQueues(backend)
         backend.setOutputSet([NativeBackend.localDeviceID])
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        drainQueues(backend)
         backend.setOutputSet([])
         await pollUntil { !capture.isCapturing }
 
@@ -4853,8 +5652,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // The local device + an id we've never discovered — neither is a real output.
         backend.setOutputSet([NativeBackend.localDeviceID, "AA:BB:CC:DD:EE:FF"])
-        // No scheduled interval — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // The gate decides inside `setOutputSet` and runs on `captureControlQueue`.
+        drainQueues(backend)
         #expect(capture.ops == [], "only a real, discovered receiver may start capture")
     }
 
@@ -4889,7 +5688,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
         backend.captureCoordinator = capture
-        engine.opDelayNanos = 5_000_000 // slow ops race the fast flips
+        let gate = HoldPoint()
+        engine.opGate = gate // ops stay in flight until every flip has been issued
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
@@ -4903,6 +5703,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             backend.setOutputSet([])
         }
         backend.setOutputSet([device.id])   // last intent: ON
+        gate.open()
 
         await pollUntil { capture.isCapturing }
         #expect(capture.isCapturing, "capture must settle ON — the last intent selected an AP2 output")
@@ -4966,7 +5767,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// work stays switched off (here: the fake never even calls `onLevel`) while
     /// the popover is closed.
     @Test func noLevelEmittedWhileMeteringInactive() async {
-        let (backend, engine, discovery) = makeBackend()
+        let levelClock = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(levelDelayClock: levelClock.queueHoppingClock)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         backend.start(); defer { backend.stop() }
@@ -4984,16 +5786,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(!(capture.meteringActive), "metering must default to inactive")
         capture.fireLevelIfActive(0.5)
 
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        let collector = Task {
-            for await event in stream { _ = await box.append(event) }
-        }
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        let (recorder, collector) = recordEvents(backend)
         capture.fireLevelIfActive(0.5)   // still inactive — must be a no-op
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        var seen = await box.snapshot()
-        #expect(!(seen.contains { if case .level = $0 { return true } else { return false } }),
+        // Run the meter's drain by hand, then flush: a level it emitted is recorded.
+        levelClock.fireAll()
+        await recorder.flush(backend)
+        #expect(!(recorder.events.contains { if case .level = $0 { return true } else { return false } }),
                         "no .level may be emitted while metering is inactive")
 
         // Flip it on: NativeBackend must forward to the coordinator.
@@ -5001,11 +5799,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { capture.meteringActive }
         #expect(capture.meteringActive, "setMeteringActive(true) must reach the coordinator")
         capture.fireLevelIfActive(0.5)
-        // A fired sample is try-stored, then picked up by the `stateQueue` drain
-        // at the ~40 ms display cadence, so allow several cadences here.
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        seen = await box.snapshot()
-        #expect(seen.contains { if case .level = $0 { return true } else { return false } },
+        // A fired sample is stored, then picked up by the `stateQueue` drain at
+        // the display cadence, which this test runs by hand once the gate flip
+        // has armed it.
+        backend.stateQueue.sync {}
+        levelClock.fireAll()
+        await pollUntil { recorder.events.contains { if case .level = $0 { return true } else { return false } } }
+        #expect(recorder.events.contains { if case .level = $0 { return true } else { return false } },
                        "a level fired while active must reach the event stream")
 
         collector.cancel()
@@ -5016,12 +5816,75 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(!(capture.meteringActive), "stop() must leave metering inactive")
     }
 
+    /// The Touch Bar pulses its play button for `slowOutputDelayMs` after a
+    /// start or stop. Turns red if a room with nothing slow reports a delay (the
+    /// button would pulse on every play with plain AirPlay), or if a slow
+    /// output's raised room delay stops being reported (no pulse for Cast).
+    @Test func slowOutputDelayOnlyWhenAnOutputRaisesTheRoomDelay() async {
+        let (backend, _, _) = makeBackend()
+        let read = { await withCheckedContinuation { c in backend.slowOutputDelayMs { c.resume(returning: $0) } } }
+        #expect(await read() == nil)
+        backend.stateQueue.sync { backend.btRoomTermMs = 5500 }
+        #expect(await read() == 5500)
+    }
+
+    /// The Touch Bar's play/pause glyph reads `.level`, and the popover gate
+    /// keeps `.level` off whenever the popover is closed, which is nearly always
+    /// while someone uses the Touch Bar. `setDeviceLevelsWanted(true)` must keep
+    /// the per-device level flowing with the popover closed, and must NOT start
+    /// a metering-only per-app tap, which only the popover's app rows need.
+    /// Turns red if a closed popover again silences `.level` for the Touch Bar
+    /// (the glyph sticks on play while music plays), or if the Touch Bar's
+    /// request starts per-app metering taps for the whole session.
+    @Test func deviceLevelsFlowWithPopoverClosedWhenWanted() async {
+        let registry = TapRegistry()
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.plain"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:56", name: "Touch Bar Glyph")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        backend.updateAppRoutes([AppRoute(bundleID: "com.plain", displayName: "Plain")])
+
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+
+        (backend as MeteringControlling).setDeviceLevelsWanted(true)
+        // Keep delivering, as the real tap does: `noteSystemRMS` drops a sample
+        // that meets the drain holding its lock.
+        await pollUntil {
+            capture.fireLevelIfActive(0.4)
+            return (levels.lastDeviceLevel(device.id) ?? 0) > 0
+        }
+        #expect(abs((levels.lastDeviceLevel(device.id) ?? 0) - 0.4) <= 0.001,
+                "with the popover closed, the Touch Bar's request must keep .level flowing")
+        drainQueues(backend)   // a metering tap starts on `captureControlQueue`
+        if case .idle = metering.state(for: "com.plain") {} else {
+            Issue.record("the Touch Bar's request must not start a metering-only per-app tap")
+        }
+
+        // Withdrawing it with the popover still closed switches the RMS work off.
+        (backend as MeteringControlling).setDeviceLevelsWanted(false)
+        await pollUntil { !capture.meteringActive }
+        #expect(!capture.meteringActive, "levels must stop once nobody wants them")
+    }
+
     /// D3: a burst of rapid capture-buffer RMS callbacks (far above the ~25 Hz
     /// display cadence) must be coalesced per device — not fanned out 1:1 as
     /// `.level` events — while still guaranteeing the burst's final value lands
     /// (the trailing-edge flush), so the meter never freezes on a stale value.
     @Test func levelEmissionIsCoalescedToDisplayCadence() async {
-        let (backend, engine, discovery) = makeBackend()
+        // The meter's drain, its trailing flush and its "now" all run on this
+        // clock, so the burst below spans exactly the time it says it does.
+        let levelClock = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            levelDelayClock: levelClock.queueHoppingClock, levelUptimeNanos: levelClock.uptimeNanos)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         backend.start(); defer { backend.stop() }
@@ -5058,41 +5921,32 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 }
             }
         }
-        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
-
-        // Fire a burst: 40 callbacks over ~100ms (every ~2.5ms) — far above the
-        // 40ms/~25Hz coalescing window. Last value is a distinctive sentinel so we
-        // can confirm the trailing-edge flush delivers it.
-        let burstDuration: UInt64 = 100_000_000
+        // Fire a burst: 40 callbacks over 100 ms of the test clock (every 2.5 ms)
+        // — far above the 40ms/~25Hz coalescing window. Last value is a
+        // distinctive sentinel so we can confirm the burst's final value lands.
+        // After each step, `stateQueue.sync` lets a drain or flush that just came
+        // due run before the next callback.
         let steps = 40
+        let step = 0.0025
         let finalValue: Float = 0.987
-        let windowStart = DispatchTime.now()
         for i in 0..<steps {
             let value: Float = i == steps - 1 ? finalValue : Float(i) / Float(steps)
             capture.onLevel?(value)
-            try? await Task.sleep(nanoseconds: burstDuration / UInt64(steps))
+            levelClock.advance(by: step)
+            backend.stateQueue.sync {}
         }
 
-        // Wait for the trailing flush (scheduled ~40ms after the last coalesced
-        // leading edge) to deliver the final value. A fixed 80ms sleep here was
-        // a machine-speed assertion: on the 3-core GitHub runner the flush's
-        // `asyncAfter` landed after it (run 37176319005, `levels.last` 0.925).
-        // The poll's deadline is a hang-stop; the assertion below still fails
-        // if the flush never delivers the sentinel.
+        // One more display interval: the next drain picks up the final value.
+        levelClock.advance(by: 0.04)
+        backend.stateQueue.sync {}
         await pollUntil { box.levels.last == finalValue }
-        let windowMs = Double(DispatchTime.now().uptimeNanoseconds - windowStart.uptimeNanoseconds) / 1_000_000
+        let windowMs = (Double(steps) * step + 0.04) * 1000
         collector.cancel()
 
         let levels = box.levels
-        // The bound scales with how long the emission window ACTUALLY took: under
-        // heavy load every `Task.sleep` above stretches, so genuinely more 40ms
-        // cadences elapse and more coalesced events are CORRECT (a fixed bound of
-        // 8 refused legitimate runs at 10 and 12 during the merge guards). Ideal
-        // is ceil(window/40)+1; +50% absorbs timer jitter, and the floor keeps the
-        // old bound on a quiet machine. Still far below 40 — one event per
+        // Ideal is ceil(window/40)+1; +50% and the floor of 8 keep the bound the
+        // suite used on the wall clock. Still far below 40 — one event per
         // callback — which is the property under test.
-        // Capped at 39 — the per-buffer fan-out is 40, so the property stays
-        // falsifiable however long the window stretched.
         let allowed = min(max(8, Int((ceil(windowMs / 40.0) + 1) * 1.5)), 39)
         #expect(levels.count <= allowed,
             "level emission must be coalesced to ~25Hz, not fanned out per capture buffer (D3): got \(levels.count) events for \(steps) callbacks over \(Int(windowMs))ms (allowed \(allowed))")
@@ -5123,7 +5977,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// `coordinator.start()` with NO further UI action (no re-toggle of the
     /// Selected Device).
     @Test func wholeSystemCaptureFailedSchedulesRetryThatRestartsTheTap() async {
-        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.03, captureRetryMaxBackoff: 0.1)
+        let retries = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            captureRetryDelay: 1, captureRetryMaxBackoff: 4, delayClock: retries.clock)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         backend.start(); defer { backend.stop() }
@@ -5139,6 +5995,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(capture.startCount == 1)
 
         capture.fireState(.failed(.tapCreationFailed(reason: "test failure")))
+        #expect(backend.test_hasPendingCaptureRetry(), "the failure must schedule a retry")
+        retries.fireAll()   // the backoff elapses
 
         await pollUntil { capture.startCount >= 2 }
         #expect(capture.startCount >= 2, "a transient whole-system-tap failure must self-heal via a backoff retry (T16, E10)")
@@ -5234,7 +6092,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// LATER unrelated failure starts its backoff from attempt 1 again, not
     /// wherever the prior chain left off.
     @Test func wholeSystemCaptureRetryCancelledOnRecovery() async {
-        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.05, captureRetryMaxBackoff: 0.15)
+        let retries = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            captureRetryDelay: 1, captureRetryMaxBackoff: 4, delayClock: retries.clock)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         backend.start(); defer { backend.stop() }
@@ -5251,17 +6111,18 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { backend.test_hasPendingCaptureRetry() }
         #expect(backend.test_captureRetryCount() == 1)
 
-        // Recovered well before the 0.05s backoff would have fired.
+        // Recovered before the backoff fires.
         let format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
         capture.fireState(.capturing(format))
 
         #expect(!(backend.test_hasPendingCaptureRetry()), "recovering to .capturing must cancel any pending retry immediately")
         #expect(backend.test_captureRetryCount() == 0, "recovery resets the backoff attempt counter")
 
-        // Give the cancelled timer's original deadline time to pass and prove
-        // no stray start() lands from it — outlasts captureRetryDelay=0.05s (3x).
+        // The cancelled timer's deadline passes: no stray start() may land from it.
+        // A retry that does run queues its start() on `captureControlQueue`.
         let countAfterRecover = capture.startCount
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        retries.fireAll()
+        backend.captureControlQueue.sync {}
         #expect(capture.startCount == countAfterRecover, "a cancelled retry must never fire a stray start() after recovery")
     }
 
@@ -5271,7 +6132,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// The attempt counter still grows per failure (it feeds the backoff delay
     /// math), even though only the LAST scheduled timer ever fires.
     @Test func wholeSystemCaptureRetryIsSingleFlighted() async {
-        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.06, captureRetryMaxBackoff: 0.12)
+        let retries = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            captureRetryDelay: 1, captureRetryMaxBackoff: 4, delayClock: retries.clock)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         backend.start(); defer { backend.stop() }
@@ -5285,20 +6148,17 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { capture.isCapturing }
         let startsBefore = capture.startCount
 
-        // Two `.failed` events back to back, well inside the first's 0.06s
-        // backoff window — the second must REPLACE the first's timer.
+        // Two `.failed` events back to back, inside the first's backoff window —
+        // the second must REPLACE the first's timer.
         capture.fireState(.failed(.tapCreationFailed(reason: "first")))
-        try? await Task.sleep(nanoseconds: 20_000_000)
         capture.fireState(.failed(.tapCreationFailed(reason: "second")))
 
         #expect(backend.test_captureRetryCount() == 2, "the attempt counter still grows per failure (feeds the backoff delay)")
 
-        await pollUntil { capture.startCount > startsBefore }
-        // Past BOTH original timers' deadlines (0.06s and 0.02+0.12s) — if the
-        // first had NOT been cancelled, this window would show a 2nd extra
-        // start() beyond the one the surviving (2nd) timer produces. ~3x the
-        // second timer's 0.14s deadline from here.
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        // Both timers' deadlines pass. Had the first NOT been cancelled, it would
+        // run here too and add a 2nd extra start() beyond the surviving timer's.
+        retries.fireAll()
+        backend.captureControlQueue.sync {}
         #expect(capture.startCount == startsBefore + 1, "N `.failed` events in a row must never stack N retry timers (single-flighting)")
     }
 
@@ -5306,7 +6166,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// retry can ever fix an OS-version gate, so it must never schedule one
     /// (matches `PerAppCaptureError.isRetryable`'s exact same carve-out).
     @Test func wholeSystemCaptureRetryDoesNotSpinOnOSUnsupported() async {
-        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.02, captureRetryMaxBackoff: 0.05)
+        let retries = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            captureRetryDelay: 1, captureRetryMaxBackoff: 4, delayClock: retries.clock)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         backend.start(); defer { backend.stop() }
@@ -5322,10 +6184,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         capture.fireState(.failed(.osUnsupported(minimum: "14.2")))
 
-        // Several backoff periods' worth of margin — a permanently-dead
-        // failure must never spin a retry. No retry is ever scheduled here by
-        // design, so this is 3x captureRetryMaxBackoff=0.05s as a safety margin.
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        // Any backoff elapses: a permanently-dead failure must never spin a retry.
+        retries.fireAll()
+        backend.captureControlQueue.sync {}
         #expect(!(backend.test_hasPendingCaptureRetry()), "a permanently-dead failure (.osUnsupported) must not schedule a retry")
         #expect(capture.startCount == startsBefore, "an unretryable failure must never re-invoke start()")
     }
@@ -5335,15 +6196,17 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// whole-system tap, only `captureRunning`, and it must gate the retry here
     /// too, not just at fire time.
     @Test func wholeSystemCaptureFailedWithNothingSelectedNeverSchedulesRetry() async {
-        let (backend, engine, _) = makeBackend(captureRetryDelay: 0.02, captureRetryMaxBackoff: 0.05)
+        let retries = ManualDelayClock()
+        let (backend, engine, _) = makeBackend(
+            captureRetryDelay: 1, captureRetryMaxBackoff: 4, delayClock: retries.clock)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
         capture.fireState(.failed(.tapCreationFailed(reason: "test")))
-        // Already at the floor: 3x captureRetryMaxBackoff=0.05s.
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        retries.fireAll()   // any backoff elapses
+        backend.captureControlQueue.sync {}
 
         #expect(!(backend.test_hasPendingCaptureRetry()), "a `.failed` while capture isn't desired at all must never schedule a retry")
         #expect(capture.startCount == 0, "start() must never be called with nothing selected")
@@ -5356,7 +6219,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// captured audio to go. Deselecting during the backoff wait must cancel
     /// the pending retry so it never fires at all.
     @Test func wholeSystemCaptureRetryDoesNotFireAfterDeselect() async {
-        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 0.05, captureRetryMaxBackoff: 0.1)
+        let retries = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            captureRetryDelay: 1, captureRetryMaxBackoff: 4, delayClock: retries.clock)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         backend.start(); defer { backend.stop() }
@@ -5379,8 +6244,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(!(backend.test_hasPendingCaptureRetry()), "deselecting must cancel the pending retry (reconcileCaptureGate's own hygiene)")
 
         // Past the original backoff deadline: no stray start() must land.
-        // Outlasts captureRetryDelay=0.05s (3x).
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        retries.fireAll()
+        backend.captureControlQueue.sync {}
         #expect(capture.startCount == startsBefore, "a retry must never restart the whole-system tap once capture is no longer desired — it would mute the Mac with the audio going nowhere")
     }
 
@@ -5488,24 +6353,16 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let device = ap2Device(id: "AA:BB:CC:DD:EE:61", name: "No Swap Speaker")
         await connectAP2(backend, engine, discovery, device)
 
-        // Collect every event over a fixed window straddling the sleep, then assert
-        // none is a deselect/unavailable echo for our device (the predicate here can
-        // never be "satisfied", so we drain manually rather than via `collect`).
-        let box = EventBox()
-        let stream = backend.makeEventStream()
-        let task = Task {
-            for await event in stream {
-                if case .level = event { continue }
-                _ = await box.append(event)
-            }
-        }
-        try? await Task.sleep(nanoseconds: 50_000_000)   // let the subscription go live
+        // Record every event straddling the sleep, then assert none is a
+        // deselect/unavailable echo for our device (the predicate here can never
+        // be "satisfied", so we record manually rather than via `collect`).
+        let (recorder, task) = recordEvents(backend)
+        defer { task.cancel() }
         backend.handleSystemWillSleep()
         await pollUntil { engine.removedIDs.contains(device.outputID) }   // teardown really happened
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)   // give any stray echo time to arrive
-        task.cancel()
-        let events = await box.snapshot()
+        // Sleep emits from its own `stateQueue` block; the flush has recorded it.
+        await recorder.flush(backend)
+        let events = recorder.events
 
         #expect(!(
             events.contains {
@@ -5549,7 +6406,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// A successful reconnect after wake disarms the watchdog: capture stays gated
     /// (Mac muted, streaming) and never un-gates.
     @Test func wakeWatchdogDisarmedOnReconnect() async {
-        let (backend, engine, discovery) = makeBackend()
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         defer { backend.stop() }
@@ -5562,10 +6420,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { !capture.isCapturing }
         backend.handleSystemDidWake()
 
-        // The re-add succeeds (default engine), so capture returns and stays ON well
-        // past the watchdog window.
+        // The re-add succeeds (default engine), which disarms the watchdog, so
+        // capture returns and stays ON past the watchdog's deadline.
         await pollUntil { capture.isCapturing }
-        try? await Task.sleep(nanoseconds: 100_000_000)   // outlast the 0.03s watchdog (~3.3x)
+        await pollUntil { !scheduler.hasPending }
+        scheduler.fireAll()   // the watchdog's deadline passes
+        drainQueues(backend)  // a fired watchdog un-gates on `stateQueue`, then stops the tap
         #expect(capture.isCapturing,
                       "a successful reconnect must keep capture gated on (Mac muted), not un-gate")
     }
@@ -5574,7 +6434,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// wake, capture stays gated (the intent-keyed gate holds, un-muting deferred to
     /// the user).
     @Test func wakeWatchdogNeverArmsNothing() async {
-        let (backend, engine, discovery) = makeBackend()
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         defer { backend.stop() }
@@ -5592,10 +6453,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // No watchdog: the gate is driven only by suspend lifting. With intent still
         // set and suspend cleared, the gate wants ON again (even though the re-add
-        // fails); it must NOT be un-gated by any watchdog. Give it time to (not) fire.
-        // No timer is armed at all (nil delay) — pure async-settle margin at the
-        // 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // fails); it must NOT be un-gated by any watchdog. Once the failing re-add
+        // has settled, run whatever countdown is armed and let it (not) un-gate.
+        await awaitConvergesSettled(backend)
+        scheduler.fireAll()
+        drainQueues(backend)
         // Intent intact, and no watchdog-driven extra stop beyond the sleep one.
         #expect(backend.test_expectedSelected.contains(device.id))
         #expect(capture.ops.filter { $0 == "stop" }.count == stopsAfterSleep,
@@ -5624,9 +6486,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(addsBefore == 1, "converge added the device exactly once")
 
         // No device/rate rebuild fired (a plain connect, or a benign exclusion-set
-        // rebuild): give any erroneous rebind a chance to run, then prove none did.
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // rebuild). A rebind holds the device's converge slot until its ops end,
+        // so once every converge has finished, an erroneous one has run.
+        await awaitConvergesSettled(backend)
 
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 1,
                        "a connect without a device/rate rebuild must NOT rebind — no extra addOutput")
@@ -5778,10 +6640,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.setOutputSet([device.id])
         await pollUntil { engine.addedIDs.filter { $0 == device.outputID }.count >= 2 }
 
-        // Give any erroneous rebind-recovery a chance to run. No addFailures are
-        // set here, so no backoff is ever scheduled — pure async-settle margin at
-        // the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // A rebind recovery holds the device's converge slot until its ops end,
+        // so once every converge has finished, an erroneous one has run.
+        await awaitConvergesSettled(backend)
 
         #expect(engine.removedIDs.filter { $0 == device.outputID }.count == removesAfterDeselect,
                        "reconnect must NOT add a rebind-recovery removeOutput on top of the deselect's own")
@@ -5803,13 +6664,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let discovery = FakeDiscovery()
         let capture = FakeCapture()
         // Backoff retries fire only when the test says. On the wall clock a
-        // loaded run let the 0.05 s retries spend all five attempts before
+        // loaded run let short retries spend all five attempts before
         // recapture #2, which then found no session to rebind and never added.
         let retries = ManualDelayClock()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 1,
             delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
@@ -5824,15 +6685,15 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // every recapture below falls straight through to the fallback.
         engine.flushFailures = [device.outputID.rawValue]
 
-        // Recapture #1: force its addOutput to fail so a 0.05s backoff retry gets
+        // Recapture #1: force its addOutput to fail so a backoff retry gets
         // scheduled (bumps rebindRecoveryGen to 1, schedules attempt 2).
         engine.addFailures = [device.outputID.rawValue]
         capture.fireDeviceRateRebuild()
         await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
         let addsAfterFirstAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
 
-        // Recapture #2 arrives immediately — well inside the 0.05s backoff window —
-        // and must SUPERSEDE recapture #1's stale attempt-2 retry (bump the
+        // Recapture #2 arrives immediately — inside the backoff window — and
+        // must SUPERSEDE recapture #1's stale attempt-2 retry (bump the
         // generation and cancel its pending `DispatchWorkItem`). Let its own fresh
         // attempt succeed.
         engine.addFailures = []
@@ -5844,10 +6705,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let removesAfterSecondRecapture = engine.removedIDs.filter { $0 == device.outputID }.count
 
         // The FIRST recapture's backoff elapses. Had its retry NOT been
-        // superseded/cancelled, it would run here and grow the counts; the sleep
-        // gives the engine ops such a retry would start the time to land.
+        // superseded/cancelled, it would run here and grow the counts; such a
+        // retry holds the device's converge slot until its engine ops end.
         retries.fireAll()
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        await awaitConvergesSettled(backend)
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsAfterSecondRecapture,
                        "a newer recapture must cancel the older recapture's pending backoff retry (single-flight)")
         #expect(engine.removedIDs.filter { $0 == device.outputID }.count == removesAfterSecondRecapture,
@@ -5863,10 +6724,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// the engine end up re-added even though the backend's `desiredOn`/`added`
     /// say the device is off — a zombie AirPlay session.
     ///
-    /// Reproduces the race with an engine spy: force the recovery's engine ops to
-    /// be slow (`opDelayNanos`), fire a tap-rebuild recapture (which enqueues the
-    /// whole-system recovery), then IMMEDIATELY deselect the device while the
-    /// recovery's remove/add pair is still in flight. The fix claims `converging`
+    /// Reproduces the race with an engine spy: hold the recovery's engine ops at
+    /// `opGate`, fire a tap-rebuild recapture (which enqueues the whole-system
+    /// recovery), then deselect the device while the recovery's remove/add pair
+    /// is still in flight. The fix claims `converging`
     /// for the device before starting recovery, so `setOutputSet`'s deselect
     /// cannot kick a concurrent `convergeDevice` — it only updates `desiredOn`,
     /// and the recovery's own completion re-checks that target and issues the
@@ -5880,7 +6741,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 1,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -5894,27 +6755,26 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // through to the fallback pair the race window below is built around.
         engine.flushFailures = [device.outputID.rawValue]
 
-        // Slow every subsequent engine op so the recovery's remove→add pair has a
-        // wide window for a concurrent deselect to try to land inside it.
-        engine.opDelayNanos = 150_000_000
+        // Hold every subsequent engine op at the gate, so the recovery's
+        // remove→add pair is provably in flight when the deselect lands.
+        let gate = HoldPoint()
+        engine.opGate = gate
 
         capture.fireDeviceRateRebuild()   // device/rate rebuild: enqueues recovery
-        // Give the recovery a moment to actually start (claim `converging`,
-        // issue its removeOutput) before the deselect races it.
-        try? await Task.sleep(nanoseconds: 30_000_000)
+        // The recovery has started (claimed `converging`, issued its first op)
+        // once that op reaches the gate.
+        await pollUntil { gate.entered }
         backend.setOutputSet([])   // concurrent user deselect
+        gate.open()
 
         // Let everything settle: the recovery's remove/add, then (if the
         // deselect's target survived) a requeued real convergeDevice removeOutput.
         await pollUntil {
             !backend.devices.contains { $0.id == device.id && $0.isSelected }
         }
-        // Drain any trailing op that might still be mid-flight. Outlasts the
-        // engine's own opDelayNanos=150ms artificial op latency (the deliberate
-        // race window this test is built around, not rebindRecoveryRetryDelay) —
-        // left unshrunk since opDelayNanos itself must stay large enough to keep
-        // the race window open.
-        try? await Task.sleep(nanoseconds: 250_000_000)
+        // Drain any trailing op still mid-flight: each holds the device's
+        // converge slot until it ends.
+        await awaitConvergesSettled(backend)
 
         #expect(engine.maxConcurrentPerDevice == 1,
                        "the recovery and a concurrent deselect must never run overlapping engine ops for the same device")
@@ -5944,7 +6804,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 1,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -5953,16 +6813,19 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Reverse-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
 
-        // Slow every subsequent engine op so the deselect's removeOutput is still
-        // in flight (holding `converging`) when the recapture fires.
-        engine.opDelayNanos = 150_000_000
+        // Hold every subsequent engine op at the gate so the deselect's
+        // removeOutput is still in flight (holding `converging`) when the
+        // recapture fires.
+        let gate = HoldPoint()
+        engine.opGate = gate
         let addsBeforeToggle = engine.addedIDs.filter { $0 == device.outputID }.count
         let removesBeforeToggle = engine.removedIDs.filter { $0 == device.outputID }.count
 
-        backend.setOutputSet([])                        // deselect: claims `converging`, slow removeOutput starts
-        try? await Task.sleep(nanoseconds: 30_000_000)   // let it actually start
+        backend.setOutputSet([])                         // deselect: claims `converging`, its removeOutput starts
+        await pollUntil { gate.entered }                 // ...and is held in flight
         backend.setOutputSet([device.id])                // re-select while still converging — only updates desiredOn
         capture.fireDeviceRateRebuild()                  // device/rate rebuild races the in-flight toggle: must bow out
+        gate.open()
 
         // Wait for the requeued reselect's addOutput to actually land (the real
         // signal of full convergence — `Device.isSelected` is written a step
@@ -6012,13 +6875,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let capture = FakeCapture()
         // The backoff retry fires only when the test says, so the sleep below
         // always lands INSIDE the delay window, with the retry still pending and
-        // the `converging` slot still held. A 0.5 s wall-clock backoff did not:
-        // under load the retries spent every attempt before the sleep arrived.
+        // the `converging` slot still held. A half-second wall-clock backoff did
+        // not: under load the retries spent every attempt before the sleep arrived.
         let retries = ManualDelayClock()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 1,
             delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
@@ -6067,10 +6930,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let capture = FakeCapture()
+        // The failed attempt's backoff retry stays pending until the sleep
+        // abandons it: this clock never fires it.
+        let retries = ManualDelayClock()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 1,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -6452,7 +7319,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             [groupRoute("com.foo.player", name: "Foo", toGroup: "downstairs")],
             groupTargets: ["downstairs": GroupRouteTarget(memberVolumes: [kitchen.id: 100])])
 
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        // A per-app bind runs on `bindTail`; the selection's own add is a converge.
+        await awaitConvergesSettled(backend)
+        await awaitBindsSettled(backend)
         #expect(!engine.streamAddCalls.contains { $0.0 == kitchen.outputID && $0.1 >= 1 })
     }
 
@@ -7209,8 +8078,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let streamCountBefore = engine.streamAddCalls.count
         // Launching an unrouted app must be silent (no stream ops, no events).
         backend.handleAppLaunched(bundleID: "com.unrelated.app")
-        // Give any async side effects time to propagate.
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // Any stream op it caused would be queued on `bindTail`.
+        await awaitBindsSettled(backend)
         #expect(engine.streamAddCalls.count == streamCountBefore,
                        "a launch for a non-routed bundle ID must not issue any engine ops")
     }
@@ -7231,6 +8100,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// not by itself prove the retry mechanism ran.
     @Test func processNotYetAudibleBoundedRetryRecoversAndRejoinsMixerTopology() async {
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 2)
+        let retries = ManualDelayClock()
         let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
             makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
@@ -7240,7 +8110,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2,
+            processNotYetAudibleRetryDelay: 1, processNotYetAudibleMaxBackoff: 4,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -7253,7 +8124,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // The scripted tap fails twice (processNotYetAudible) before succeeding —
         // the bounded retry must chase it down to a 3rd, successful attempt with
-        // NO further updateAppRoutes call.
+        // NO further updateAppRoutes call. Each failure schedules the next
+        // attempt; this clock fires it once the failure has been handled.
+        for _ in 0..<2 {
+            await pollUntil { retries.pendingCount > 0 }
+            retries.fireAll()
+        }
         await pollUntil { tap.attemptsMade >= 3 }
         #expect(tap.attemptsMade >= 3,
                                     "2 scripted failures + at least 1 successful retry, all self-driven")
@@ -7273,6 +8149,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// backend's own retry loop chases it down with no user action.
     @Test func processNotYetAudibleRetriesPastOldCapOfFiveAttempts() async {
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 7)
+        let retries = ManualDelayClock()
         let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
             makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
@@ -7282,7 +8159,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08,
+            processNotYetAudibleRetryDelay: 1, processNotYetAudibleMaxBackoff: 4,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -7295,6 +8173,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // 7 scripted failures + 1 success = at least 8 attempts — strictly past
         // the OLD hardcoded cap of 5, proving the retry is no longer bounded.
+        // Each failure schedules the next attempt; this clock fires it.
+        for _ in 0..<7 {
+            await pollUntil { retries.pendingCount > 0 }
+            retries.fireAll()
+        }
         await pollUntil { tap.attemptsMade >= 8 }
         #expect(tap.attemptsMade >= 8,
                                     "retries must continue past the old cap of 5 attempts")
@@ -7311,6 +8194,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     @Test func processNotYetAudibleRetriesStopOnDeRoute() async {
         // Never succeeds within the test window — every attempt fails.
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 10_000)
+        let retries = ManualDelayClock()
         let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
             makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
@@ -7320,7 +8204,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05,
+            processNotYetAudibleRetryDelay: 1, processNotYetAudibleMaxBackoff: 4,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -7332,21 +8217,24 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
 
         // Let a couple of retries happen first.
+        await pollUntil { retries.pendingCount > 0 }
+        retries.fireAll()
         await pollUntil { tap.attemptsMade >= 2 }
 
-        // De-route: drop the route entirely.
+        // De-route: drop the route entirely. Its stops run on `captureControlQueue`.
         backend.updateAppRoutes([])
+        drainQueues(backend)
 
-        // Give any already-in-flight retry (scheduled before the drop) time to
-        // land, then snapshot. Already at the floor: 3x
-        // processNotYetAudibleMaxBackoff=0.05s.
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        // A retry already scheduled before the drop is tolerated: let it run.
+        // A retry runs its attempt, and handles that attempt's failure, on the
+        // caller's thread, so any retry it schedules is pending once this returns.
+        retries.fireAll()
         let afterDropSnapshot = tap.attemptsMade
 
-        // Wait several more backoff periods — if retries were still scheduling,
-        // this window (well past several 0.02-0.05s backoff cycles) would show
-        // growth. It must NOT. 3x processNotYetAudibleMaxBackoff=0.05s.
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        // More backoff periods pass — if retries were still scheduling, the
+        // count would grow here. It must NOT.
+        retries.fireAll()
+        #expect(retries.pendingCount == 0, "no retry may be waiting once the route has been dropped")
         #expect(tap.attemptsMade == afterDropSnapshot,
                        "no further retry may be scheduled once the route has been dropped")
     }
@@ -7488,11 +8376,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             return false
         }
 
-        // Give any (buggy) async session-reset time to land before inspecting.
-        // This backend uses the default rebindRecoveryRetryDelay (0.5s) but no
-        // addFailures are set, so no backoff is ever scheduled — pure
-        // async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // A (buggy) session reset would queue its rebind on `bindTail`.
+        await awaitBindsSettled(backend)
 
         let binds = engine.streamAddCalls.filter { $0.0 == device.outputID }
         #expect(binds.count == 2, "toggling a route off then back on is exactly two NATURAL binds (initial route + re-route) — a stale isRecapture must not fire an extra resetAirPlaySessionForRoutedApp on top, got \(binds.count)")
@@ -7567,6 +8452,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// succeeding again — all within `maxRebindRecoveryAttempts`.
     @Test func rebindRecoveryRetriesThenSucceedsWithinBoundedAttempts() async {
         let tap = RebindTriggerTap()
+        let retries = ManualDelayClock()
         let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
             makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
@@ -7576,7 +8462,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
+            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 1,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -7605,13 +8492,16 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // resetAirPlaySessionForRoutedApp -> enqueueRebindRecovery(attempt: 1).
         tap.fireDeviceChange()
 
-        // Attempt 1 is recorded (and fails, since addFailures is still set).
+        // Attempt 1 is recorded (and fails, since addFailures is still set),
+        // which leaves a backed-off retry waiting.
         await pollUntil {
             engine.streamAddCalls.filter { $0.0 == device.outputID }.count > firstBindCount
         }
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
 
-        // Let it succeed on the next attempt.
+        // Let it succeed on the next attempt, then let the backoff elapse.
         engine.addFailures = []
+        retries.fireAll()
 
         // Attempt 2 (or later, bounded by maxRebindRecoveryAttempts=3) succeeds.
         await pollUntil {
@@ -7630,6 +8520,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// genuinely gone.
     @Test func rebindRecoveryGivesUpAfterMaxAttempts() async {
         let tap = RebindTriggerTap()
+        let retries = ManualDelayClock()
         let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
             makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
@@ -7639,7 +8530,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02,
+            maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 1,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -7666,18 +8558,24 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         tap.fireDeviceChange()
 
-        // Both bounded attempts (2) get recorded (and fail).
+        // Both bounded attempts (2) get recorded (and fail): attempt 1 leaves a
+        // backed-off retry waiting, and this clock fires it.
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
+        retries.fireAll()
         await pollUntil {
             engine.streamAddCalls.filter { $0.0 == device.outputID }.count >= firstBindCount + 2
         }
+        // Attempt 2's outcome — give up, or (wrongly) schedule a third — is
+        // decided on `bindTail` once its op returns.
+        await awaitBindsSettled(backend)
         let countAtCeiling = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
         #expect(countAtCeiling == firstBindCount + 2,
                        "exactly maxRebindRecoveryAttempts (2) rebind attempts must be made")
 
-        // Wait several more backoff periods — recovery must have given up, so
-        // no further addOutput attempts for this device should appear. 5x
-        // rebindRecoveryRetryDelay=0.02s (well above the 100ms floor already).
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // More backoff periods pass — recovery must have given up, so no further
+        // addOutput attempts for this device should appear.
+        retries.fireAll()
+        await awaitBindsSettled(backend)
         #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.count == countAtCeiling,
                        "recovery must give up after maxRebindRecoveryAttempts, not retry forever")
     }
@@ -7913,6 +8811,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await startAndDiscover(backend, engine, discovery, systemDevice)
         backend.setOutputSet([systemDevice.id])
         await pollUntil { systemTap.createCount >= 1 }
+        // The whole-system add runs on its own task and must land before the local route, so the last assertion can only turn red when the local route tears it down.
+        await pollUntil { engine.addedIDs.contains(systemDevice.outputID) }
         #expect(systemTap.excludedProcessObjectIDs == [], "nothing local yet -> the system mix must include every app")
 
         // Route an app to .currentDevice (deliberately "play here, on the Mac").
@@ -7938,7 +8838,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(localPlayback.didStart,
                       "the local playback engine must be started for the first .currentDevice app")
         // The whole-system stream keeps streaming to its own device throughout.
-        #expect(engine.addedIDs.contains(systemDevice.outputID),
+        #expect(netAdded(engine, systemDevice.outputID),
                       "the whole-system stream must be unaffected by the local route")
     }
 
@@ -7971,6 +8871,63 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(
             localPlayback.volumeSets.contains { $0.bundleID == "com.local" && abs($0.volume - 0.4) < 0.001 },
             "setLocalPlaybackVolume(40) must reach the local engine as 0.4 for com.local")
+    }
+
+    /// Turns red if the Mac row's level stops reaching the engine that plays
+    /// "This Mac" apps, or if it keeps applying while the Mac row is driving
+    /// Main (no non-local output selected), where it must stay at unity.
+    @Test func macRowLevelScalesLocalPlaybackOnlyBesideARealOutput() async {
+        let (backend, engine, _) = makeBackend()
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.setVolume(40, for: NativeBackend.localDeviceID)
+        await pollUntil { !localPlayback.outputGains.isEmpty }
+        #expect(localPlayback.outputGains.last == 1, "with nothing else selected the Mac row drives Main")
+
+        let other = backend.devices.first { !$0.isLocalDevice }?.id ?? "dev-1"
+        backend.setOutputSet([other])
+        backend.setVolume(40, for: NativeBackend.localDeviceID)
+        await pollUntil { localPlayback.outputGains.last.map { abs($0 - 0.4) < 0.001 } ?? false }
+        #expect(abs((localPlayback.outputGains.last ?? -1) - 0.4) < 0.001)
+
+        // The host's membership answer wins over the discovered set: a group
+        // whose only speaker is off still has the Mac row driving its own level.
+        backend.localRowDrivesMainQuery = { false }
+        backend.setOutputSet([])
+        backend.setVolume(25, for: NativeBackend.localDeviceID)
+        await pollUntil { localPlayback.outputGains.last.map { abs($0 - 0.25) < 0.001 } ?? false }
+        #expect(abs((localPlayback.outputGains.last ?? -1) - 0.25) < 0.001)
+    }
+
+    /// Turns red if starting a "This Mac" app stops re-pushing the Mac row's
+    /// level: an engine swapped in after the last slider move would then play
+    /// the app at unity instead of the level the row shows.
+    @Test func aLocalAppStartingRepushesTheMacLevelToASwappedInEngine() async {
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() },
+            processResolver: singleProcessResolver(["com.local": 4242]),
+            muteBehavior: .mutedWhenTapped)
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let original = SpyLocalPlayback()
+        backend.localPlaybackEngine = original
+        backend.setOutputSet(["dev-1"])
+        backend.setVolume(30, for: NativeBackend.localDeviceID)
+        // Let the slider's own push land on the original engine first, so only
+        // the start-time re-push can reach the swapped-in one.
+        await pollUntil { original.outputGains.contains { abs($0 - 0.3) < 0.001 } }
+
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.local", displayName: "Local App", destination: .currentDevice),
+        ])
+        await pollUntil { localPlayback.addedApps.contains { $0.bundleID == "com.local" } }
+        #expect(localPlayback.outputGains.contains { abs($0 - 0.3) < 0.001 })
     }
 
     // MARK: Bug 2 — `.currentDevice` apps must clean up capture on quit/relaunch
@@ -8215,7 +9172,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             [AppRoute(bundleID: "com.secret", displayName: "Secret",
                       destination: .noRedirect, volume: 30)],
             excludedBundleIDs: ["com.secret"])
-        try? await Task.sleep(nanoseconds: 80_000_000)
+        drainQueues(backend)   // a per-app tap starts on `captureControlQueue`
 
         #expect(perAppCapture.state(for: "com.secret") == .idle,
                 "an excluded app must never be tapped for levelling")
@@ -8295,7 +9252,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         backend.setMeteringActive(true)
         let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
-        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
@@ -8361,11 +9317,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:C8", name: "Never Selected")
         await startAndDiscover(backend, engine, discovery, device)
+        let marker = await discoverMarker(backend, discovery)
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         await pollUntil { self.connectionState(backend, device.id) == .connected }
         engine.pushState(device.outputID, .streaming)
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // State reports are applied in order, so once the marker's has been,
+        // the streaming report has been too.
+        await awaitStateReportsApplied(backend, engine, marker: marker)
 
         #expect(backend.devices.first { $0.id == device.id }?.isSelected == false,
                 "no whole-system intent: a streaming report must not select the device")
@@ -8394,7 +9353,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(failure.cause == .unknown)
     }
 
-    /// Turns red if `isRouteTargetReachableLocked` stops reading a speaker that waits for a password as unreachable (the app stays out of the system mix, bound to a refused session), or if `droppedByOwnFailureLocked` stops keeping that `.failed` through the unbind (the `.off` re-arms the route and it binds again).
+    /// Turns red if `isRouteTargetReachableLocked` stops reading a speaker that waits for a password as unreachable (the app stays out of the system mix, bound to a refused session), or if `droppedByOwnFailureLocked` stops keeping that `.awaitingPassword` through the unbind (the `.off` re-arms the route and it binds again).
     @Test func perAppRouteToAPasswordSpeakerAwaitingAPasswordRejoinsTheSystemMix() async {
         let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
         let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
@@ -8404,7 +9363,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         engine.addFailures = [device.outputID.rawValue]
         engine.addFailureError = .passwordRequired
         engine.onMirroredAddFailure = { _ in
-            await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+            await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
         }
         let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
 
@@ -8414,13 +9373,15 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             perApp.state(for: "com.foo") == .idle
                 && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
         }
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // A second bind would be queued on `bindTail` behind the failed one.
+        await pollUntil { engine.opsInFlight(for: device.outputID) == 0 }
+        await awaitBindsSettled(backend)
 
         #expect(perApp.state(for: "com.foo") == .idle,
                 "its per-app tap stops, so the app rejoins the whole-system mix while the speaker waits for a password")
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true,
                 "the row stays available so it offers Enter password")
-        #expect(failureCause(backend, device.id) == .authRequired,
+        #expect(connectionState(backend, device.id) == .awaitingPassword,
                 "the unbind keeps the password demand instead of writing .off")
         #expect(binds() == 1, "no second bind into the same refusal")
 
@@ -8431,6 +9392,130 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(binds() == 2, "the .connected edge re-binds the route")
         #expect(perApp.state(for: "com.foo") != .idle,
                 "the replayed route restarts the app's own tap")
+    }
+
+    /// Turns red if `retryOutput` ignores a per-app-only speaker waiting for a
+    /// password (the typed password never reaches the engine and the sheet
+    /// stays on Connecting), feeds it after the bind instead of before, or adds
+    /// the speaker to the whole-system set.
+    @Test func perAppOnlyPasswordSpeakerRebindsAfterItsPasswordIsSubmitted() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil {
+            perApp.state(for: "com.foo") == .idle
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
+        // A second bind would be queued on `bindTail` behind the failed one.
+        await pollUntil { engine.opsInFlight(for: device.outputID) == 0 }
+        await awaitBindsSettled(backend)
+        #expect(binds() == 1, "no second bind into the same refusal")
+
+        engine.addFailures = []
+        await submitAndWait(backend, "secret", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { binds() == 2 }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(backend.devices.first { $0.id == device.id }?.isSelected == false)
+        #expect(backend.stateQueue.sync { !backend.expectedSelected.contains(device.id) })
+    }
+
+    /// Turns red if `retryOutput`'s per-app password arm stops restoring
+    /// `isAvailable` with its `.off` write: a refused typed password
+    /// leaves the row unavailable, eligibility never flips, and the retyped
+    /// password is never bound.
+    @Test func perAppOnlyPasswordSpeakerRebindsAfterARefusedPasswordIsRetyped() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil {
+                self.connectionState(backend, device.id) == .awaitingPassword
+                    || self.failureCause(backend, device.id) == .authRequired
+            }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+        let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
+        // The binding drops as soon as the pushed failure is applied, while the
+        // scripted add is still in flight; waiting on the binding alone let the
+        // test retype and retry inside one poll gap of `onMirroredAddFailure`,
+        // which then never saw the failure and held the add for 120 s.
+        let unbound = {
+            engine.opsInFlight(for: device.outputID) == 0
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil { perApp.state(for: "com.foo") == .idle && unbound() }
+
+        await submitAndWait(backend, "wrong", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { binds() == 2 }
+        await pollUntil { isAvailable() == false && unbound() }
+        #expect(failureCause(backend, device.id) == .authRequired)
+        #expect(isAvailable() == false, "a refused typed password leaves the row unavailable")
+
+        engine.addFailures = []
+        await submitAndWait(backend, "right", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { binds() == 3 }
+        #expect(binds() == 3, "the retyped password binds the route again")
+        #expect(engine.fedDescriptorList.last?.password == "right")
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(connectionState(backend, device.id) == .connected)
+    }
+
+    /// Turns red if `updateAppRoutes` stops writing `.off` for a password-waiting speaker the user's route table no longer names (the row keeps showing Enter password with nothing routed to it).
+    @Test func removingTheRouteToAPasswordWaitingSpeakerTurnsItsRowOff() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil {
+            perApp.state(for: "com.foo") == .idle
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
+        // A second bind would be queued on `bindTail` behind the failed one.
+        await pollUntil { engine.opsInFlight(for: device.outputID) == 0 }
+        await awaitBindsSettled(backend)
+        #expect(binds() == 1)
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+
+        backend.updateAppRoutes([])
+        await pollUntil { self.connectionState(backend, device.id) == .off }
+        await awaitBindsSettled(backend)
+
+        #expect(connectionState(backend, device.id) == .off)
+        #expect(binds() == 1, "removing the route binds nothing")
+        #expect(perApp.state(for: "com.foo") == .idle)
     }
 
     /// Turns red if a per-app bind refused for want of a clock stops reporting `.failed(.timingUnavailable)`, or if removing that route leaves the row `.failed` instead of `.off`.
@@ -8528,7 +9613,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { onAWholeSystemStream(engine, device.outputID) }
         await pollUntil { routedApps.last?.isEmpty == true }
         await pollUntil { self.connectionState(backend, device.id) == .connected }
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // The demoted route's unbind runs on `bindTail`.
+        await awaitBindsSettled(backend)
         #expect(connectionState(backend, device.id) == .connected,
                 "the demoted route's unbind must not turn a whole-system speaker off")
         #expect(backend.devices.first { $0.id == device.id }?.isSelected == true)
@@ -8558,7 +9644,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // The user removing the route later still leaves `.failed`: the speaker is unavailable.
         backend.updateAppRoutes([])
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        await awaitBindsSettled(backend)
         #expect(connectionState(backend, device.id) == dropped,
                 "removing a route the speaker's failure already dropped must keep the failure")
 
@@ -8604,7 +9690,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         backend.setMeteringActive(true)
         let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
-        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
 
         backend.updateAppRoutes(
             [groupRoute("com.foo.player", name: "Foo", toGroup: "groupy")],
@@ -8679,7 +9764,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
 
         let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
-        try? await Task.sleep(nanoseconds: 20_000_000)
 
         // Stream side: 0xAA ≈ 0.667 — MAX(no system contribution, stream).
         tap.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
@@ -8718,7 +9802,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         backend.setMeteringActive(true)
         let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
-        try? await Task.sleep(nanoseconds: 20_000_000)
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
@@ -8755,11 +9838,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         _ = discovery
 
         let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
-        try? await Task.sleep(nanoseconds: 20_000_000)
 
         // Listed but metering INACTIVE: no metering-only tap, no .appLevel.
         backend.updateAppRoutes([AppRoute(bundleID: "com.plain", displayName: "Plain")])
-        try? await Task.sleep(nanoseconds: 60_000_000)
+        drainQueues(backend)   // a metering tap starts on `captureControlQueue`
         if case .idle = metering.state(for: "com.plain") {} else {
             Issue.record("no metering-only tap may start while metering is inactive")
         }
@@ -8782,6 +9864,91 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                              "a .noRedirect listed app must emit .appLevel from its metering-only tap")
     }
 
+    /// The listen-only tap that meters the Mac runs only while levels are wanted
+    /// and the sending capture is off, and stops across sleep. Turns red if the
+    /// listen tap starts while capture runs, survives capture start, sleep or
+    /// levels stopping, or never starts when the popover opens with the Mac alone.
+    @Test func localMeterTapRunsOnlyWhileLevelsFlowAndCaptureIsOff() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let listen = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.localMeterCapture = listen
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:81", name: "Meter Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+        #expect(listen.ops.isEmpty, "levels are not wanted yet, so the listen tap must not start")
+
+        backend.setMeteringActive(true)
+        await pollUntil { listen.isCapturing }
+        #expect(listen.ops == ["start"])
+
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing && !listen.isCapturing }
+        #expect(listen.ops == ["start", "stop"], "the sending capture took over, so the listen tap must stop")
+
+        backend.setOutputSet([])
+        await pollUntil { listen.isCapturing }
+
+        backend.handleSystemWillSleep()
+        await pollUntil { !listen.isCapturing }
+        backend.handleSystemDidWake()
+        await pollUntil { listen.isCapturing }
+
+        backend.setMeteringActive(false)
+        await pollUntil { !listen.isCapturing }
+        #expect(listen.ops == ["start", "stop", "start", "stop", "start", "stop"])
+    }
+
+    /// With the Mac playing alone, its bar reads the listen-only tap's level and
+    /// drops to 0 when the sending capture takes over. Turns red if `isMeterable`
+    /// stops counting the listen tap, its `onLevel` is no longer wired to
+    /// `noteSystemRMS`, or the bar is not re-emitted to 0 when the tap stops.
+    @Test func localDeviceLevelComesFromTheListenOnlyTapWhileTheMacPlaysAlone() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let listen = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.localMeterCapture = listen
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:82", name: "Meter Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setMeteringActive(true)
+        await pollUntil { listen.isCapturing && listen.meteringActive }
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+        await pollUntil {
+            listen.fireLevelIfActive(0.6)
+            return (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0
+        }
+        #expect(abs((levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) - 0.6) <= 0.001,
+                "the Mac playing alone must show the listen-only tap's level")
+
+        backend.setOutputSet([device.id])
+        await pollUntil { !listen.isCapturing }
+        await pollUntil { levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0 }
+    }
+
+    /// The listen-only tap leaves out the same routed-away and user-excluded apps
+    /// the sending capture does. Turns red if `updateAppRoutes` stops handing the
+    /// listen tap the routed-away apps or the user's excluded apps.
+    @Test func localMeterTapExcludesRoutedAndExcludedAppsLikeTheMainCapture() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let listen = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.localMeterCapture = listen
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Meter Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)],
+                                excludedBundleIDs: ["com.secret"])
+        await pollUntil { listen.lastExcludedBundleIDs == ["com.foo", "com.secret"] }
+        #expect(listen.lastExcludedBundleIDs == ["com.foo", "com.secret"])
+        #expect(capture.lastExcludedBundleIDs == ["com.foo", "com.secret"])
+    }
+
     /// D3, app half: `.appLevel` rides the SAME leading/trailing-edge sampler the
     /// per-device `.level` does, keyed by bundle id. A tap delivering buffers far
     /// above the ~25 Hz display cadence must not fan out one event per buffer,
@@ -8791,7 +9958,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     @Test func appLevelEmissionIsCoalescedToDisplayCadence() async {
         let registry = TapRegistry()
         let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.burst"], into: registry)
-        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+        // The coalescer's "now" and its trailing flush run on this clock, so the
+        // burst below spans exactly the time it says it does.
+        let levelClock = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            injectedMeteringCapture: metering,
+            levelDelayClock: levelClock.queueHoppingClock, levelUptimeNanos: levelClock.uptimeNanos)
         defer { backend.stop() }
         backend.start(); await waitUntilStarted(engine)
         _ = discovery
@@ -8806,42 +9978,36 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             return
         }
 
-        // A dedicated stream: the shared `collect` helper filters meter events out.
-        let stream = backend.makeEventStream()
-        actor LevelBox {
-            private(set) var levels: [Float] = []
-            func append(_ v: Float) { levels.append(v) }
-        }
-        let box = LevelBox()
-        let collector = Task {
-            for await event in stream {
-                if case .appLevel(let bundleID, let rms) = event, bundleID == "com.burst" {
-                    await box.append(rms)
-                }
-            }
-        }
-        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+        // A dedicated recorder: the shared `collect` helper filters meter events out.
+        let (recorder, collector) = recordEvents(backend)
 
-        // 40 buffers over ~100 ms, the last one distinctly louder than the rest.
+        // 40 buffers over 100 ms of the test clock, the last one distinctly
+        // louder than the rest. After each, `stateQueue.sync` lets the level it
+        // queued run, then lets a trailing flush that just came due run.
         let steps = 40
-        let began = DispatchTime.now().uptimeNanoseconds
+        let step = 0.0025
         for i in 0..<steps {
             let amplitude: Float = i == steps - 1 ? 0.9 : 0.3
             tap.push(float32Buffer(amplitude: amplitude, frames: 512, atSecond: i + 1))
-            try? await Task.sleep(nanoseconds: 100_000_000 / UInt64(steps))
+            backend.stateQueue.sync {}
+            levelClock.advance(by: step)
+            backend.stateQueue.sync {}
         }
 
-        // Room for the trailing flush (up to ~40 ms after the last coalesced
-        // leading edge) to deliver the loudest buffer.
-        try? await Task.sleep(nanoseconds: 120_000_000)
+        // Room for the trailing flush (up to one 40 ms interval after the last
+        // coalesced leading edge) to deliver the loudest buffer.
+        levelClock.advance(by: 0.04)
+        backend.stateQueue.sync {}
+        await recorder.flush(backend)
         collector.cancel()
-        let elapsed = DispatchTime.now().uptimeNanoseconds - began
+        let elapsed = UInt64(((Double(steps) * step + 0.04) * 1_000_000_000).rounded())
 
-        let levels = await box.levels
+        let levels = recorder.events.compactMap { event -> Float? in
+            if case .appLevel(let bundleID, let rms) = event, bundleID == "com.burst" { return rms }
+            return nil
+        }
         #expect(levels.count > 0, "the app row must still receive events")
-        // The bound is derived from the WALL CLOCK the burst actually took, not
-        // from the 100 ms it was asked to take: under parallel load `Task.sleep`
-        // stretches, and a longer window legitimately fits more 40 ms slots. The
+        // One event per 40 ms slot of the burst, plus slack for its edges. The
         // point is coalescing to the cadence, not to a fixed count.
         let allowed = Int(elapsed / 40_000_000) + 3
         #expect(levels.count <= allowed,
@@ -8866,7 +10032,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         _ = discovery
 
         let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
-        try? await Task.sleep(nanoseconds: 20_000_000)
 
         backend.setMeteringActive(true)
         backend.updateAppRoutes(
@@ -8941,7 +10106,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// the AirPlay device's meter must ALSO reach the local device's meter —
     /// through the identical `.level` event mechanism, not a separate path.
     @Test func localDeviceReceivesLevelWhenSyncedLocalSinkEnabled() async {
-        let (backend, engine, discovery, capture, sink, _) = makeSyncedLocalBackend(macSelectedByDefault: true)
+        let settle = ManualDelayClock()
+        let (backend, engine, discovery, capture, sink, _) = makeSyncedLocalBackend(
+            macSelectedByDefault: true, delayClock: settle.queueHoppingClock)
         defer { backend.stop() }
 
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Synced Local Partner")
@@ -8952,13 +10119,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(backend.devices.contains { $0.isLocalDevice })
 
         backend.setOutputSet([device.id])   // Mac + 1 AirPlay -> synced-local sink enables
+        settle.fireAll()                    // the settle window elapses
         await pollUntil { sink.calls.contains("start") }
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
 
         backend.setMeteringActive(true)
         await pollUntil { capture.meteringActive }
         let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
-        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
 
         // Keep delivering, as the real tap does every few milliseconds:
         // `noteSystemRMS` drops a sample that meets the periodic drain holding
@@ -8975,28 +10142,40 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
     /// A device that is ONLY the local Mac (no AirPlay device selected at all,
     /// so the synced-local sink never enables) must NOT be metered from the
-    /// whole-system tap — there is nothing shared to measure, and the tap
-    /// itself doesn't even run in pure passthrough. Guards against a fix that
+    /// SENDING whole-system tap — with no `localMeterCapture` injected, only
+    /// the listen-only tap may meter the Mac alone. Guards against a fix that
     /// accidentally makes the local device meterable unconditionally.
     @Test func localDeviceAloneNeverReceivesSystemLevel() async {
-        let (backend, engine, discovery, capture, sink, _) = makeSyncedLocalBackend(macSelectedByDefault: true)
+        let settle = ManualDelayClock()
+        let levelClock = ManualDelayClock()
+        let (backend, engine, discovery, capture, sink, _) = makeSyncedLocalBackend(
+            macSelectedByDefault: true, delayClock: settle.queueHoppingClock,
+            levelDelayClock: levelClock.queueHoppingClock)
         defer { backend.stop() }
         backend.start(); await waitUntilStarted(engine)
         _ = discovery
         await pollUntil { backend.devices.contains { $0.isLocalDevice } }
 
         backend.setOutputSet([])   // Mac-only: synced-local sink must stay OFF
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        settle.fireAll()           // any settle window elapses
+        drainQueues(backend)       // a settle runs on `stateQueue`, then starts the sink on `captureControlQueue`
         #expect(sink.calls.isEmpty, "Mac alone must never enable the synced-local sink")
 
         backend.setMeteringActive(true)
-        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        await pollUntil { capture.meteringActive }   // or the sample below never reaches the backend
+        let (recorder, task) = recordEvents(backend)
+        defer { task.cancel() }
 
         capture.fireLevelIfActive(0.6)   // the real tap wouldn't even be running here
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        #expect(levels.lastDeviceLevel(NativeBackend.localDeviceID) == nil,
-                     "the local device must not be metered while the synced-local sink is disabled")
+        // Run the meter's drain by hand once the gate flip has armed it, then
+        // flush: a level the drain emitted for the Mac is recorded.
+        backend.stateQueue.sync {}
+        levelClock.fireAll()
+        await recorder.flush(backend)
+        #expect(!recorder.events.contains {
+            if case .level(let id, _) = $0 { return id == NativeBackend.localDeviceID }
+            return false
+        }, "the local device must not be metered while the synced-local sink is disabled")
     }
 
     /// Symmetric to the fix above: disabling the synced-local sink (the Mac
@@ -9006,19 +10185,21 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// a stuck bar" discipline — so the row's meter can't freeze at its last
     /// nonzero reading once the Mac stops actually receiving the synced mix.
     @Test func localDeviceLevelClearsWhenSyncedLocalSinkDisables() async {
-        let (backend, engine, discovery, capture, sink, macSelected) = makeSyncedLocalBackend(macSelectedByDefault: true)
+        let settle = ManualDelayClock()
+        let (backend, engine, discovery, capture, sink, macSelected) = makeSyncedLocalBackend(
+            macSelectedByDefault: true, delayClock: settle.queueHoppingClock)
         defer { backend.stop() }
 
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Synced Local Partner 2")
         await startAndDiscover(backend, engine, discovery, device)
 
         backend.setOutputSet([device.id])
+        settle.fireAll()   // the settle window elapses
         await pollUntil { sink.calls.contains("start") }
         backend.setMeteringActive(true)
         await pollUntil { capture.meteringActive }
 
         let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
-        try? await Task.sleep(nanoseconds: 20_000_000)
 
         capture.fireLevelIfActive(0.6)
         await pollUntil { (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0 }
@@ -9026,6 +10207,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // The user deselects the Mac; the AirPlay side of the selection is unchanged.
         macSelected.set(false)
         backend.setOutputSet([device.id])
+        settle.fireAll()   // the settle window elapses
         await pollUntil { sink.calls.contains("stop") }
 
         await pollUntil { levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0 }
@@ -9052,8 +10234,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// decisions, and real transitions inside the horizon) and a single toggle
     /// must satisfy neither.
     @Test func singleSyncedLocalToggleAppliesTransitionWithZeroResets() async {
+        let settle = ManualDelayClock()
         let (backend, engine, discovery, _, sink, macSelected) =
-            makeSyncedLocalBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.15)
+            makeSyncedLocalBackend(macSelectedByDefault: false, delayClock: settle.queueHoppingClock)
         defer { backend.stop() }
 
         let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Single Toggle Speaker")
@@ -9062,10 +10245,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // ONE toggle decision: the Mac joins alongside the already-connected device.
         macSelected.set(true)
         backend.setOutputSet([device.id])
+        settle.fireAll()   // the settle window elapses
         await pollUntil { sink.calls == ["start", "startObserving"] }
 
-        // Give a wrongly-fired reset time to show up.
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        // A reset runs in the settle's own `captureControlQueue` block, right
+        // after the sink starts, and holds the device's converge slot until its
+        // flush lands.
+        await awaitConvergesSettled(backend)
         #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 0,
                 "a normal single toggle must NEVER re-establish the AirPlay session: that is a latency regression a prior fix already removed once")
         #expect(engine.removedIDs.filter { $0 == device.outputID }.isEmpty,
@@ -9077,12 +10263,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// fire the transition PLUS exactly ONE reset, proven against a real device
     /// in `added`. This is the cadence-dependent arming path (clicks faster than
     /// the window); its cadence-independent twin is
-    /// `slowCadenceToggleStormArmsExactlyOneReset` below. 0.15 s window: the three
-    /// flips must land in ONE window or the burst is not churny and the assertion
-    /// inverts into a false failure.
+    /// `slowCadenceToggleStormArmsExactlyOneReset` below. The settle runs on a
+    /// manual clock, so the three flips land in ONE window by construction.
     @Test func churnyToggleBurstLandingOnNewStateFiresTransitionPlusExactlyOneReset() async {
+        let settle = ManualDelayClock()
         let (backend, engine, discovery, _, sink, macSelected) =
-            makeSyncedLocalBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.15)
+            makeSyncedLocalBackend(macSelectedByDefault: false, delayClock: settle.queueHoppingClock)
         defer { backend.stop() }
 
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Churn Speaker")
@@ -9094,11 +10280,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         macSelected.set(true);  backend.setOutputSet([device.id])
         macSelected.set(false); backend.setOutputSet([device.id])
         macSelected.set(true);  backend.setOutputSet([device.id])
+        settle.fireAll()   // the one settle window the burst landed in elapses
 
         await pollUntil { sink.calls == ["start", "startObserving"] }
         await pollUntil { engine.flushedIDs.filter { $0 == device.outputID }.count >= 1 }
-        // Give a wrongly-repeated reset time to show up.
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // A repeated reset would hold the device's converge slot until its flush.
+        await awaitConvergesSettled(backend)
         #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
                 "genuine churn landing on a new state must re-establish the session EXACTLY ONCE, never zero and never more than once")
     }
@@ -9107,21 +10294,18 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// for the hole the review found (H-1): a click cadence SLOWER than the settle
     /// window but faster than deliberate use. Every click lands in its own window,
     /// so the coalesce counter reads exactly 1 every time and a `coalesced >= 2`
-    /// guard alone is unreachable. Two Mac toggles about 330 ms apart against a
-    /// 0.05 s window: neither coalesces, both land inside the production 2 s
-    /// horizon, so the SECOND real transition must arm exactly one re-sync.
-    ///
-    /// The window here is deliberately SHORTER than the 0.15 s floor the burst
-    /// tests use. Their hazard is a burst SPLITTING across windows; this one's is
-    /// inverted: each click must fall OUTSIDE the window, so the short window is
-    /// the jitter-safe choice. Merging these two clicks would need a 280 ms
-    /// `stateQueue` stall, and a merge is the only way this test can go wrong
-    /// (2 flips coalesced = net no-op = no transition at all).
+    /// guard alone is unreachable. Two Mac toggles, each with its own settle,
+    /// one second apart on the test clock: neither coalesces, both land inside
+    /// the 2 s horizon, so the SECOND real transition must arm exactly one re-sync.
     @Test func slowCadenceToggleStormArmsExactlyOneReset() async {
-        // The horizon stays at the helper's production-matching default (2 s): the
-        // point of the case is that clicks 330 ms apart are inside the REAL horizon.
-        let (backend, engine, discovery, _, sink, macSelected) =
-            makeSyncedLocalBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.05)
+        // The settles and the transition stamps both run on the test's own clock,
+        // so a stalled runner can neither merge the two clicks into one settle nor
+        // widen the gap between them past the horizon (run 37459907744 put more
+        // than 2 s of wall time there). The 2 s value has its own test,
+        // `syncedLocalTransitionHorizonProductionDefaultIsUnchanged`.
+        let clock = ManualDelayClock()
+        let (backend, engine, discovery, _, sink, macSelected) = makeSyncedLocalBackend(
+            macSelectedByDefault: false, delayClock: clock.queueHoppingClock, uptimeClock: clock.uptime)
         defer { backend.stop() }
 
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Slow Cadence Speaker")
@@ -9130,16 +10314,19 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Click 1: the Mac joins. One transition, nothing else in the horizon, so
         // the single-toggle invariant still holds: NO reset yet.
         macSelected.set(true); backend.setOutputSet([device.id])
+        clock.advance(by: 1)   // its settle window elapses
         await pollUntil { sink.calls == ["start", "startObserving"] }
+        await awaitConvergesSettled(backend)
         #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 0,
                 "the FIRST toggle of a storm is indistinguishable from a normal single toggle and must still take zero resets")
 
-        // About 330 ms later: outside the 0.05 s window, so this gets its OWN
-        // settle with coalesced == 1, the exact cadence that used to disarm the fix.
-        try? await Task.sleep(nanoseconds: 330_000_000)
+        // One second later: past the first settle, so this gets its OWN settle
+        // with coalesced == 1, the exact cadence that used to disarm the fix.
         macSelected.set(false); backend.setOutputSet([device.id])
+        clock.advance(by: 1)   // its settle window elapses
 
         await pollUntil { engine.flushedIDs.filter { $0 == device.outputID }.count >= 1 }
+        await awaitConvergesSettled(backend)
         #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
                 "two real transitions inside the horizon must re-establish the session EXACTLY ONCE: zero means the cadence-independent arming is gone")
     }
@@ -9148,27 +10335,29 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// the Mac, listen, change your mind) are ordinary use and must pay NOTHING.
     /// The horizon is the only thing separating them from the storm above, so
     /// it gets its own case: the same two transitions, spaced further apart than
-    /// the horizon. Scaled down from production to keep the test short: a 0.4 s
-    /// horizon with the toggles 1 s apart keeps the production 2.5x ratio.
+    /// the production 2 s horizon — 5 s of test-clock time, a 2.5x ratio.
     @Test func twoUnhurriedTogglesOutsideTheHorizonArmNoReset() async {
+        let clock = ManualDelayClock()
         let (backend, engine, discovery, _, sink, macSelected) = makeSyncedLocalBackend(
-            macSelectedByDefault: false, syncedLocalSettleWindow: 0.05, syncedLocalTransitionHorizon: 0.4)
+            macSelectedByDefault: false, delayClock: clock.queueHoppingClock, uptimeClock: clock.uptime)
         defer { backend.stop() }
 
         let device = ap2Device(id: "AA:BB:CC:DD:EE:95", name: "Unhurried Speaker")
         await connectAP2(backend, engine, discovery, device)
 
         macSelected.set(true); backend.setOutputSet([device.id])
+        clock.advance(by: 1)   // its settle window elapses: transition 1 at t = 1
         await pollUntil { sink.calls == ["start", "startObserving"] }
 
-        try? await Task.sleep(nanoseconds: 1_000_000_000)   // 2.5x the horizon
+        clock.advance(by: 4)
         macSelected.set(false); backend.setOutputSet([device.id])
+        clock.advance(by: 1)   // its settle window elapses: transition 2 at t = 6
         await pollUntil { sink.calls.count >= 4 }
         #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"],
                 "precondition: both toggles must really have applied, otherwise the zero-reset assertion below is vacuous")
 
-        // Give a wrongly-armed reset time to show up.
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // A wrongly-armed reset holds the device's converge slot until its flush.
+        await awaitConvergesSettled(backend)
         #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 0,
                 "two transitions further apart than the horizon are deliberate use, not churn: arming a re-sync there is the latency bug all over again")
     }
@@ -9201,25 +10390,27 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// audio by a whole settle window in both directions: the bar cleared while
     /// the Mac was still audibly playing, and moved while it was still silent.
     ///
-    /// Driven in the gap the debounce opens: a long (0.6 s) window, the Mac
-    /// deselected, and a level sample fired BEFORE the settle runs. The sink is
-    /// provably still started at that instant, so the sample must still reach the
-    /// local row; only once the transition actually lands does the bar clear.
+    /// Driven in the gap the debounce opens: the settle runs on a manual clock,
+    /// the Mac is deselected, and a level sample is fired BEFORE the settle
+    /// runs. The sink is provably still started at that instant, so the sample
+    /// must still reach the local row; only once the transition actually lands
+    /// does the bar clear.
     @Test func localDeviceMeterFollowsAppliedNotDesiredSyncedLocalState() async {
+        let settle = ManualDelayClock()
         let (backend, engine, discovery, capture, sink, macSelected) =
-            makeSyncedLocalBackend(macSelectedByDefault: true, syncedLocalSettleWindow: 0.6)
+            makeSyncedLocalBackend(macSelectedByDefault: true, delayClock: settle.queueHoppingClock)
         defer { backend.stop() }
 
         let device = ap2Device(id: "AA:BB:CC:DD:EE:96", name: "Applied-State Partner")
         await startAndDiscover(backend, engine, discovery, device)
 
         backend.setOutputSet([device.id])
+        settle.fireAll()   // the settle window elapses
         await pollUntil { sink.calls.contains("start") }
         backend.setMeteringActive(true)
         await pollUntil { capture.meteringActive }
 
         let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
-        try? await Task.sleep(nanoseconds: 20_000_000)
 
         capture.fireLevelIfActive(0.6)
         await pollUntil { (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0 }
@@ -9238,6 +10429,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // And once the transition really lands, the bar clears: the eager clear
         // moved with the flag it keys off, rather than being lost.
+        settle.fireAll()   // the settle window elapses
         await pollUntil { sink.calls.contains("stop") }
         await pollUntil { levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0 }
         #expect(levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0,
@@ -9337,9 +10529,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Active-Remote is the low 32 bits of the device id (airplay.c). 0.8 → 80,
         // deliberately != the discovered default of 50 so the change actually emits.
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        await awaitFed(backend, device)
         let events = await collect(from: backend) { events in
             events.contains { if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.volume == 80 } else { return false } }
-        } after: { backend.applyDacpVolume(activeRemote: token, level: 0.8) }
+        } after: { backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8) }
 
         let updated = events.compactMap { event -> Device? in
             if case .deviceUpdated(let d) = event, d.id == device.id { return d } else { return nil }
@@ -9358,7 +10551,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let events = await collect(from: backend) { events in
             events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
         } after: {
-            backend.applyDacpVolume(activeRemote: 0xDEADBEEF, level: 0.9) // no such token
+            backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: 0xDEADBEEF, level: 0.9) // no such token
             discovery.fire(.appeared(device))
         }
         #expect(!(
@@ -9383,7 +10576,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
-        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+        await awaitFed(backend, device)
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
 
         let pushed = await waitForVolumePush(engine, device.outputID, 0.8)
         #expect(pushed, "a speaker-requested volume must be pushed back to the engine so the speaker actually changes level")
@@ -9403,15 +10597,21 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
-        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+        await awaitFed(backend, device)
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
         #expect(await waitForVolumePush(engine, device.outputID, 0.8),
                 "precondition: the first push reached the engine")
+        // The first push must have finished, so a wrong second one shows up as
+        // a fresh `volumeInFlight` mark.
+        await pollUntil { backend.stateQueue.sync { !backend.volumeInFlight.contains(device.outputID) } }
         let countAfterFirst = engine.volumeCalls.count
 
-        // The "echo": same level again. Give any (wrong) push time to land.
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        backend.applyDacpVolume(activeRemote: token, level: 0.8)
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // The "echo": same level again. The read of the in-flight mark runs
+        // after the apply's `stateQueue` block, and a wrong push either still
+        // holds the mark or has already recorded its engine call.
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
+        let rePushInFlight = backend.stateQueue.sync { backend.volumeInFlight.contains(device.outputID) }
+        #expect(!rePushInFlight, "an echo of the current value must not push again (feedback loop)")
         #expect(engine.volumeCalls.count == countAfterFirst,
                        "an echo of the current value must not push again (feedback loop)")
     }
@@ -9430,6 +10630,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        await awaitFed(backend, device)
+        let host = device.descriptor.address
         let step = NativeBackend.speakerVolumeStep
         let deviceID = device.id
         let volumesOf: @Sendable ([BackendEvent]) -> [Int] = { events in
@@ -9440,14 +10642,46 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let events = await collect(from: backend) { events in
             volumesOf(events).count >= 3
         } after: {
-            backend.applyDacpVolumeStep(activeRemote: token, direction: 1)
-            backend.applyDacpVolumeStep(activeRemote: token, direction: 1)
-            backend.applyDacpVolumeStep(activeRemote: token, direction: -1)
+            backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: 1)
+            backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: 1)
+            backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: -1)
         }
 
         let volumes = volumesOf(events)
         #expect(volumes == [50 + step, 50 + 2 * step, 50 + step],
                        "steps must accumulate from the current level, up then back down")
+    }
+
+    /// A DACP report only counts when it comes from the speaker's own address:
+    /// the listener is open to the whole LAN and the token is 32 bits of a MAC.
+    /// Turns red if `applyDacpVolume` / `applyDacpVolumeStep` stop comparing the
+    /// sender's address with the fed descriptor's `address`.
+    @Test func dacpReportFromAnotherHostMovesNothing() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        await awaitFed(backend, device)
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        let volumeOf: () -> Int? = { backend.devices.first { $0.id == device.id }?.volume }
+        let before = volumeOf()
+        let callsBefore = engine.volumeCalls.count
+
+        backend.applyDacpVolume(remoteHost: "192.168.1.99", activeRemote: token, level: 0.8)
+        backend.applyDacpVolume(remoteHost: nil, activeRemote: token, level: 0.8)
+        backend.applyDacpVolumeStep(remoteHost: "192.168.1.99", activeRemote: token, direction: 1)
+        backend.stateQueue.sync {}   // the three calls above have run
+        #expect(volumeOf() == before, "a report from a host that is not the speaker must not move its slider")
+        #expect(engine.volumeCalls.count == callsBefore, "and must not push anything to the engine")
+
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
+        await pollUntil { volumeOf() == 80 }
+        #expect(volumeOf() == 80, "the same report from the speaker's own address moves it")
     }
 
     /// Both routing chokepoints must fire `onRoutingAction` — this is what makes
@@ -9676,7 +10910,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // initial (both-connecting) moment must be disarmed, and firing whatever is
         // pending must NOT trip the fallback (the fire re-checks the condition).
         scheduler.fireAll()
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        drainQueues(backend)   // a fired watchdog hops onto `stateQueue`, then un-gates the tap
         #expect(!backend.test_silenceFallbackActive,
                 "a partly-connected selection is still audible — the watchdog must not fall back")
         #expect(!backend.test_silenceWatchdogArmed,
@@ -9709,7 +10943,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // Even if the (cancelled) timer somehow still fired, the re-check keeps it inert.
         scheduler.fireAll()
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        drainQueues(backend)   // a fired watchdog hops onto `stateQueue`, then un-gates the tap
         #expect(!backend.test_silenceFallbackActive, "the watchdog must never fire once cancelled")
         #expect(capture.isCapturing, "capture stayed gated the whole time — no fallback")
     }
@@ -9742,7 +10976,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // Subscribe, then run the FULL sleep → wake → reconnect cycle. A banner-clear
         // (`false`) must be emitted somewhere in it, and the fallback must end cleared.
-        let events = await collect(from: backend, timeout: .seconds(4)) {
+        let events = await collect(from: backend) {
             $0.contains { if case .localFallbackActive(false) = $0 { return true } else { return false } }
         } after: {
             backend.handleSystemWillSleep()
@@ -9769,18 +11003,15 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // Manually record any fallback events across a sleep/wake cycle (no
         // expectation, so a legitimately empty result doesn't fail on timeout).
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        let task = Task {
-            for await e in stream { if case .localFallbackActive = e { _ = await box.append(e) } }
-        }
-        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+        let (recorder, task) = recordEvents(backend)
+        defer { task.cancel() }
         backend.handleSystemWillSleep()
         backend.handleSystemDidWake()
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        task.cancel()
-        let fallbackEvents = await box.snapshot()
+        // Sleep and wake each clear the override in their own `stateQueue` block.
+        await recorder.flush(backend)
+        let fallbackEvents = recorder.events.filter {
+            if case .localFallbackActive = $0 { return true } else { return false }
+        }
         #expect(fallbackEvents.isEmpty,
                 "no fallback event may be emitted when the override was never active (\(fallbackEvents.count) seen)")
     }
@@ -9864,21 +11095,16 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // on), which can land before `connectAP2`'s own polls return — a
         // subscription started afterward could miss it (`makeEventStream()` only
         // replays `.deviceAdded`, not historical events).
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        let task = Task {
-            for await e in stream {
-                if case .systemDefaultIsAirPlayActive = e { _ = await box.append(e) }
-            }
-        }
-        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+        let (recorder, task) = recordEvents(backend)
+        defer { task.cancel() }
 
         await connectAP2(backend, engine, discovery, device)
         await pollUntil { capture.isCapturing }
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        task.cancel()
+        await recorder.flush(backend)
 
-        let noteEvents = await box.snapshot()
+        let noteEvents = recorder.events.filter {
+            if case .systemDefaultIsAirPlayActive = $0 { return true } else { return false }
+        }
         #expect(noteEvents.contains { if case .systemDefaultIsAirPlayActive(true) = $0 { return true } else { return false } },
                 "the double-path note must fire once streaming starts with an AirPlay-class system default")
         #expect(backend.test_systemAirPlayGuardActive)
@@ -9895,16 +11121,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await connectAP2(backend, engine, discovery, device)
         await pollUntil { capture.isCapturing }
 
-        // Give any (wrongly-firing) note event a beat to arrive.
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        let task = Task {
-            for await e in stream { if case .systemDefaultIsAirPlayActive = e { _ = await box.append(e) } }
+        // Record from here; the flush delivers any (wrongly-firing) note event
+        // emitted so far.
+        let (recorder, task) = recordEvents(backend)
+        defer { task.cancel() }
+        await recorder.flush(backend)
+        let noteEvents = recorder.events.filter {
+            if case .systemDefaultIsAirPlayActive = $0 { return true } else { return false }
         }
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        task.cancel()
-        let noteEvents = await box.snapshot()
         #expect(noteEvents.isEmpty,
                 "no note may fire while the system default is not AirPlay-class (\(noteEvents.count) seen)")
         #expect(!backend.test_systemAirPlayGuardActive)
@@ -9997,7 +11221,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // early-returns (nothing to stream), so the note must simply STAY cleared.
         backend.setOutputSet([])
         backend.handleSystemDidWake()
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        drainQueues(backend)   // wake re-evaluates the note on `stateQueue`
         #expect(!backend.test_systemAirPlayGuardActive,
                 "the note stays cleared after a wake with the selection gone (no re-strand)")
     }
@@ -10016,18 +11240,16 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { capture.isCapturing }
         #expect(!backend.test_systemAirPlayGuardActive)
 
-        let box = EventBox()
-        let stream = backend.makeEventStream()
-        let task = Task {
-            for await e in stream { if case .systemDefaultIsAirPlayActive = e { _ = await box.append(e) } }
-        }
-        try? await Task.sleep(nanoseconds: 30_000_000)   // let the subscription register
+        let (recorder, task) = recordEvents(backend)
+        defer { task.cancel() }
         backend.handleSystemWillSleep()
         await pollUntil { engine.removedIDs.contains(device.outputID) }
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)   // give any spurious emit time to arrive
-        task.cancel()
-        let noteEvents = await box.snapshot()
+        // Sleep clears the note in its own `stateQueue` block; the flush has
+        // recorded any spurious emit.
+        await recorder.flush(backend)
+        let noteEvents = recorder.events.filter {
+            if case .systemDefaultIsAirPlayActive = $0 { return true } else { return false }
+        }
         #expect(noteEvents.isEmpty,
                 "sleep must not emit a spurious note-clear when the note was never active (\(noteEvents.count) seen)")
     }
@@ -10173,18 +11395,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }, after: { backend.setOutputSet([deviceA.id]) })
 
         // A second, independent connect attempt resolving to the SAME status
-        // must be silent on this channel — give it a beat to (wrongly) fire.
-        let box = EventBox()
-        let stream = backend.makeEventStream()
-        let task = Task {
-            for await e in stream { if case .takeoverStatus = e { _ = await box.append(e) } }
-        }
-        try? await Task.sleep(nanoseconds: 30_000_000)
+        // must be silent on this channel. The status is decided inside that
+        // converge, so once it has finished, a (wrong) emit has been recorded.
+        let (recorder, task) = recordEvents(backend)
+        defer { task.cancel() }
         backend.setOutputSet([deviceA.id, deviceB.id])
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        task.cancel()
-        #expect(await box.snapshot().isEmpty,
+        await awaitConvergesSettled(backend)
+        await recorder.flush(backend)
+        #expect(takeoverEvents(in: recorder.events).isEmpty,
                 "an unchanged takeover status must not re-emit on a second connect attempt")
     }
 
@@ -10258,9 +11476,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// a recorded refresh can only have come from the capture-health transition.
     @Test func exclusionRefreshesWhenARoutedAppFinallyBecomesAudible() async {
         // Fails the first tap attempt with `.processNotYetAudible` (routed while
-        // silent), then succeeds. The retry delay is deliberately long so the
-        // "not yet audible" assertion below has a wide, non-flaky window.
+        // silent), then succeeds. The retry fires only when this clock says, so
+        // the "not yet audible" assertion below runs before it.
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 1)
+        let retries = ManualDelayClock()
         let resolver = singleProcessResolver(["com.notyet.audible": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
             makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
@@ -10270,7 +11489,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0,
+            processNotYetAudibleRetryDelay: 1, processNotYetAudibleMaxBackoff: 4,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -10292,6 +11512,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // The app starts playing: the retry's tap succeeds, capture health goes
         // `.capturing`, and THAT is the edge which must re-resolve the exclusion.
+        await pollUntil { retries.pendingCount > 0 }
+        retries.fireAll()
         await pollUntil { tap.attemptsMade >= 2 }
         await pollUntil { capture.refreshedBundleIDs.contains("com.notyet.audible") }
         #expect(capture.refreshedBundleIDs.contains("com.notyet.audible"),
@@ -11036,7 +12258,9 @@ extension SerializedSharedState {
     /// `try?` back in `applySyncedLocalSinkTransition` turns this red.
     @Test func aSyncedLocalSinkThatRefusesToStartIsReported() async {
         struct SinkRefusedToStart: Error {}
-        let (backend, engine, discovery, _, sink, _) = makeSyncedLocalBackend(macSelectedByDefault: true)
+        let settle = ManualDelayClock()
+        let (backend, engine, discovery, _, sink, _) = makeSyncedLocalBackend(
+            macSelectedByDefault: true, delayClock: settle.queueHoppingClock)
         defer { backend.stop() }
         sink.startError = SinkRefusedToStart()
 
@@ -11047,6 +12271,7 @@ extension SerializedSharedState {
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Silent Mac Partner")
         await startAndDiscover(backend, engine, discovery, device)
         backend.setOutputSet([device.id])   // Mac + 1 AirPlay -> the sink starts and throws
+        settle.fireAll()                    // the settle window elapses
 
         func failedLines() -> [String] {
             box.snapshot().filter { $0.contains("\"evt\":\"local_playback:start_failed\"") }
@@ -11106,6 +12331,7 @@ extension SerializedSharedState {
         let line = lines().first ?? ""
         #expect(line.contains("\"op\":\"bind\""))
         #expect(line.contains("\"cause\":\"unknown\""))
+        #expect(line.contains("\"reason\":\"sessionFailed\""), "the engine case name rides along as `reason`")
         #expect(!box.snapshot().contains { $0.contains("\"evt\":\"bind_failed\"") })
     }
 
@@ -11179,6 +12405,74 @@ extension SerializedSharedState {
         let row = try #require(homeRows().last)
         #expect(row.contains("\"devices\":\"\(device.id)\""),
                 "the row for a speaker's own whole-system stream must name that speaker")
+    }
+
+    /// `stream_health` reports the streams the app still assigns, not every
+    /// stream the engine's level tracker remembers: the tracker never forgets an
+    /// id, so a removed speaker's stream logged every 5 s with no devices and
+    /// frozen writes (live 2026-10-07).
+    /// The first expectation goes red if the loop logs every row the engine
+    /// reports. The second goes red if the skip keys on `added` instead of the
+    /// stream assignment, because a speaker whose session died while still
+    /// selected is out of `added` until it reconnects. The third goes red if
+    /// the `devices` field is filtered on `added` again.
+    @Test func streamHealthSkipsARetiredStreamButKeepsOneStillAssigned() async throws {
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: ManualWatchdogScheduler())
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let retired = ap2Device(id: "AA:BB:CC:DD:EE:A8", name: "Health Retired Speaker")
+        let kept = ap2Device(id: "AA:BB:CC:DD:EE:A9", name: "Health Kept Speaker")
+        for device in [retired, kept] {
+            _ = await collect(from: backend) { events in
+                events.contains {
+                    if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+                }
+            } after: { discovery.fire(.appeared(device)) }
+        }
+
+        backend.setOutputSet([retired.id])
+        await pollUntil { (engine.liveStream(of: retired.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase }
+        let retiredHome = try #require(engine.liveStream(of: retired.outputID))
+        backend.setOutputSet([retired.id, kept.id])
+        await pollUntil { (engine.liveStream(of: kept.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase }
+        let keptHome = try #require(engine.liveStream(of: kept.outputID))
+        // Rows are logged in id order and the telemetry queue is FIFO, so once
+        // keptHome's row arrives a wrongly logged retiredHome row is already in the box.
+        try #require(retiredHome < keptHome, "precondition: the retired stream's row is logged first")
+
+        await pollUntil { capture.eqPlans.last?.streams.contains { $0.streamID == retiredHome } == true }
+        backend.setOutputSet([kept.id])
+        await pollUntil { capture.eqPlans.last?.streams.contains { $0.streamID == retiredHome } == false }
+
+        engine.pushState(kept.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == kept.id }?.isAvailable == false }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        backend.test_pollSchedulingSnapshotNow()
+
+        // The sink is process-wide and every SpyEngine numbers streams from the
+        // same base, so a parallel test's row can carry this stream id; keep
+        // only rows naming no speaker or one of this test's.
+        func ours(_ line: String) -> Bool {
+            guard let start = line.range(of: "\"devices\":\"") else { return true }
+            let devices = line[start.upperBound...].prefix { $0 != "\"" }
+            return devices.isEmpty || [retired.id, kept.id].contains { devices.contains($0) }
+        }
+        func rows(_ id: UInt32) -> [String] {
+            box.snapshot().filter {
+                $0.contains("\"evt\":\"stream_health\"") && $0.contains("\"stream\":\"\(id)\"") && ours($0)
+            }
+        }
+        await pollUntil { !rows(keptHome).isEmpty }
+        #expect(rows(retiredHome).isEmpty, "a deselected speaker's stream must not be logged again")
+        #expect(!rows(keptHome).isEmpty, "a speaker still selected keeps its stream's line while its session is down")
+        #expect(rows(keptHome).first?.contains(kept.id) == true, "the stalled stream names the speaker it belongs to")
     }
 
     /// Selecting a SECOND device while already capturing (captureRunning
@@ -11266,7 +12560,9 @@ extension SerializedSharedState {
         for i in 0..<10 {
             tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
         }
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // Each push runs the mixer, the engine write and the sampler on this
+        // thread; re-installing the sink then flushes Telemetry's writer queue.
+        Telemetry._installTestSink { box.append($0) }
         #expect(driftLines().isEmpty, "an unchanging (healthy) cadence snapshot must never log write_cadence_drift")
 
         // Script real degradation, then push well past the sample interval
@@ -11276,7 +12572,7 @@ extension SerializedSharedState {
         // hold-window accumulation on that path), so N pushes reliably cross
         // an N-buffer sampling threshold.
         engine.scriptCadenceSnapshot(WriteCadenceSnapshot(
-            writeCount: 999, deficitSeconds: 1.25, overrunSeconds: 0, lastGapSeconds: 0.05))
+            writeCount: 999, deficitSeconds: 1.25, overrunSeconds: 0, lastGapSeconds: 1))
         for i in 10..<520 {
             tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
         }
@@ -11344,7 +12640,7 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: activator,
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.02,
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 1,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -11365,9 +12661,9 @@ extension SerializedSharedState {
         #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
                 "the in-place flush re-anchor must run even with no clock available — it re-anchors a session that already exists")
         // A successful flush ends the recovery: no teardown, so the gate is never
-        // reached and nothing extra hits the engine. 5x rebindRecoveryRetryDelay=
-        // 0.02s (well above the 100ms floor already).
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // reached and nothing extra hits the engine. The recovery holds the
+        // device's converge slot until it ends.
+        await awaitConvergesSettled(backend)
         #expect(engine.removedIDs.filter { $0 == device.outputID }.count == removesAfterConnect,
                 "a successful flush must not fall through to the teardown")
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsAfterConnect,
@@ -11386,7 +12682,7 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: activator,
-            maxRebindRecoveryAttempts: 1, rebindRecoveryRetryDelay: 0.02,
+            maxRebindRecoveryAttempts: 1, rebindRecoveryRetryDelay: 1,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -11401,8 +12697,8 @@ extension SerializedSharedState {
 
         capture.fireDeviceRateRebuild()
         await pollUntil { engine.flushedIDs.contains(device.outputID) }
-        // 5x rebindRecoveryRetryDelay=0.02s (well above the 100ms floor already).
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // The recovery holds the device's converge slot until it ends.
+        await awaitConvergesSettled(backend)
 
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsAfterConnect,
                 "a clockless re-add must be refused — it would re-establish a session the receiver plays as silence")
@@ -11587,16 +12883,17 @@ extension SerializedSharedState {
             // Fire the other FIFO from strictly within the teardown window…
             backendRef.updateAppRoutes([appRoute])
             // …and hold the teardown open until the bind has bowed out.
-            while !box.snapshot().contains(where: {
-                $0.contains("bind_superseded") && $0.contains(device.id)
-            }) {
-                try? await Task.sleep(nanoseconds: 2_000_000)
+            await pollUntil {
+                box.snapshot().contains { $0.contains("bind_superseded") && $0.contains(device.id) }
             }
         }
 
         backend.setOutputSet([])   // converge teardown: the removeOutput runs the hook
 
         await pollUntil { onAPerAppStream(engine, device.outputID) }
+        // The telemetry sink is delivered on its own queue, so the re-drive's
+        // line can trail the stream it produced.
+        await pollUntil { !telemetryLines(box, evt: "per_app_redrive").isEmpty }
         let live = engine.liveStream(of: device.outputID)
         #expect(onAPerAppStream(engine, device.outputID),
                 "the re-driven bind must land after the whole-system release")
@@ -11620,6 +12917,9 @@ extension SerializedSharedState {
     /// per-app bind — with no alternating add(0)/streamAdd anywhere.
     @Test func routeDuringWholeSystemRecoveryBackoffDoesNotPingPong() async {
         let engine = SpyEngine()
+        // The recovery's backoff retry fires only when this clock says, so the
+        // route and the deselect below both land inside the backoff.
+        let retries = ManualDelayClock()
         let discovery = FakeDiscovery()
         let capture = FakeCapture()
         let backend = NativeBackend(
@@ -11627,7 +12927,8 @@ extension SerializedSharedState {
             systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]),
-            maxRebindRecoveryAttempts: 6, rebindRecoveryRetryDelay: 0.25,
+            maxRebindRecoveryAttempts: 6, rebindRecoveryRetryDelay: 1,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -11662,6 +12963,7 @@ extension SerializedSharedState {
         // chain reaches a terminal exit, the release re-drives the route.
         backend.setOutputSet([])
         engine.addFailures = []
+        retries.fireAll()   // the backoff elapses
         await pollUntil { onAPerAppStream(engine, device.outputID) }
         #expect(onAPerAppStream(engine, device.outputID),
                 "after the deselect the demoted route must re-engage by itself")
@@ -12020,11 +13322,11 @@ extension SerializedSharedState {
     /// generation bump only needs to beat gen 1's recovery `Task` — spawned by
     /// the first call, but a freshly-spawned `Task` can start running on
     /// another cooperative-pool thread concurrently, so being synchronous on
-    /// THIS thread alone doesn't guarantee the ordering. `engine.opDelayNanos`
-    /// below makes gen 1's engine ops (on that other thread) deterministically
-    /// slower than this thread's synchronous fireDeviceChange chain, so the
-    /// second call is guaranteed to see gen 1 still in place (its own recovery
-    /// hasn't resolved and cleared it yet) — no flaky race. Because both
+    /// THIS thread alone doesn't guarantee the ordering. `engine.opGate` below
+    /// holds gen 1's engine ops (on that other thread) until both
+    /// fireDeviceChange calls have returned, so the second call is guaranteed
+    /// to see gen 1 still in place (its own recovery hasn't resolved and
+    /// cleared it yet) — no flaky race. Because both
     /// recovery `Task`s share the `bindTail` FIFO, gen 1's completion (and its
     /// `superseded` outcome) is then a hard PREREQUISITE of gen 2 ever starting
     /// its own first attempt, not a further race to poll for.
@@ -12046,6 +13348,7 @@ extension SerializedSharedState {
     /// a class's methods serially in one process) never inherits it.
     @Test func rebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt() async throws {
         let tap = RebindTriggerTap()
+        let retries = ManualDelayClock()
         let resolver = singleProcessResolver(["com.foo": 4242])
         let perAppCapture = PerAppCaptureCoordinator(
             makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
@@ -12055,7 +13358,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
+            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 1,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -12094,17 +13398,12 @@ extension SerializedSharedState {
         // `fireDeviceChange()` calls below have no `await` between them, which
         // keeps THIS thread's own chain synchronous, but does not by itself
         // stop gen 1's recovery `Task` from being picked up and racing ahead on
-        // a different thread. `opDelayNanos` makes gen 1's engine ops
-        // deterministically slower than this thread's synchronous
-        // fireDeviceChange→…→resetAirPlaySessionForRoutedApp chain — a GENEROUS
-        // margin (not just "large enough on an idle machine"): it must stay well
-        // above the synchronous chain's cost even under heavy contention (e.g.
-        // several `swift build`/`swift test` runs competing for cores in sibling
-        // worktrees), or the second `fireDeviceChange()` could occasionally lose
-        // the race and flake. `addFailures` set here (rather than after firing)
+        // a different thread. The gate holds gen 1's engine ops until both calls
+        // have returned. `addFailures` set here (rather than after firing)
         // guarantees gen 2's own first attempt actually fails, giving its trail
         // an incrementing attempt number to assert on below.
-        engine.opDelayNanos = 200_000_000
+        let gate = HoldPoint()
+        engine.opGate = gate
         engine.addFailures = [device.outputID.rawValue]
 
         // The per-app tap's device-change hook is installed on the
@@ -12118,11 +13417,16 @@ extension SerializedSharedState {
         // Two recaptures, back-to-back, no `await` in between.
         tap.fireDeviceChange()
         tap.fireDeviceChange()
+        gate.open()
 
         await pollUntil {
             rebindLines(gen: 2).contains { $0["outcome"] as? String == "retry_scheduled" }
         }
         engine.addFailures = []
+        // The line is logged just before the retry is scheduled, in the same
+        // `stateQueue` block.
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
+        retries.fireAll()   // gen 2's backoff elapses
         await pollUntil {
             rebindLines(gen: 2).contains { $0["outcome"] as? String == "succeeded" }
         }
@@ -12206,6 +13510,96 @@ extension SerializedSharedState {
         #expect(lines.first?["will_wait"] as? String == "true")
         #expect(lines.first?["switch_away"] as? String == "none", "no defaultOutputSwitcher was injected")
         #expect(Int(lines.first?["elapsed_ms"] as? String ?? "") != nil, "elapsed_ms must be an integer")
+
+        // The refusal's `connect_failed` names which gate outcome refused it,
+        // so busy timing ports read apart from an unapproved helper.
+        await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
+        let failed = telemetryLines(box, evt: "airplay:connect_failed", device: device.id).first
+        #expect(failed?["cause"] as? String == "timingUnavailable")
+        #expect(failed?["reason"] as? String == "timingPortsUnavailable")
+    }
+
+    /// Turns red if the whole-system converge catch stops sending the engine
+    /// error's case name as `reason`, which leaves every non-password,
+    /// non-timeout connect failure reading only `cause: unknown` in PostHog.
+    @Test func wholeSystemConnectFailureSharesTheEngineErrorAsReason() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:CA", name: "Rejecting Speaker")
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .operationRejected
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
+        let failed = telemetryLines(box, evt: "airplay:connect_failed", device: device.id).first
+        #expect(failed?["cause"] as? String == "unknown")
+        #expect(failed?["reason"] as? String == "operationRejected")
+    }
+
+    /// Turns red if the arm's `updateDiscovery` catch returns silently: the row
+    /// stays on its refusal, no `airplay:connect_failed` line is written, and the
+    /// sheet never reacts.
+    @Test func perAppOnlyPasswordSpeakerWhoseRetypeCannotBeFedReadsFailedAndLogsIt() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        let state = { backend.devices.first { $0.id == device.id }?.connectionState }
+        let failureCause = { () -> ConnectionFailure.Cause? in
+            if case .failed(let f)? = state() { return f.cause }
+            return nil
+        }
+        func submitAndWait(_ password: String) async {
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                backend.submitAirPlayPassword(password, for: device.id, source: "mac") { done.resume() }
+            }
+        }
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil { state() == .awaitingPassword || failureCause() == .authRequired }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+        let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
+        // The binding drops as soon as the pushed failure is applied, while the
+        // scripted add is still in flight; waiting on the binding alone let the
+        // test retype and retry inside one poll gap of `onMirroredAddFailure`,
+        // which then never saw the failure and held the add for 120 s.
+        let unbound = {
+            engine.opsInFlight(for: device.outputID) == 0
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil { perApp.state(for: "com.foo") == .idle && unbound() }
+
+        await submitAndWait("wrong")
+        backend.retryOutput(device.id)
+        await pollUntil { binds() == 2 }
+        await pollUntil { isAvailable() == false && unbound() }
+        #expect(failureCause() == .authRequired)
+        #expect(isAvailable() == false, "a refused typed password leaves the row unavailable")
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        engine.updateDiscoveryError = AirPlayEngineError.sessionFailed
+        await submitAndWait("right")
+        backend.retryOutput(device.id)
+        await pollUntil { failureCause() == .unknown }
+        #expect(failureCause() == .unknown)
+        #expect(binds() == 2)
+        // The telemetry sink is delivered on its own queue, so wait for the line.
+        await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
+        #expect(telemetryLines(box, evt: "airplay:connect_failed", device: device.id).first?["reason"] as? String
+                == "sessionFailed")
     }
 
 }
@@ -12215,41 +13609,28 @@ extension SerializedSharedState {
 // MARK: - collect(after:) convenience
 
 /// Subscribe, run `after` (which fires the stimulus once the subscription is
-/// live), then collect until `predicate`.
+/// live), then collect until `predicate`. `makeEventStream` queues its
+/// registration on `stateQueue` before it returns, and every event is emitted
+/// there, so the stimulus cannot outrun the subscription.
 private func collect(
     from backend: NativeBackend,
-    timeout: Duration = .seconds(3),
     until predicate: @escaping @Sendable ([BackendEvent]) -> Bool,
     after stimulus: @escaping () -> Void
 ) async -> [BackendEvent] {
     let stream = backend.makeEventStream()
     let box = EventBox()
+    let satisfied = LockedBool(false)
     await confirmation("predicate satisfied") { done in
         let task = Task {
             for await event in stream {
                 if case .level = event { continue }
                 let all = await box.append(event)
-                if predicate(all) { done(); break }
+                if predicate(all) { done(); satisfied.set(true); break }
             }
         }
         defer { task.cancel() }
-        // Give the subscription a beat to register on stateQueue before stimulating.
-        try? await Task.sleep(nanoseconds: 20_000_000)
         stimulus()
-        try? await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { _ = await task.value }
-            group.addTask { try await Task.sleep(for: timeout) }
-            try await group.next()
-            // Cancel the STREAM task, not just the group's children. `cancelAll()`
-            // cancels the child that is `await task.value`, but `Task.value` does
-            // not observe its awaiter's cancellation — it waits for `task` itself.
-            // Without this the group's implicit scope-exit await never returns when
-            // the timeout wins, and the `defer { task.cancel() }` that would free it
-            // can't run because we are still inside this closure: a test whose
-            // predicate never fires HANGS THE WHOLE SUITE instead of failing.
-            task.cancel()
-            group.cancelAll()
-        }
+        await SuiteWait.until("the collected events to satisfy the predicate") { satisfied.get() }
     }
     return await box.snapshot()
 }

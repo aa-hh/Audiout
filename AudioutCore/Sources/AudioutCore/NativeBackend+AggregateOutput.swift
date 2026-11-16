@@ -229,9 +229,9 @@ extension NativeBackend {
         }
         aggregateDefaultActive = false
         pushMainToRestoredDevice(target)
-        captureControlQueue.asyncAfter(deadline: .now() + Self.restoreLandingCheckDelay) { [weak self] in
+        delayClock(Self.restoreLandingCheckDelay, captureControlQueue, DispatchWorkItem { [weak self] in
             self?.verifyRestoreLanded(target: target, attempt: attempt)
-        }
+        })
     }
 
     /// Read the default back: did the write we were told succeeded actually move

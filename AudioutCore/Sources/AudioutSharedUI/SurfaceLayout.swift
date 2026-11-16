@@ -10,7 +10,10 @@ import AppKit
 /// these, never a literal.
 public enum SurfaceLayout {
     /// The one fixed surface frame's width (window content width, every screen).
-    public static let width: CGFloat = 653
+    /// 653 → 713 on 2026-10-04: the trailing control column grew 60 pt so a
+    /// row beside the Offset chip can show two source pills; the owner chose
+    /// a wider window over a narrower name column or chip.
+    public static let width: CGFloat = 713
 
     /// Pinned min == max sidebar thickness shared by the Groups and Settings
     /// source-list sidebars.

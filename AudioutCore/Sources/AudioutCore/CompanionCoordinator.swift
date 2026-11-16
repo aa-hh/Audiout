@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import CoreGraphics
 import Foundation
 import AudioutProtocol
 
@@ -13,16 +14,21 @@ import AudioutProtocol
 /// this wiring used to live in a target the suite cannot see.
 @MainActor
 public protocol CompanionCoordinatorHost: AnyObject {
-    /// Ask the user whether this phone may control the Mac, and report the
-    /// answer exactly once. Never called for a remembered phone.
-    func presentApprovalPrompt(clientID: String, clientName: String,
+    /// Ask the user whether this phone may control the Mac, showing the
+    /// six-digit `pairingCode` the phone shows too, and report the answer
+    /// exactly once. Never called for a remembered phone.
+    func presentApprovalPrompt(clientID: String, clientName: String, pairingCode: String,
                                respond: @escaping (Bool) -> Void)
     /// Close the prompt for `clientID` — its connection died unanswered.
     func withdrawApprovalPrompt(clientID: String)
     /// The `.regular` running apps, newest read (the coordinator caches it).
     func runningApplications() -> [(bundleID: String, displayName: String)]
     /// Answer a phone's `requestAppIcons` — reading an icon is AppKit work.
-    func serveAppIconPages(_ requested: [String], to clientID: UUID)
+    /// `completion` runs once the last page has been handed to the server
+    /// (at once when there is nothing to send); until then the coordinator
+    /// refuses that phone's next icon request.
+    func serveAppIconPages(_ requested: [String], to clientID: UUID,
+                           completion: @escaping @MainActor () -> Void)
     /// Run a licence key the phone sent, and reply to that command. Needs
     /// `LicenseValidator`, the gate window and `applyLicenseState`, none of
     /// which an AppKit-free type owns.
@@ -67,25 +73,31 @@ public final class CompanionCoordinator {
     private let appRouting: AppRoutingController
     private let settings: AppSettings
     private let excludedBundleIDs: () -> Set<String>
+    private let speakerLibrary: SpeakerLibraryController
 
-    /// One name for both the Bonjour advertisement (`start(name:)`) and
-    /// `Snapshot.serverName` — the server's `welcome` reads the latter, so the
-    /// two must agree (one source of truth, `CompanionServer.sendWelcome`).
+    /// The Mac's name as phones see it: `Snapshot.serverName`, which the
+    /// server's `welcome` reads (`CompanionServer.sendWelcome`). It travels
+    /// only inside TLS; the Bonjour advertisement carries
+    /// `CompanionPairing.instanceName` instead.
     public let serverName: String
 
     /// The iPhone-companion link: a Bonjour-advertised WebSocket server the
     /// phone connects to. Created once; started/stopped only by
-    /// ``updateServerState()`` (launch + the Settings › General checkbox, both
-    /// funneled through `AppSettings.resolvedAllowRemoteControl` so the
-    /// `AUDIOUT_COMPANION` env override wins). ON when the setting is unset, so
-    /// a fresh install advertises without being asked twice — the Local Network
-    /// grant is already the user's consent to this.
+    /// ``updateServerState()``. It runs while
+    /// `AppSettings.resolvedAllowRemoteControl` allows it (the Settings ›
+    /// Audiout Remote switch, with the `AUDIOUT_COMPANION` env override
+    /// winning), whether or not any phone is allowed yet: a new phone pairs
+    /// by connecting, which raises the Allow prompt.
     public let server: CompanionServer
 
-    /// The per-phone approval model (T24): remembers each phone's allow/deny
-    /// answer, funnels unknown phones into ONE prompt per clientID, and backs
-    /// the Settings › General "Remembered iPhones" list.
+    /// The per-phone approval model (T24): remembers each allowed phone,
+    /// funnels unknown phones into one prompt at a time, and backs the
+    /// Settings › Audiout Remote "Remembered iPhones" list.
     public let approvals: CompanionApprovalController
+
+    /// Where the server's TLS identity lives; read each time the server
+    /// starts.
+    private let identityStore: any CompanionIdentityStoring
 
     private weak var host: (any CompanionCoordinatorHost)?
 
@@ -94,20 +106,24 @@ public final class CompanionCoordinator {
                 appRouting: AppRoutingController,
                 settings: AppSettings,
                 excludedBundleIDs: @escaping () -> Set<String>,
+                speakerLibrary: SpeakerLibraryController,
                 serverName: String,
                 server: CompanionServer = CompanionServer(),
                 // Optional rather than defaulted: a default argument is evaluated
                 // in a nonisolated context, and this type's init is `@MainActor`.
                 approvals: CompanionApprovalController? = nil,
+                identityStore: (any CompanionIdentityStoring)? = nil,
                 host: any CompanionCoordinatorHost) {
         self.backend = backend
         self.groupController = groupController
         self.appRouting = appRouting
         self.settings = settings
         self.excludedBundleIDs = excludedBundleIDs
+        self.speakerLibrary = speakerLibrary
         self.serverName = serverName
         self.server = server
         self.approvals = approvals ?? CompanionApprovalController()
+        self.identityStore = identityStore ?? KeychainCompanionIdentityStore()
         self.host = host
     }
 
@@ -117,10 +133,23 @@ public final class CompanionCoordinator {
     /// the many callers of that method don't resend an unchanged one.
     private var pushedCompanionToken: String?
 
+    /// The Mac's licence state for the snapshot, computed from settings when
+    /// the licence changes rather than on every broadcast, because reading it
+    /// touches the keychain.
+    private var macLicense: MacLicense?
+
     /// Mirrors whether `server` is currently running, so the many broadcast
     /// triggers can no-op cheaply while the feature is off (the default) and
     /// ``updateServerState()`` only acts on a real edge.
     private var isActive = false
+
+    /// Set by ``wire(startingServer:)``; ``updateServerState()`` does nothing
+    /// before it.
+    private var isWired = false
+
+    /// Phones whose icon pages are still being sent; a second request from
+    /// one of them is refused until the first is done.
+    private var iconRequestsInFlight: Set<UUID> = []
 
     /// Executes phone commands against the exact controllers the popover
     /// drives. Built in ``wire()`` once those controllers exist.
@@ -139,6 +168,10 @@ public final class CompanionCoordinator {
     private var localFallbackActive = false
     private var takeoverStatus: TakeoverStatus?
     private var systemDefaultIsAirPlayActive = false
+    /// The other two inputs of the Mac's note slot (`.captureFailed` /
+    /// `.routingBlockedNeedsDefault`), cached the same way.
+    private var captureFailureMessage: String?
+    private var routingBlocked = false
 
     /// Last-known display name per `Device.id`, accumulated from
     /// `deviceAdded`/`deviceUpdated` and NEVER pruned on `deviceRemoved`
@@ -160,6 +193,23 @@ public final class CompanionCoordinator {
     /// from a replaced request cannot stop its successor.
     private let alignmentOwners = CompanionAlignmentOwnership()
 
+    /// Device ids this coordinator selected so a phone's run could hear them,
+    /// per target, in the order they were selected. They are put back on the
+    /// owner's cancel, the phone's disconnect, a lease expiry, or a refusal
+    /// inside the same call; released in reverse, so `GroupController`'s
+    /// auto-swap and empty-set floor put the user's Selected Devices back
+    /// exactly. The generation tells one engagement
+    /// from the next, so a late refusal from an ended run cannot release
+    /// the selections of the run that replaced it.
+    private var engagedByTarget: [String: (generation: Int, ids: [String])] = [:]
+    private var engagementGeneration = 0
+    /// Targets with a probe run prepared and not yet started. A refused start,
+    /// or the backend's lease standing the preparation down, gives back its
+    /// owner and engagement only for one of these: the same refusal for a
+    /// probe already playing must leave both, or its events lose their
+    /// addressee and its speakers drop out mid-sweep.
+    private var preparedProbeTargets: Set<String> = []
+
     /// Cached `.regular` running-app list backing `addableApps`/`isRunning` in
     /// the snapshot (FIX-B2 finding 2b). The host's app-lifecycle observers
     /// invalidate it (``invalidateRunningAppsCache()``) on the only edges that
@@ -177,7 +227,7 @@ public final class CompanionCoordinator {
     /// exactly one phone connected and exactly one on file, so the Mac never
     /// guesses which one is in the room.
     public var invitePhoneName: String? {
-        let approved = approvals.approvals.filter { $0.decision == .approved }
+        let approved = approvals.approvals
         guard clientCount == 1, approved.count == 1 else { return nil }
         return approved[0].lastKnownName
     }
@@ -187,7 +237,8 @@ public final class CompanionCoordinator {
     // MARK: Wiring
 
     /// Attach every companion trigger + the command/disconnect callbacks, then
-    /// start the server if setting/env allow. Called once, at the END of
+    /// (unless `startingServer` is false) start the server if setting/env
+    /// allow. Called once, at the END of
     /// `applicationDidFinishLaunching` (see the call site's ordering comment).
     /// `appRouting.onRoutesDidChange`, `groupController.onStateDidChange`,
     /// `excludedApps.onChange`, the icon-controller chain-wrap and the two
@@ -195,7 +246,11 @@ public final class CompanionCoordinator {
     /// single-assignment closures the launch path already owns, so the
     /// companion tail rides inside them at their original sites rather than
     /// being reassigned here.
-    public func wire() {
+    /// `startingServer` false leaves the server for a later
+    /// ``updateServerState()``: its Bonjour advertisement raises the Local
+    /// Network prompt, which first-run Setup must explain first.
+    public func wire(startingServer: Bool = true) {
+        isWired = true
         dispatcher = CompanionCommandDispatcher(
             groupController: groupController,
             appRouting: appRouting,
@@ -225,7 +280,8 @@ public final class CompanionCoordinator {
                 // `onSettingChanged` fires after `await latency.apply`.
                 await self.scheduleBroadcast()
             },
-            alignmentActions: makeAlignmentActions())
+            alignmentActions: makeAlignmentActions(),
+            speakerLibrary: speakerLibrary)
 
         // A reconnect (or an alignment landing) changes what the phone's
         // speaker row says, and nothing else broadcasts for it — the timing
@@ -234,6 +290,22 @@ public final class CompanionCoordinator {
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.scheduleBroadcast()
+            }
+        }
+        // The backend lets go of a prepared run its lease ended; the phone may
+        // never cancel it, so its claim and the speakers selected for it go
+        // back here, or a second phone stays refused and a reference outside
+        // Main Out keeps playing the user's audio.
+        (backend as? BTOutputControlling)?.onCompanionPreparedProbeLeaseEnded = { [weak self] targetID in
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating else { return }
+                let stillPrepared = (self.backend as? BTOutputControlling)?
+                    .hasPreparedCompanionAlignmentProbe(targetID: targetID) ?? false
+                if self.alignmentOwners.endPreparedProbe(
+                    targetID: targetID, .leaseEnded(backendStillPrepared: stillPrepared),
+                    prepared: &self.preparedProbeTargets) {
+                    self.releaseEngaged(forTarget: targetID)
+                }
             }
         }
 
@@ -280,12 +352,25 @@ public final class CompanionCoordinator {
                 // (CompanionCommandDispatcher.swift:219). Rate-limited like
                 // every other command by the guard above.
                 if case .requestAppIcons(let requested) = command {
+                    // One request at a time per phone: a phone repeating the
+                    // request would otherwise queue page after page of the
+                    // same icons on the main thread and the socket.
+                    guard !self.iconRequestsInFlight.contains(clientID) else {
+                        reply(CompanionServer.CommandResult(
+                            applied: false,
+                            refusalReason: "Icons are still being sent. Wait a moment."))
+                        return
+                    }
+                    self.iconRequestsInFlight.insert(clientID)
                     reply(CompanionServer.CommandResult(applied: true))
-                    self.host?.serveAppIconPages(requested, to: clientID)
+                    self.host?.serveAppIconPages(requested, to: clientID) { [weak self] in
+                        self?.iconRequestsInFlight.remove(clientID)
+                    }
                     return  // no snapshot broadcast — icons are not snapshot state
                 }
-                if case .setAlignmentTick(let targetID, let active) = command {
+                if case .setAlignmentTick(let targetID, let active, let referenceID) = command {
                     self.handleAlignmentTick(targetID: targetID, active: active,
+                                             referenceID: referenceID,
                                              clientID: clientID, reply: reply)
                     return
                 }
@@ -319,7 +404,7 @@ public final class CompanionCoordinator {
                 switch command {
                 case .setDeviceVolume, .setDeviceMuted,
                      .setMainOutMuted, .setGroupMuted, .setStartBufferMs,
-                     .startAlignmentProbe, .cancelAlignmentProbe,
+                     .prepareAlignmentProbe, .startAlignmentProbe, .cancelAlignmentProbe,
                      .reportAlignmentMeasurement, .setAlignmentTick,
                      .nudgeAlignmentTrim, .revertAlignmentNudge,
                      .clearAlignmentTuning, .playAlignmentDemo:
@@ -350,6 +435,7 @@ public final class CompanionCoordinator {
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.rateLimiter.forgetClient(clientID)
+                self.iconRequestsInFlight.remove(clientID)
                 // A run, a fine-tune session and an A/B receipt are all
                 // per-client state, and a phone that walks out of range would
                 // otherwise leave the room holding a sweep feed with every
@@ -369,6 +455,20 @@ public final class CompanionCoordinator {
                         (self?.backend as? BTOutputControlling)?
                             .cancelCompanionAlignmentProbe(targetID: id)
                     })
+                // razor: with several phones, one phone's disconnect leaves
+                // another phone's run alone; only runs it owned, or nobody
+                // owns, give their selections back. Key `engagedByTarget` by
+                // client if two phones may ever measure the same speaker.
+                for targetID in Array(self.engagedByTarget.keys) {
+                    let owner = self.alignmentOwners.current(targetID: targetID)
+                    if owner == nil || owner?.clientID == clientID {
+                        self.releaseEngaged(forTarget: targetID)
+                    }
+                }
+                self.preparedProbeTargets = self.preparedProbeTargets.filter { targetID in
+                    let owner = self.alignmentOwners.current(targetID: targetID)
+                    return owner != nil && owner?.clientID != clientID
+                }
             }
         }
 
@@ -383,11 +483,11 @@ public final class CompanionCoordinator {
         // after the server started still reaches the next phone to connect.
         server.companionToken = { [settings] in settings.companionToken }
         server.serverID = { [settings] in settings.companionServerID }
-        server.onApprovalRequest = { [weak self] clientID, clientName, decide in
+        server.onApprovalRequest = { [weak self] clientID, clientName, pairingCode, decide in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.approvals.handleRequest(
-                    clientID: clientID, clientName: clientName, decide: decide)
+                    clientID: clientID, clientName: clientName, pairingCode: pairingCode, decide: decide)
             }
         }
         // The last connection carrying this phone identity died before the
@@ -398,9 +498,9 @@ public final class CompanionCoordinator {
                 self.approvals.abandonRequest(clientID: clientID)
             }
         }
-        approvals.presentPrompt = { [weak self] clientID, clientName, respond in
+        approvals.presentPrompt = { [weak self] clientID, clientName, pairingCode, respond in
             self?.host?.presentApprovalPrompt(clientID: clientID, clientName: clientName,
-                                              respond: respond)
+                                              pairingCode: pairingCode, respond: respond)
         }
         approvals.withdrawPrompt = { [weak self] clientID in
             self?.host?.withdrawApprovalPrompt(clientID: clientID)
@@ -409,25 +509,59 @@ public final class CompanionCoordinator {
         approvals.dropClient = { [weak self] clientID in
             self?.server.dropClient(clientID: clientID)
         }
+        // A prompt behind the lock screen is out of sight: the waiting phone
+        // asks its user to unlock the Mac.
+        let center = DistributedNotificationCenter.default()
+        for (name, locked) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
+            center.addObserver(forName: .init(name), object: nil, queue: nil) { [weak server] _ in
+                server?.setScreenLocked(locked)
+            }
+        }
+        server.setScreenLocked(Self.screenIsLocked())
 
-        updateServerState()
+        if startingServer { updateServerState() }
     }
 
-    /// Start or stop the companion server to match
-    /// `AppSettings.resolvedAllowRemoteControl` (env override → persisted
-    /// checkbox). Called at launch and from the Settings › General checkbox
-    /// callback; a no-op when nothing changed. On start, broadcasts an initial
-    /// snapshot IMMEDIATELY — the server defers a helloed client's `welcome`
-    /// until the first broadcast, so an early client would otherwise hang.
+    /// Whether the screen is locked right now, from the login session's
+    /// own record; the lock notifications keep it current after that.
+    private static func screenIsLocked() -> Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        return session["CGSSessionScreenIsLocked"] as? Bool ?? false
+    }
+
+    /// Start or stop the companion server: it runs while
+    /// `AppSettings.resolvedAllowRemoteControl` allows it (env override →
+    /// persisted switch). Called once the app is wired and the backend has
+    /// started (or Setup's iPhone card shows), and from the Settings ›
+    /// Audiout Remote switch; a no-op when nothing changed or before
+    /// ``wire(startingServer:)``. A start that cannot load the TLS identity
+    /// reports it, leaves the server stopped, and is tried again on the next
+    /// call. On start, broadcasts an initial snapshot IMMEDIATELY — the server
+    /// defers a helloed client's `welcome` until the first broadcast, so an
+    /// early client would otherwise hang.
     public func updateServerState() {
+        // Before `wire()` the server would come up with no approval gate or
+        // command handler attached.
+        guard isWired else { return }
         let shouldRun = AppSettings.resolvedAllowRemoteControl(settings: settings)
         guard shouldRun != isActive else { return }
-        isActive = shouldRun
         if shouldRun {
-            server.start(name: serverName)
+            let identity: CompanionIdentity
+            do {
+                identity = try identityStore.loadOrCreate()
+            } catch {
+                host?.log("companion server not started: no TLS identity (\(error))")
+                Telemetry.fail(.settings, "companion:identity_load_failed",
+                               local: ["error": "\(error)"])
+                isActive = false
+                return
+            }
+            isActive = true
+            server.start(identity: identity)
             broadcastSnapshotNow()
-            host?.log("companion server started (\(serverName))")
+            host?.log("companion server started")
         } else {
+            isActive = false
             broadcastWork?.cancel()
             broadcastWork = nil
             // `disabled`, not the `shutdown` default: the phone settles
@@ -457,6 +591,16 @@ public final class CompanionCoordinator {
         server.sendCompanionToken(token)
     }
 
+    /// The host calls this from every licence change with
+    /// ``CompanionSnapshotBuilder/macLicense(settings:now:)``, which it has
+    /// already read; the snapshot carries the new state to every phone (M3).
+    /// The host also calls it when a running trial ends, after asking the
+    /// server, so a trial paid for elsewhere never reaches phones as ended.
+    public func licenseStateDidChange(_ license: MacLicense) {
+        macLicense = license
+        scheduleBroadcast()
+    }
+
     // MARK: Snapshot inputs owned by the app's event handler
 
     /// A phone arrived or left.
@@ -481,6 +625,14 @@ public final class CompanionCoordinator {
 
     public func noteTakeoverStatus(_ status: TakeoverStatus?) {
         takeoverStatus = status
+    }
+
+    public func noteCaptureFailure(_ message: String?) {
+        captureFailureMessage = message
+    }
+
+    public func noteRoutingBlocked(_ active: Bool) {
+        routingBlocked = active
     }
 
     /// An app launched or quit: the cached running-app list is stale.
@@ -513,6 +665,7 @@ public final class CompanionCoordinator {
         let running = runningApps()
         let routedIDs = Set(appRouting.appRoutes.map(\.bundleID))
         let addable = addableApps()
+        if macLicense == nil { macLicense = CompanionSnapshotBuilder.macLicense(settings: settings) }
         let snapshot = CompanionSnapshotBuilder.build(
             // Sorted for a deterministic wire order: the host's fleet is a
             // dictionary's values, and an order flap would defeat the server's
@@ -540,9 +693,23 @@ public final class CompanionCoordinator {
             // alignment at all, which the phone reads as "not reported".
             alignmentFor: { [weak self] device in
                 (self?.backend as? BTOutputControlling)?.btAlignmentReport(forDevice: device.id)
-            })
+            },
+            speakerRecord: { [speakerLibrary] in speakerLibrary.record(for: $0.id) },
+            missingSpeakers: speakerLibrary.records
+                .filter { !$0.isLocalDevice && $0.liveDevice == nil }
+                .map { ($0.id, $0.displayName, $0.kind?.rawValue) },
+            note: Self.noteSlot(captureFailure: captureFailureMessage, routingBlocked: routingBlocked,
+                                takeover: takeoverStatus, doublePath: systemDefaultIsAirPlayActive),
+            macAppVersion: Self.appVersion,
+            macLicense: macLicense)
         server.broadcast(snapshot)
     }
+
+    /// The version the phone names in a problem report. No `"dev"` fallback:
+    /// a run with no bundle to read sends nothing, which is the same `nil` a
+    /// Mac built before the field sends.
+    private static let appVersion: String? =
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
 
     /// The cached-or-rebuilt `.regular` running-app list (FIX-B2 finding 2b).
     /// The enumeration was the dominant per-broadcast cost, so the host's
@@ -573,12 +740,60 @@ public final class CompanionCoordinator {
         (host?.devices() ?? []).sorted { $0.id < $1.id }
     }
 
+    /// Make `id` audible for a phone's run on `targetID`, through the one
+    /// selection owner, as the Mac's own wizard does for its reference. A
+    /// device already in Main Out is left alone and not remembered, so a
+    /// repeat start selects nothing new; an id this call did select is
+    /// appended to `newlyEngaged`. The refusal sentence is the dispatcher's
+    /// own for a phone's selection. While Main Audio plays a scene, selecting
+    /// a speaker outside it reaches nothing, so that is refused and undone.
+    private func engage(_ id: String, forTarget targetID: String,
+                        newlyEngaged: inout [String]) -> String? {
+        if groupController.isMainOutMember(id) { return nil }
+        let wasSelected = groupController.selectedDeviceIDs.contains(id)
+        let result = groupController.setDeviceSelected(id, true)
+        guard result.applied else {
+            if result.refusalReason == GroupController.oneSpeakerLimitReason {
+                return "Audiout plays on one speaker at a time until you buy."
+            }
+            return result.refusalReason
+        }
+        guard groupController.isMainOutMember(id) else {
+            if !wasSelected { groupController.setDeviceSelected(id, false) }
+            let name = alignmentDevices.first { $0.id == id }?.name ?? id
+            return "\u{201C}\(name)\u{201D} isn't in the active scene."
+        }
+        if engagedByTarget[targetID] == nil {
+            engagementGeneration += 1
+            engagedByTarget[targetID] = (engagementGeneration, [])
+        }
+        engagedByTarget[targetID]?.ids.append(id)
+        newlyEngaged.append(id)
+        return nil
+    }
+
+    /// Put back the selections `engage` made for `targetID`, newest first:
+    /// all of them, or with `only`, just the ids one refused call selected,
+    /// so a refusal never silences a run already in progress. A call with
+    /// `only` passes the `generation` it engaged under and releases nothing
+    /// once that engagement has ended. Unlike the Mac's wizard, the target
+    /// is released too.
+    private func releaseEngaged(forTarget targetID: String, only: [String]? = nil,
+                                generation: Int? = nil) {
+        guard let entry = engagedByTarget[targetID],
+              generation == nil || generation == entry.generation else { return }
+        let released = only.map { only in entry.ids.filter(only.contains) } ?? entry.ids
+        let kept = entry.ids.filter { !released.contains($0) }
+        engagedByTarget[targetID] = kept.isEmpty ? nil : (entry.generation, kept)
+        for id in released.reversed() { groupController.setDeviceSelected(id, false) }
+    }
+
     /// The wire copy for `Snapshot.takeoverStatus` — the same plain language
     /// as the popover's takeover strip. Duplicated because
     /// `PopoverController.takeoverStatusText(for:)` is internal to
     /// `AudioutPopoverUI`; keep the two in sync (follow-up: make that helper
     /// public and delete this copy).
-    private nonisolated static func takeoverText(_ status: TakeoverStatus) -> String {
+    nonisolated static func takeoverText(_ status: TakeoverStatus) -> String {
         switch status {
         case .needsApproval:
             return "Speaker Sync needs permission to run. Open Login Items to approve it."
@@ -591,10 +806,39 @@ public final class CompanionCoordinator {
         }
     }
 
+    /// The wire copy for the routing-blocked note — the popover's
+    /// `PopoverController.routingBlockedNeedsDefaultText`. Duplicated because
+    /// that copy is internal to `AudioutPopoverUI`; keep the two in sync.
+    nonisolated static var routingBlockedText: String {
+        "\(AggregateOutputDevice.productName) isn't your Mac's output device. Audio won't play until you switch back."
+    }
+
+    /// The wire copy for the double-path note — the popover's
+    /// `PopoverController.systemAirPlayNoteText`. Duplicated because that copy
+    /// is internal to `AudioutPopoverUI`; keep the two in sync.
+    nonisolated static let doublePathText =
+        "Your Mac's system output is also set to AirPlay. Audio may play twice. Switch it back to avoid an echo."
+
+    /// The one Mac-wide note the popover would show, in its precedence order
+    /// (`PopoverController.resolvedSystemAirPlayNote`): capture failed, then
+    /// routing blocked, then a takeover status, then the double path. Licence
+    /// and trial notes never reach the phone.
+    nonisolated static func noteSlot(captureFailure: String?, routingBlocked: Bool,
+                                     takeover: TakeoverStatus?,
+                                     doublePath: Bool) -> (text: String, severity: String)? {
+        if let captureFailure { return (captureFailure, "warning") }
+        if routingBlocked { return (routingBlockedText, "warning") }
+        if let takeover {
+            return (takeoverText(takeover), takeover == .timedOut ? "warning" : "info")
+        }
+        if doublePath { return (doublePathText, "info") }
+        return nil
+    }
+
     // MARK: Speaker clicks (the audition)
 
     private func handleAlignmentTick(
-        targetID: String, active: Bool, clientID: UUID,
+        targetID: String, active: Bool, referenceID requestedReferenceID: String?, clientID: UUID,
         reply: @escaping @Sendable (CompanionServer.CommandResult) -> Void
     ) {
         if let reason = CompanionCommandDispatcher.alignmentTargetIDRefusal(targetID) {
@@ -627,7 +871,7 @@ public final class CompanionCoordinator {
         }
         let referenceID: String
         switch CompanionAlignmentPreconditions.evaluate(
-            targetID: targetID, among: alignmentDevices,
+            targetID: targetID, referenceID: requestedReferenceID, among: alignmentDevices,
             isAudible: groupController.isMainOutMember
         ) {
         case .refused(let reason):
@@ -635,12 +879,22 @@ public final class CompanionCoordinator {
             return
         case .ready(let id): referenceID = id
         }
+        var engagedNow: [String] = []
+        let engageRefusal = engage(targetID, forTarget: targetID, newlyEngaged: &engagedNow)
+            ?? engage(referenceID, forTarget: targetID, newlyEngaged: &engagedNow)
+        let generation = engagedByTarget[targetID]?.generation ?? 0
+        if let reason = engageRefusal {
+            releaseEngaged(forTarget: targetID, only: engagedNow, generation: generation)
+            reply(.init(applied: false, refusalReason: reason))
+            return
+        }
         let entry: CompanionAlignmentOwnership.Entry
         let isFreshClaim: Bool
         switch alignmentOwners.claim(targetID: targetID, clientID: clientID, kind: .audition,
                                      referenceID: referenceID,
                                      leaseDeadline: Date().addingTimeInterval(600)) {
         case .refused(let reason):
+            releaseEngaged(forTarget: targetID, only: engagedNow, generation: generation)
             reply(.init(applied: false, refusalReason: reason))
             return
         case .fresh(let fresh):
@@ -676,13 +930,15 @@ public final class CompanionCoordinator {
                     return
                 }
                 if let reason {
+                    self.releaseEngaged(forTarget: targetID, only: engagedNow,
+                                        generation: generation)
                     reply(.init(applied: false, refusalReason: reason))
                     self.scheduleBroadcast()
                     return
                 }
                 let samePair: Bool
                 switch CompanionAlignmentPreconditions.evaluate(
-                    targetID: targetID, among: self.alignmentDevices,
+                    targetID: targetID, referenceID: referenceID, among: self.alignmentDevices,
                     isAudible: self.groupController.isMainOutMember
                 ) {
                 case .ready(let currentReference): samePair = currentReference == referenceID
@@ -724,9 +980,14 @@ public final class CompanionCoordinator {
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow)) {
             [weak self] in
             guard let self else { return }
+            // The phone may never follow an expiry with a cancel, so the
+            // run's selections go back here.
             self.alignmentOwners.expireAudition(
                 targetID: targetID, requestID: requestID,
-                stopAudition: { [weak self] id in self?.stopAudition(targetID: id) })
+                stopAudition: { [weak self] id in
+                    self?.releaseEngaged(forTarget: id)
+                    self?.stopAudition(targetID: id)
+                })
         }
     }
 
@@ -738,7 +999,7 @@ public final class CompanionCoordinator {
                   !entry.cleanupRequested else { return }
             let samePair: Bool
             switch CompanionAlignmentPreconditions.evaluate(
-                targetID: targetID, among: self.alignmentDevices,
+                targetID: targetID, referenceID: referenceID, among: self.alignmentDevices,
                 isAudible: self.groupController.isMainOutMember
             ) {
             case .ready(let currentReference): samePair = currentReference == referenceID
@@ -756,9 +1017,68 @@ public final class CompanionCoordinator {
         }
     }
 
-    // MARK: The eight sync-calibration actuators
+    // MARK: The nine sync-calibration actuators
 
-    /// The eight sync-calibration actuators the companion dispatcher calls.
+    /// The preamble a phone's prepare and start share: the Decision 5
+    /// preconditions, the target and reference engaged, the probe owner
+    /// claimed — then `act`, with everything given back if it refuses.
+    private func claimAndRunProbe(
+        targetID: String, requestedReferenceID: String?, clientID: UUID?,
+        _ act: (BTOutputControlling, String) -> String?
+    ) -> String? {
+        guard let bt = self.backend as? BTOutputControlling else {
+            return "This Mac can't measure speaker timing."
+        }
+        if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
+        let referenceID: String
+        switch CompanionAlignmentPreconditions.evaluate(
+            targetID: targetID,
+            referenceID: requestedReferenceID,
+            among: self.alignmentDevices,
+            isAudible: self.groupController.isMainOutMember
+        ) {
+        case .refused(let reason):
+            return reason
+        case .ready(let id):
+            referenceID = id
+        }
+        var engagedNow: [String] = []
+        let engageRefusal = self.engage(targetID, forTarget: targetID, newlyEngaged: &engagedNow)
+            ?? self.engage(referenceID, forTarget: targetID, newlyEngaged: &engagedNow)
+        let generation = self.engagedByTarget[targetID]?.generation ?? 0
+        if let reason = engageRefusal {
+            self.releaseEngaged(forTarget: targetID, only: engagedNow, generation: generation)
+            return reason
+        }
+        // Claimed BEFORE the backend call, so a second phone is refused
+        // rather than racing it, and given back if the run never staged
+        // — but ONLY if this call is what created it. A repeat request
+        // joins the run already going, and giving THAT back would erase
+        // the owner the first run's events are addressed to.
+        var claim: CompanionAlignmentOwnership.Claim?
+        if let clientID {
+            let attempt = self.alignmentOwners.claim(
+                targetID: targetID, clientID: clientID, kind: .probe,
+                referenceID: referenceID, leaseDeadline: nil)
+            if case .refused(let reason) = attempt {
+                self.releaseEngaged(forTarget: targetID, only: engagedNow,
+                                    generation: generation)
+                return reason
+            }
+            claim = attempt
+        }
+        let refusal = act(bt, referenceID)
+        if refusal != nil {
+            self.releaseEngaged(forTarget: targetID, only: engagedNow,
+                                generation: generation)
+            if let claim {
+                self.alignmentOwners.releaseFresh(claim, targetID: targetID)
+            }
+        }
+        return refusal
+    }
+
+    /// The nine sync-calibration actuators the companion dispatcher calls.
     ///
     /// Decision 5's preconditions and the sentences they refuse with live in
     /// `CompanionAlignmentPreconditions`, not here. What remains here is
@@ -767,50 +1087,62 @@ public final class CompanionCoordinator {
     /// live delay line, and whether anything else is already running.
     private func makeAlignmentActions() -> CompanionAlignmentActions {
         CompanionAlignmentActions(
-            startProbe: { [weak self] targetID, clientID in
-                guard let self, let bt = self.backend as? BTOutputControlling else {
-                    return "This Mac can't measure speaker timing."
+            prepareProbe: { [weak self] targetID, requestedReferenceID, clientID in
+                guard let self else { return "This Mac can't measure speaker timing." }
+                let refusal = self.claimAndRunProbe(
+                    targetID: targetID, requestedReferenceID: requestedReferenceID,
+                    clientID: clientID) { bt, referenceID in
+                        bt.prepareCompanionAlignmentProbe(targetID: targetID, referenceID: referenceID)
+                    }
+                if refusal == nil { self.preparedProbeTargets.insert(targetID) }
+                return refusal
+            },
+            startProbe: { [weak self] targetID, requestedReferenceID, clientID in
+                guard let self else { return "This Mac can't measure speaker timing." }
+                let refusal = self.claimAndRunProbe(
+                    targetID: targetID, requestedReferenceID: requestedReferenceID,
+                    clientID: clientID) { bt, referenceID in
+                        bt.startCompanionAlignmentProbe(
+                            targetID: targetID, referenceID: referenceID,
+                            onStarted: { [weak self] roomDelaySeconds in
+                                self?.sendProbeEvent(targetID: targetID, started: true,
+                                                     roomDelaySeconds: roomDelaySeconds)
+                            },
+                            onFinished: { [weak self] in
+                                self?.sendProbeEvent(targetID: targetID, started: false)
+                            })
+                    }
+                guard refusal != nil else {
+                    self.preparedProbeTargets.remove(targetID)
+                    return nil
                 }
-                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
-                let referenceID: String
-                switch CompanionAlignmentPreconditions.evaluate(
-                    targetID: targetID,
-                    among: self.alignmentDevices,
-                    isAudible: self.groupController.isMainOutMember
-                ) {
-                case .refused(let reason):
-                    return reason
-                case .ready(let id):
-                    referenceID = id
-                }
-                // Claimed BEFORE the backend call, so a second phone is refused
-                // rather than racing it, and given back if the run never staged
-                // — but ONLY if this call is what created it. A repeat request
-                // joins the run already going, and giving THAT back would erase
-                // the owner the first run's events are addressed to.
-                var claim: CompanionAlignmentOwnership.Claim?
-                if let clientID {
-                    let attempt = self.alignmentOwners.claim(
-                        targetID: targetID, clientID: clientID, kind: .probe,
-                        referenceID: referenceID, leaseDeadline: nil)
-                    if case .refused(let reason) = attempt { return reason }
-                    claim = attempt
-                }
-                let refusal = bt.startCompanionAlignmentProbe(
-                    targetID: targetID, referenceID: referenceID,
-                    onStarted: { [weak self] in
-                        self?.sendProbeEvent(targetID: targetID, started: true)
-                    },
-                    onFinished: { [weak self] in
-                        self?.sendProbeEvent(targetID: targetID, started: false)
-                    })
-                if refusal != nil, let claim {
-                    self.alignmentOwners.releaseFresh(claim, targetID: targetID)
+                // The phone sends no cancel after a refused start, so a run it
+                // prepared would hold the room silent, and its owner and
+                // speakers would stay held, until the sheet closes. A start
+                // that joined that preparation got the existing claim, which
+                // the refusal path above does not give back, so both go here.
+                // Only this phone's preparation (or an unowned one): another
+                // phone's is not this refusal's to end.
+                let owner = self.alignmentOwners.current(targetID: targetID)
+                if owner == nil || (owner?.kind == .probe && owner?.clientID == clientID) {
+                    (self.backend as? BTOutputControlling)?
+                        .standDownPreparedCompanionAlignmentProbe(targetID: targetID)
+                    if self.alignmentOwners.endPreparedProbe(
+                        targetID: targetID, .startRefused(clientID: clientID),
+                        prepared: &self.preparedProbeTargets) {
+                        self.releaseEngaged(forTarget: targetID)
+                    }
                 }
                 return refusal
             },
             cancelProbe: { [weak self] targetID, clientID in
                 guard let self else { return nil }
+                // The asking phone's own run (or nobody's) gives its speakers
+                // back now, even while its clicks still drain below.
+                let owner = self.alignmentOwners.current(targetID: targetID)
+                if owner == nil || owner?.clientID == clientID {
+                    self.releaseEngaged(forTarget: targetID)
+                }
                 // Cancel is the legacy family's exit, never the audition's:
                 // that one is stopped by its own tick command.
                 if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
@@ -825,6 +1157,7 @@ public final class CompanionCoordinator {
                         return "Another phone is using these speaker clicks."
                     }
                 }
+                self.preparedProbeTargets.remove(targetID)
                 (self.backend as? BTOutputControlling)?
                     .cancelCompanionAlignmentProbe(targetID: targetID)
                 return nil
@@ -975,10 +1308,10 @@ public final class CompanionCoordinator {
             })
     }
 
-    /// The speaker a run for `targetID` would be measured against — the SAME
-    /// rule, over the same inputs, that puts `referenceID` in every snapshot.
-    /// One function, so the phone's CTA and what a run actually plays can
-    /// never be two different speakers.
+    /// The Mac's default speaker for a run on `targetID` to be measured
+    /// against — the SAME rule, over the same inputs, that puts `referenceID`
+    /// in every snapshot. The phone may name another candidate for its run;
+    /// the demo always plays this default.
     ///
     /// `isMainOutMember` is the audible read, never `isSpeakerSelected`: under
     /// a saved-group Main Out target the latter is wrong in both directions,
@@ -1002,7 +1335,8 @@ public final class CompanionCoordinator {
 
     /// Address one of the run's two moments back to the phone that staged it,
     /// and to nobody else. Fired from the pacer's own thread, so it hops.
-    private nonisolated func sendProbeEvent(targetID: String, started: Bool) {
+    private nonisolated func sendProbeEvent(targetID: String, started: Bool,
+                                             roomDelaySeconds: TimeInterval? = nil) {
         DispatchQueue.main.async { [weak self] in
             // A probe event goes only to a CURRENT probe owner: an audition or
             // a later job on the same speaker is not this run's audience.
@@ -1014,7 +1348,8 @@ public final class CompanionCoordinator {
                 // The Mac runs one alignment at a time, so a by-ear sheet
                 // open on this same speaker has been superseded.
                 self.host?.alignmentRunStarted(deviceID: targetID)
-                self.server.sendAlignmentProbeStarted(deviceID: targetID, to: clientID)
+                self.server.sendAlignmentProbeStarted(
+                    deviceID: targetID, roomDelaySeconds: roomDelaySeconds, to: clientID)
             } else {
                 self.server.sendAlignmentProbeFinished(deviceID: targetID, to: clientID)
             }

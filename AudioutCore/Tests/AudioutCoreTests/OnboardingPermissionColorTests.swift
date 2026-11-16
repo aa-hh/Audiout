@@ -29,22 +29,17 @@ import AppKit
 /// remap, just not via `accentDynamic`) don't trip it.
 ///
 /// Nested into `SerializedSharedState` alongside `SettingsAccentAndHintsTests`
-/// — both mutate the process-global `Tokens.accentStyle` (see the `deinit`
-/// below), and running concurrently under swift-testing produced real,
+/// — both mutate the process-global `Tokens.accentStyle` (each test that
+/// moves the dial restores it with `defer` on the main actor, since a
+/// `deinit` runs on the test runner's thread and the setter's notification
+/// would repaint AppKit views there), and running concurrently under swift-
+/// testing produced real,
 /// reproducible test failures (a concurrent accent-style write racing this
 /// suite's color comparisons).
 extension SerializedSharedState {
 
 @MainActor
 @Suite final class OnboardingPermissionColorTests: IsolatedSuite {
-
-    deinit {
-        // `Tokens.accentStyle` is process-global (the live remap seam) —
-        // restore the flagship default so no other test in this suite, or a
-        // later golden render in this process, inherits a dialed accent.
-        // Same discipline as `SettingsAccentAndHintsTests.tearDown`.
-        Tokens.accentStyle = .fullGold
-    }
 
     // MARK: - Ported helpers (see file doc comment for provenance)
 
@@ -128,12 +123,14 @@ extension SerializedSharedState {
     // MARK: 1 — Distinctness in both dial columns (Q1)
 
     @Test func everyTokenIsMutuallyDistinctInFullGold() {
+        defer { Tokens.accentStyle = .fullGold }
         Tokens.accentStyle = .fullGold
         assertMutuallyDistinct(appearance: .darkAqua)
         assertMutuallyDistinct(appearance: .aqua)
     }
 
     @Test func everyTokenIsMutuallyDistinctInSubtle() {
+        defer { Tokens.accentStyle = .fullGold }
         Tokens.accentStyle = .subtle
         assertMutuallyDistinct(appearance: .darkAqua)
         assertMutuallyDistinct(appearance: .aqua)
@@ -146,6 +143,7 @@ extension SerializedSharedState {
     /// tokens), across `.fullGold`/`.subtle` and `.darkAqua`/`.aqua` — the
     /// full tokens x 2 columns x 2 appearances x 2 surfaces sweep.
     @Test func contrastFloorClearsInBothDialColumnsBothAppearancesBothSurfaces() {
+        defer { Tokens.accentStyle = .fullGold }
         let floor: CGFloat = 3.0
         for style: AccentStyle in [.fullGold, .subtle] {
             Tokens.accentStyle = style
@@ -168,6 +166,7 @@ extension SerializedSharedState {
     // MARK: 3 — the dial genuinely mutes all five in .subtle (Q5)
 
     @Test func subtleActuallyChangesEveryTokenFromFullGold() {
+        defer { Tokens.accentStyle = .fullGold }
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             Tokens.accentStyle = .fullGold
             let full = permissionTokens.map { (name: $0.name, color: resolved($0.color, appearanceName: appearance)) }
@@ -192,6 +191,7 @@ extension SerializedSharedState {
     /// on paper since 2026-09-17, which `TokenContrastMatrixTests` lists as
     /// the one accepted exception.
     @Test func goldOnRaisedClearsTheGlyphFloorInBothDialColumnsAndAppearances() {
+        defer { Tokens.accentStyle = .fullGold }
         let floor: CGFloat = 3.0
         for style: AccentStyle in [.fullGold, .subtle] {
             Tokens.accentStyle = style
@@ -216,6 +216,7 @@ extension SerializedSharedState {
     /// `TokenContrastMatrixTests` lists. Re-measured here rather than
     /// trusted from the tokens' written rationales.
     @Test func goldFillTakesInkOnFillAndClearsTheCanvasFloorInBothAppearances() {
+        defer { Tokens.accentStyle = .fullGold }
         Tokens.accentStyle = .fullGold
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             let fill = resolved(Tokens.Color.gold, appearanceName: appearance)

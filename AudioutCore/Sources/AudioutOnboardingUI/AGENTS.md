@@ -21,12 +21,9 @@ panel that asks for the six grants one at a time.
 - Grant choreography fires on the transition into complete, never on a repaint.
 - `SetupFlowModel` is built in the controller's `init`; building it later opens the wrong card.
 - `DemoPaneView` is an approved custom-drawn exception; draw everything, never bundle screenshots.
-- `EmitterFieldView` generates its shader from the shared field; never retype those numbers.
-- Field scenes are uniform-driven, never CAAnimation, so Reduce Motion keeps stills.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
 ## Map
 
 - `OnboardingWindowController` → owns the Setup window and its floating level.
 - `DemoPaneView` → custom-drawn rehearsal of the prompt each step raises.
-- `EmitterFieldView` → Metal emitter field behind the licence window.

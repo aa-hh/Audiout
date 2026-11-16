@@ -39,7 +39,7 @@ import Testing
         maxConnections: Int,
         idleDeadline: TimeInterval = 30,
         sending request: String? = nil
-    ) throws -> (reason: String, peer: String)? {
+    ) async throws -> (reason: String, peer: String)? {
         let server = CastLiveAudioServer(
             source: SineSource(),
             loopbackOnly: true,
@@ -54,8 +54,7 @@ import Testing
         server.start { result in
             if case .success(let port) = result { bound.set(port) }
         }
-        var deadline = Date().addingTimeInterval(2)
-        while bound.value == nil && Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
+        await SuiteWait.until("the live audio server binds a loopback port") { bound.value != nil }
         let port = try #require(bound.value, "live audio server never bound a loopback port")
 
         let connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
@@ -64,20 +63,21 @@ import Testing
         if let request {
             connection.send(content: Data(request.utf8), completion: .contentProcessed { _ in })
         }
-        deadline = Date().addingTimeInterval(2)
-        while refused.value == nil && Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
+        // Explicit: a served connection is never refused, so expiry is the
+        // answer `staysSilentForAConnectionItServed` wants.
+        await SuiteWait.until(timeout: 2) { refused.value != nil }
         return refused.value
     }
 
-    @Test func reportsThePeerItTurnedAway() throws {
-        let reported = try refusal(allowedPeer: "10.0.0.1", maxConnections: 32)
+    @Test func reportsThePeerItTurnedAway() async throws {
+        let reported = try await refusal(allowedPeer: "10.0.0.1", maxConnections: 32)
         let refused = try #require(reported, "a connection from the wrong peer was refused with no report")
         #expect(refused.reason == "wrong_peer")
         #expect(refused.peer.contains("127.0.0.1"))
     }
 
-    @Test func reportsAConnectionCapRefusal() throws {
-        let reported = try refusal(allowedPeer: nil, maxConnections: 0)
+    @Test func reportsAConnectionCapRefusal() async throws {
+        let reported = try await refusal(allowedPeer: nil, maxConnections: 0)
         let refused = try #require(reported, "a connection over the cap was refused with no report")
         #expect(refused.reason == "max_connections")
         #expect(refused.peer.contains("127.0.0.1"))
@@ -86,8 +86,8 @@ import Testing
     /// A receiver that connects and then asks for nothing is cancelled at the
     /// idle deadline. That drop was the third silent one, so it looked from
     /// the log exactly like a receiver that never connected at all.
-    @Test func reportsAConnectionDroppedForIdleness() throws {
-        let reported = try refusal(allowedPeer: nil, maxConnections: 32, idleDeadline: 0.3)
+    @Test func reportsAConnectionDroppedForIdleness() async throws {
+        let reported = try await refusal(allowedPeer: nil, maxConnections: 32, idleDeadline: 0.3)
         let refused = try #require(reported, "a connection dropped at the idle deadline was closed with no report")
         #expect(refused.reason == "idle_timeout")
         #expect(refused.peer.contains("127.0.0.1"))
@@ -96,8 +96,8 @@ import Testing
     /// The deadline is cancelled the moment a complete request head arrives,
     /// so a GET that was served is never a refusal — however long the stream
     /// then runs past that deadline.
-    @Test func staysSilentForAConnectionItServed() throws {
-        let reported = try refusal(
+    @Test func staysSilentForAConnectionItServed() async throws {
+        let reported = try await refusal(
             allowedPeer: nil,
             maxConnections: 32,
             idleDeadline: 0.3,

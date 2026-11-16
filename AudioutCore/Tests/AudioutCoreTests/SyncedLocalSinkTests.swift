@@ -16,14 +16,14 @@ import AVFoundation
     @Test func totalDelayNanos_subtractsLatencyAndMargin() {
         // 100 ms presentation − 10 ms local latency − 3 ms safety = 87 ms.
         let delay = SyncTiming.totalDelayNanos(
-            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3)
+            presentationDelayMs: 100, localOutputLatencySeconds: 10.0 / 1_000, safetyMarginMs: 3)
         #expect(delay == 87_000_000)
     }
 
     @Test func totalDelayNanos_clampsAtZero() {
         // Local latency larger than the AirPlay buffer would go negative → clamp 0.
         let delay = SyncTiming.totalDelayNanos(
-            presentationDelayMs: 5, localOutputLatencySeconds: 0.050, safetyMarginMs: 3)
+            presentationDelayMs: 5, localOutputLatencySeconds: 50.0 / 1_000, safetyMarginMs: 3)
         #expect(delay == 0)
     }
 
@@ -33,9 +33,9 @@ import AVFoundation
         // Omitting `userOffsetMs` must be identical to passing 0 — existing
         // callers (T-SINK/T-LIFECYCLE) that predate T-OFFSET-UI stay unaffected.
         let withDefault = SyncTiming.totalDelayNanos(
-            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3)
+            presentationDelayMs: 100, localOutputLatencySeconds: 10.0 / 1_000, safetyMarginMs: 3)
         let withExplicitZero = SyncTiming.totalDelayNanos(
-            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3, userOffsetMs: 0)
+            presentationDelayMs: 100, localOutputLatencySeconds: 10.0 / 1_000, safetyMarginMs: 3, userOffsetMs: 0)
         #expect(withDefault == withExplicitZero)
         #expect(withDefault == 87_000_000)
     }
@@ -44,14 +44,14 @@ import AVFoundation
         // 100 ms presentation − 10 ms latency − 3 ms safety = 87 ms base, +50 ms
         // user bias → 137 ms. The offset is a straightforward additive shift.
         let delay = SyncTiming.totalDelayNanos(
-            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3, userOffsetMs: 50)
+            presentationDelayMs: 100, localOutputLatencySeconds: 10.0 / 1_000, safetyMarginMs: 3, userOffsetMs: 50)
         #expect(delay == 137_000_000)
     }
 
     @Test func totalDelayNanos_negativeUserOffset_shiftsTargetEarlier() {
         // Same 87 ms base, −20 ms user bias → 67 ms.
         let delay = SyncTiming.totalDelayNanos(
-            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3, userOffsetMs: -20)
+            presentationDelayMs: 100, localOutputLatencySeconds: 10.0 / 1_000, safetyMarginMs: 3, userOffsetMs: -20)
         #expect(delay == 67_000_000)
     }
 
@@ -59,7 +59,7 @@ import AVFoundation
         // A negative offset large enough to push the total below zero must still
         // floor at 0 — a delay can never be negative, whatever the user dials in.
         let delay = SyncTiming.totalDelayNanos(
-            presentationDelayMs: 100, localOutputLatencySeconds: 0.010, safetyMarginMs: 3, userOffsetMs: -1_000)
+            presentationDelayMs: 100, localOutputLatencySeconds: 10.0 / 1_000, safetyMarginMs: 3, userOffsetMs: -1_000)
         #expect(delay == 0)
     }
 
@@ -68,10 +68,10 @@ import AVFoundation
         // offset by N ms shifts the resulting delay by exactly N ms, regardless of
         // the base terms — as long as the result doesn't hit the zero floor.
         let base = SyncTiming.totalDelayNanos(
-            presentationDelayMs: 300, localOutputLatencySeconds: 0.005, safetyMarginMs: 3)
+            presentationDelayMs: 300, localOutputLatencySeconds: 5.0 / 1_000, safetyMarginMs: 3)
         for offsetMs in [-200, -1, 1, 42, 400] {
             let shifted = SyncTiming.totalDelayNanos(
-                presentationDelayMs: 300, localOutputLatencySeconds: 0.005, safetyMarginMs: 3,
+                presentationDelayMs: 300, localOutputLatencySeconds: 5.0 / 1_000, safetyMarginMs: 3,
                 userOffsetMs: Double(offsetMs))
             #expect(shifted == base + Int64(offsetMs) * 1_000_000)
         }
@@ -114,7 +114,7 @@ import AVFoundation
     /// same floor as any other combination that would otherwise underflow.
     @Test func totalDelayNanos_zeroPresentationDelay_clampsAtZero() {
         let delay = SyncTiming.totalDelayNanos(
-            presentationDelayMs: 0, localOutputLatencySeconds: 0.001, safetyMarginMs: 3)
+            presentationDelayMs: 0, localOutputLatencySeconds: 1.0 / 1_000, safetyMarginMs: 3)
         #expect(delay == 0)
     }
 
@@ -124,7 +124,7 @@ import AVFoundation
     /// unsigned-wraparound) delay.
     @Test func totalDelayNanos_negativePresentationDelay_clampsAtZero() {
         let delay = SyncTiming.totalDelayNanos(
-            presentationDelayMs: -50, localOutputLatencySeconds: 0.010, safetyMarginMs: 3)
+            presentationDelayMs: -50, localOutputLatencySeconds: 10.0 / 1_000, safetyMarginMs: 3)
         #expect(delay == 0)
     }
 
@@ -592,7 +592,7 @@ import AVFoundation
     @Test func enqueue_singleChunkLargerThanRingCapacity_isSilentlyDroppedNotCrash() {
         // maxBufferedSeconds tiny ⇒ a ring of only a few dozen samples' capacity.
         let sink = SyncedLocalSink(
-            renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 0.001,
+            renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 1.0 / 1_000,
             presentationDelayMs: { 5 }, localOutputLatency: { nil })
 
         // Far more frames than the ring could ever hold.
@@ -622,7 +622,7 @@ import AVFoundation
     /// dropped for lack of space.
     @Test func enqueue_sustainedOverflow_drainsAcceptedPrefixInOrderWithoutCorruption() {
         let sink = SyncedLocalSink(
-            renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 0.001,
+            renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 1.0 / 1_000,
             presentationDelayMs: { 1 }, localOutputLatency: { nil })
 
         let anchorSec = 100
@@ -931,7 +931,7 @@ import AVFoundation
     /// counts nothing.
     @Test func enqueue_ringOverflow_countsDroppedWrites() {
         let sink = SyncedLocalSink(
-            renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 0.001,
+            renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 1.0 / 1_000,
             presentationDelayMs: { 5 }, localOutputLatency: { nil })
 
         // A small chunk that fits counts nothing.
@@ -979,7 +979,7 @@ extension SerializedSharedState {
             defer { Telemetry._installTestSink(nil) }
 
             let sink = SyncedLocalSink(
-                renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 0.001,
+                renderSampleRate: 48_000, channelCount: 1, maxBufferedSeconds: 1.0 / 1_000,
                 presentationDelayMs: { 5 }, localOutputLatency: { nil })
 
             func overflowLines() -> [String] {

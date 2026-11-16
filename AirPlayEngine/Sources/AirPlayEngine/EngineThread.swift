@@ -38,6 +38,11 @@ final class EngineThread: @unchecked Sendable {
     /// check and the schedule and race `stop()` against it.
     var beforeScheduleForTesting: (() -> Void)?
 
+    /// Test-only seam, `nil` in production. Invoked by `stop()` when it finds
+    /// `baseLock` already held, just before it blocks on it, so a test can see
+    /// `stop()` waiting behind an in-flight `enqueue`.
+    var stopFoundBaseLockHeldForTesting: (() -> Void)?
+
     private let log = Logger(subsystem: "com.airplayengine", category: "engine-thread")
 
     // B4: tracked-enqueue registry. A closure scheduled via `event_base_once`
@@ -396,7 +401,10 @@ final class EngineThread: @unchecked Sendable {
     /// DELIBERATELY LEAK the thread + event_base rather than hang: a leaked thread
     /// is a bounded one-time cost; a hung actor wedges every later engine call.
     func stop() {
-        baseLock.lock()
+        if !baseLock.try() {
+            stopFoundBaseLockHeldForTesting?()
+            baseLock.lock()
+        }
         guard !stopped, let base = _base else {
             baseLock.unlock()
             return

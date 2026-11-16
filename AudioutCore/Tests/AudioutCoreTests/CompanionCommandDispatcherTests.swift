@@ -28,7 +28,8 @@ import AudioutProtocol
     @Test func cancelProbeReceivesTheAskingClient() async throws {
         let seen = DispatcherCancelSpy()
         let actions = CompanionAlignmentActions(
-            startProbe: { _, _ in nil },
+            prepareProbe: { _, _, _ in nil },
+            startProbe: { _, _, _ in nil },
             cancelProbe: { targetID, clientID in
                 seen.calls.append((targetID, clientID))
                 return nil
@@ -50,6 +51,63 @@ import AudioutProtocol
                 "the wiring layer needs the caller to refuse another phone's cancel")
     }
 
+    /// Turns red if the dispatcher drops the reference the phone named
+    /// before it reaches the wiring layer's `startProbe`.
+    @Test func startProbeReceivesTheNamedReference() async throws {
+        let seen = DispatcherStartSpy()
+        let actions = CompanionAlignmentActions(
+            prepareProbe: { _, _, _ in nil },
+            startProbe: { targetID, referenceID, _ in
+                seen.calls.append((targetID, referenceID))
+                return nil
+            },
+            cancelProbe: { _, _ in nil },
+            reportMeasurement: { _, _, _ in nil },
+            setTick: { _, _, _ in nil },
+            nudgeTrim: { _, _ in nil },
+            revertNudge: { _ in nil },
+            clearTuning: { _ in nil },
+            playDemo: { _, _ in nil })
+        let context = try await makeContext(alignmentActions: actions)
+        let result = context.dispatcher.execute(
+            .startAlignmentProbe(targetID: "speaker-1", referenceID: "mac"), clientID: UUID())
+        #expect(result.applied)
+        #expect(seen.calls.count == 1)
+        #expect(seen.calls.first?.0 == "speaker-1")
+        #expect(seen.calls.first?.1 == "mac")
+    }
+
+    /// Turns red if the dispatcher drops the reference the phone named
+    /// before it reaches the wiring layer's `prepareProbe`, or routes
+    /// `prepareAlignmentProbe` anywhere else.
+    @Test func prepareProbeReceivesTheNamedReference() async throws {
+        let seen = DispatcherStartSpy()
+        let actions = CompanionAlignmentActions(
+            prepareProbe: { targetID, referenceID, _ in
+                seen.calls.append((targetID, referenceID))
+                return nil
+            },
+            startProbe: { _, _, _ in nil },
+            cancelProbe: { _, _ in nil },
+            reportMeasurement: { _, _, _ in nil },
+            setTick: { _, _, _ in nil },
+            nudgeTrim: { _, _ in nil },
+            revertNudge: { _ in nil },
+            clearTuning: { _ in nil },
+            playDemo: { _, _ in nil })
+        let context = try await makeContext(alignmentActions: actions)
+        let result = context.dispatcher.execute(
+            .prepareAlignmentProbe(targetID: "speaker-1", referenceID: "mac"), clientID: UUID())
+        #expect(result.applied)
+        #expect(seen.calls.count == 1)
+        #expect(seen.calls.first?.0 == "speaker-1")
+        #expect(seen.calls.first?.1 == "mac")
+    }
+
+    private final class DispatcherStartSpy {
+        var calls: [(String, String?)] = []
+    }
+
     private final class DispatcherCancelSpy {
         var calls: [(String, UUID?)] = []
     }
@@ -64,6 +122,10 @@ import AudioutProtocol
         /// returning — simulates the real ~3-5s teardown/reconnect so tests can
         /// observe the dispatcher's in-flight serialization.
         var holdStartBuffer = false
+        /// How many applyStartBuffer calls have returned. The dispatcher clears
+        /// its in-flight flag on the main actor straight after the call returns,
+        /// so a test that sees this count has also seen the flag clear.
+        var finishedStartBufferApplies = 0
     }
 
     private struct Context {
@@ -73,6 +135,7 @@ import AudioutProtocol
         let settings: AppSettings
         let backend: MockBackend
         let spy: Spy
+        let speakerLibrary: SpeakerLibraryController
     }
 
     private func makeContext(fleet: [Device] = .demoFleet,
@@ -87,6 +150,9 @@ import AudioutProtocol
         let appRouting = AppRoutingController(store: AppRouteStore(directory: scratchDir), loadPersisted: false)
         let settings = AppSettings(defaults: isolatedDefaults)
         let spy = Spy()
+        let speakerLibrary = SpeakerLibraryController(store: SpeakerLibraryStore(directory: scratchDir),
+                                                      loadPersisted: false)
+        speakerLibrary.update(liveDevices: backend.devices, groups: [])
 
         let dispatcher = CompanionCommandDispatcher(
             groupController: groupController,
@@ -99,41 +165,28 @@ import AudioutProtocol
             applyStartBuffer: { ms in
                 spy.appliedStartBufferMs.append(ms)
                 while spy.holdStartBuffer {
-                    try? await Task.sleep(nanoseconds: 5_000_000)
+                    await Task.yield()
                 }
+                spy.finishedStartBufferApplies += 1
             },
-            alignmentActions: alignmentActions
+            alignmentActions: alignmentActions,
+            speakerLibrary: speakerLibrary
         )
         return Context(dispatcher: dispatcher, groupController: groupController, appRouting: appRouting,
-                       settings: settings, backend: backend, spy: spy)
+                       settings: settings, backend: backend, spy: spy, speakerLibrary: speakerLibrary)
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
-        let stream = backend.makeEventStream()
-        let box = DispatcherTestCountBox()
-        try await confirmation("fleet discovered") { discovered in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceAdded = event, await box.increment() >= count {
-                        discovered(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
-        }
+        backend.start()
+        await SuiteWait.until("the fleet to be discovered") { backend.devices.count >= count }
     }
 
-    /// Let a fire-and-forget `Task` (the `setStartBufferMs` apply path) run
-    /// before asserting on its side effect.
-    private func settle() async throws {
-        try await Task.sleep(nanoseconds: 100_000_000)
+    /// Wait until `count` fire-and-forget `setStartBufferMs` apply Tasks have
+    /// returned, before asserting on their side effect.
+    private func waitForFinishedApplies(_ ctx: Context, count: Int) async {
+        await SuiteWait.until("\(count) start-buffer applies to finish") {
+            ctx.spy.finishedStartBufferApplies >= count
+        }
     }
 
     // MARK: setDeviceSelected — round-trips SelectionResult, incl. auto-swap
@@ -177,12 +230,49 @@ import AudioutProtocol
         #expect(!ctx.groupController.isSpeakerSelected("office"))
     }
 
-    /// Not retrying the speaker after storing the password turns it red.
+    /// Turns red if a password submitted from the phone selects a speaker the
+    /// user never joined; the phone's submit must match the Mac sheet's, which
+    /// retries without inventing membership.
     @Test func submitSpeakerPasswordRetriesTheSpeaker() async throws {
         let ctx = try await makeContext()
         let result = ctx.dispatcher.execute(.submitSpeakerPassword(id: "office", password: "secret"))
         #expect(result.applied)
-        #expect(ctx.groupController.isSpeakerSelected("office"), "the retry falls back to setDeviceSelected(_, true)")
+        #expect(!ctx.groupController.isSpeakerSelected("office"), "the retry never selects; membership stays the checkbox's job")
+    }
+
+    // MARK: setSpeakerVisibility / forgetSpeakers
+
+    /// Turns red if `setSpeakerVisibility` stops writing the speaker library,
+    /// or lets the phone change This Mac's Show in Mixer choice.
+    @Test func setSpeakerVisibilityWritesTheLibraryAndRefusesThisMac() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.setSpeakerVisibility(id: "office", visibility: "hideWhenNotInUse"))
+        #expect(result.applied)
+        #expect(ctx.speakerLibrary.visibility(for: "office") == .hideWhenNotInUse)
+
+        let mac = ctx.dispatcher.execute(.setSpeakerVisibility(id: "local-mac", visibility: "hideWhenNotInUse"))
+        #expect(!mac.applied)
+        #expect(mac.refusalReason == "This Mac is always shown in the Mixer.")
+    }
+
+    /// Turns red if `forgetSpeakers` stops reaching the speaker library, or a
+    /// speaker Main Audio names gets forgotten along with the missing one.
+    @Test func forgetSpeakersForgetsARememberedSpeakerAndSkipsARoutedOne() async throws {
+        let ctx = try await makeContext()
+        try ctx.groupController.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office", "garage"],
+                                                memberVolumes: [:]))
+        try ctx.groupController.saveGroup(Group(id: "g2", name: "Upstairs", memberIDs: ["office", "attic"],
+                                                memberVolumes: [:]))
+        ctx.speakerLibrary.update(liveDevices: ctx.backend.devices, groups: ctx.groupController.groups,
+                                  mainOut: .group(id: "g2"), selectedDeviceIDs: [], appRouteDestinations: [],
+                                  routedAppNamesByDeviceID: [:], recoveryIDs: [])
+
+        let result = ctx.dispatcher.execute(.forgetSpeakers(ids: ["garage", "attic"]))
+        #expect(result.applied)
+        #expect(ctx.speakerLibrary.record(for: "garage") == nil)
+        #expect(ctx.groupController.groups.first { $0.id == "g1" }?.memberIDs == ["office"])
+        #expect(ctx.speakerLibrary.record(for: "attic") != nil, "Main Audio names it, so Forget skips it")
+        #expect(ctx.groupController.groups.first { $0.id == "g2" }?.memberIDs == ["office", "attic"])
     }
 
     // MARK: setMainOut — selected / group / refusals
@@ -557,7 +647,7 @@ import AudioutProtocol
         let ms = AppSettings.startBufferOptionsMs[1]
         let result = ctx.dispatcher.execute(.setStartBufferMs(ms: ms))
         #expect(result.applied)
-        try await settle()
+        await waitForFinishedApplies(ctx, count: 1)
         #expect(ctx.spy.appliedStartBufferMs == [ms])
     }
 
@@ -566,8 +656,12 @@ import AudioutProtocol
         let result = ctx.dispatcher.execute(.setStartBufferMs(ms: 42))
         #expect(!result.applied)
         #expect(result.refusalReason != nil)
-        try await settle()
-        #expect(ctx.spy.appliedStartBufferMs.isEmpty, "never fired for a rejected value")
+        // A valid apply queued after the rejected one: once it has run, any
+        // apply the rejected value had queued would have run before it.
+        let later = AppSettings.startBufferOptionsMs[1]
+        #expect(ctx.dispatcher.execute(.setStartBufferMs(ms: later)).applied)
+        await waitForFinishedApplies(ctx, count: 1)
+        #expect(ctx.spy.appliedStartBufferMs == [later], "never fired for a rejected value")
     }
 
     // MARK: createGroup — trust-boundary validation (findings 1, 6, 7)
@@ -779,8 +873,12 @@ import AudioutProtocol
         ctx.settings.startBufferMs = AppSettings.startBufferOptionsMs[2]
         let result = ctx.dispatcher.execute(.setStartBufferMs(ms: AppSettings.startBufferOptionsMs[2]))
         #expect(result.applied)
-        try await settle()
-        #expect(ctx.spy.appliedStartBufferMs.isEmpty, "no ~3-5s stream teardown for a value already in effect")
+        // A different value queued after the no-op: once its apply has run, any
+        // apply the no-op had queued would have run before it.
+        let later = AppSettings.startBufferOptionsMs[1]
+        #expect(ctx.dispatcher.execute(.setStartBufferMs(ms: later)).applied)
+        await waitForFinishedApplies(ctx, count: 1)
+        #expect(ctx.spy.appliedStartBufferMs == [later], "no ~3-5s stream teardown for a value already in effect")
     }
 
     @Test func setStartBufferMsRefusesWhileApplyInFlight() async throws {
@@ -792,11 +890,11 @@ import AudioutProtocol
         #expect(!second.applied, "overlapping applies would keep audio dead for the whole flood")
         #expect(second.refusalReason != nil)
         ctx.spy.holdStartBuffer = false
-        try await settle()
+        await waitForFinishedApplies(ctx, count: 1)
         #expect(ctx.spy.appliedStartBufferMs == [AppSettings.startBufferOptionsMs[1]], "the refused value never fired")
         let third = ctx.dispatcher.execute(.setStartBufferMs(ms: AppSettings.startBufferOptionsMs[2]))
         #expect(third.applied, "a fresh apply is allowed once the previous one finished")
-        try await settle()
+        await waitForFinishedApplies(ctx, count: 2)
         #expect(ctx.spy.appliedStartBufferMs == [AppSettings.startBufferOptionsMs[1], AppSettings.startBufferOptionsMs[2]])
     }
 
@@ -878,13 +976,5 @@ import AudioutProtocol
         #expect(ctx.groupController.groups.count == groupsBefore)
         #expect(ctx.appRouting.appRoutes.count == appRoutesBefore)
         #expect(ctx.groupController.selectedDeviceIDs == selectedBefore)
-    }
-}
-
-private actor DispatcherTestCountBox {
-    private var count = 0
-    func increment() -> Int {
-        count += 1
-        return count
     }
 }

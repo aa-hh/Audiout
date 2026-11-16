@@ -25,10 +25,12 @@ import Testing
 
     private func paired(
         name: String? = "JBL Flip 5", address: String? = "70-99-1c-51-8f-a8",
-        isAudioCapable: Bool = true, lastUsed: Date? = nil, deviceClassMinor: UInt32? = nil
+        isAudioCapable: Bool = true, lastUsed: Date? = nil, deviceClassMinor: UInt32? = nil,
+        vendorID: UInt16? = nil, productID: UInt16? = nil
     ) -> BTPairedRecord {
         BTPairedRecord(name: name, address: address, isAudioCapable: isAudioCapable,
-                       lastUsed: lastUsed, deviceClassMinor: deviceClassMinor)
+                       lastUsed: lastUsed, deviceClassMinor: deviceClassMinor,
+                       vendorID: vendorID, productID: productID)
     }
 
     // MARK: Transport / output filter
@@ -102,6 +104,29 @@ import Testing
         let whileDisconnected = BTDeviceEnumerator.merge(outputs: [], paired: [headphones])
         #expect(whileConnected.first?.deviceClassMinor == 0x06)
         #expect(whileDisconnected.first?.deviceClassMinor == 0x06)
+    }
+
+    /// Turns red if the `bt:<vendor>:<product>` format changes, or if the
+    /// reported ids stop riding either merge path — the phone's sync events
+    /// count by exactly this string.
+    @Test func reportedDeviceIDsBecomeTheModelOnBothMergePaths() {
+        let speaker = paired(name: "Sonos Move 2", address: "c4-38-75-0e-bf-4a",
+                             vendorID: 0x004c, productID: 0x2002)
+        let whileConnected = BTDeviceEnumerator.merge(outputs: [btOutput()], paired: [speaker])
+        let whileDisconnected = BTDeviceEnumerator.merge(outputs: [], paired: [speaker])
+        #expect(whileConnected.first?.model == "bt:004c:2002")
+        #expect(whileDisconnected.first?.model == "bt:004c:2002")
+    }
+
+    /// Turns red if the name fallback stops running when the pairing reports
+    /// no Device ID record, or if it starts answering for a name that holds no
+    /// product at all.
+    @Test func withoutReportedIDsTheNameIsMatchedAgainstTheProductList() {
+        let jbl = paired(name: "Alec's JBL Flip 6", address: "70-99-1c-51-8f-a8")
+        #expect(BTDeviceEnumerator.merge(outputs: [], paired: [jbl]).first?.model == "jblflip")
+
+        let anonymous = paired(name: "Kitchen", address: "70-99-1c-51-8f-a8")
+        #expect(BTDeviceEnumerator.merge(outputs: [], paired: [anonymous]).first?.model == nil)
     }
 
     /// A connected output no paired record claims — the paired list is empty
@@ -282,7 +307,8 @@ import Testing
         enumerator.refresh()
         script.undetermined = false   // the user denied; authorized stays false
         script.decide()
-        SuiteWait.settle(0.3)
+        // `refresh()` runs synchronously on the enumerator's queue, behind the
+        // re-enumeration the decision callback enqueued, so both have run here.
         enumerator.refresh()
         #expect(!pairedTouched.isSet, "denied ⇒ IOBluetooth is never touched")
         #expect(received.all.last?.map(\.id) == [sonosUID], "still Core-Audio-only")
@@ -340,7 +366,9 @@ import Testing
         #expect(script.requestCount == 1)
 
         enumerator.requestAuthorizationForUserAction()
-        SuiteWait.settle(0.2)
+        // Barrier: `refresh()` is synchronous on the queue the second tap was
+        // enqueued on, and this policy never asks from enumeration.
+        enumerator.refresh()
         #expect(script.requestCount == 1, "one prompt per process, however often the user taps")
 
         script.authorized = true
@@ -360,7 +388,8 @@ import Testing
         enumerator.onSnapshot = { _ in }
 
         enumerator.requestAuthorizationForUserAction()
-        SuiteWait.settle(0.2)
+        // Barrier: `refresh()` is synchronous on the queue the tap was enqueued on.
+        enumerator.refresh()
         #expect(script.requestCount == 0)
     }
 

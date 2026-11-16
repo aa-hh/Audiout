@@ -1016,8 +1016,25 @@ final class BTDeviceSink: @unchecked Sendable {
             return
         }
         guard now &- lastHealthNanos >= Self.healthIntervalNanos else { return }
+        writeHealthLineLocked(nowNanos: now, alive: alive, fed: fed, released: isReleased, at: nil)
+    }
+
+    /// Write `bt_sink_health` now, outside the periodic schedule, tagged `at`.
+    func logHealthNow(at: String) {
+        graphQueue.async { [weak self] in
+            guard let self, self.running else { return }
+            let now = Self.monotonicNowNanos()
+            self.writeHealthLineLocked(
+                nowNanos: now, alive: self.deviceIsAlive(self.deviceID),
+                fed: now &- self.lastEnqueueNanosPtr.pointee <= 1_000_000_000,
+                released: self.stateLock.withLock { self.released }, at: at)
+        }
+    }
+
+    private func writeHealthLineLocked(nowNanos now: Int64, alive: Bool, fed: Bool,
+                                       released isReleased: Bool, at: String?) {   // on graphQueue
         let snapshot = healthSnapshotLocked()
-        Telemetry.log(.localPlayback, "bt_sink_health", [
+        var fields = [
             "uid": deviceUID,
             "deviceID": String(deviceID),
             "cycles": String(snapshot.cycles),
@@ -1025,7 +1042,9 @@ final class BTDeviceSink: @unchecked Sendable {
             "released": isReleased ? "true" : "false",
             "fed": fed ? "true" : "false",
             "alive": alive ? "true" : "false",
-        ])
+        ]
+        if let at { fields["at"] = at }
+        Telemetry.log(.localPlayback, "bt_sink_health", fields)
         renderCyclesSinceHealthPtr.pointee = 0
         renderPeakSinceHealthPtr.pointee = 0
         lastHealthNanos = now
@@ -1996,6 +2015,12 @@ final class BTSyncedSink: @unchecked Sendable {
             return sinksByUID[uid]
         }
         sink?.setEQ(eq)
+    }
+
+    /// One on-demand `bt_sink_health` line per sink in `uids`, tagged `at`.
+    func logHealthNow(at: String, uids: Set<String>) {
+        let sinks = tableLock.withLock { sinksByUID.filter { uids.contains($0.key) }.values }
+        for sink in sinks { sink.logHealthNow(at: at) }
     }
 
     /// The UIDs whose delay gate has opened — the devices actually hearing

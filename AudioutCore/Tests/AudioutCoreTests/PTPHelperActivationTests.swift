@@ -152,12 +152,15 @@ extension SerializedSharedState {
     /// `.needsApproval` is the ONLY outcome the precheck can short-circuit to,
     /// and it must never appear here.
     @Test func enabledDoesNotShortCircuit() async {
+        let clock = ManualClock()
         let activator = PTPHelperActivator(
             ptpHelper: FakeHelperStatus(status: .enabled),
             machServiceName: unreachableMachServiceName(),
-            pollInterval: 0.05)
+            pollInterval: 1,
+            now: { clock.now() },
+            sleep: { clock.advance(by: $0) })
 
-        let outcome = await activator.activate(timeout: 0.3)
+        let outcome = await activator.activate(timeout: 5)
         #expect(outcome == .ready || outcome == .timingPortsUnavailable)
     }
 
@@ -165,17 +168,11 @@ extension SerializedSharedState {
     // ~15 s idle self-exit racing a longer clock wait)
 
     /// The point of the fix: a wait that never becomes ready must re-touch the
-    /// Mach service more than once, not just the one pre-loop touch. Uses a
-    /// `touchInterval` far shorter than the production 2.0 s default so the
-    /// test stays fast — the interval is injected the same way `pollInterval`
-    /// already is for `enabledDoesNotShortCircuit` above. The Mach service
-    /// name is the suite's usual unreachable one, so every touch here is
-    /// inert — this proves the RE-TOUCH SCHEDULING, not anything about a real
-    /// helper's liveness. `PTPClockProbe.isReady()` is not injected (by
-    /// design, see the suite doc comment above), but reading the real, fixed
-    /// `/airptp_shm` here is expected to stay not-ready for this timeout on a
-    /// machine with no real helper live — the same environmental assumption
-    /// `enabledDoesNotShortCircuit` already accepts.
+    /// Mach service more than once, not just the one pre-loop touch. The
+    /// intervals and timeout are simulated seconds on `ManualClock`, so they
+    /// cost no real time. The Mach service name is the suite's usual
+    /// unreachable one, so every touch here is inert — this proves the
+    /// RE-TOUCH SCHEDULING, not anything about a real helper's liveness.
     @Test func enabledRetouchesMoreThanOnceAcrossAWaitThatNeverBecomesReady() async {
         let counter = TouchCounter()
         // Widening the real timeout was tried first and did not hold: this
@@ -193,8 +190,8 @@ extension SerializedSharedState {
         let activator = PTPHelperActivator(
             ptpHelper: FakeHelperStatus(status: .enabled),
             machServiceName: unreachableMachServiceName(),
-            pollInterval: 0.02,
-            touchInterval: 0.1,
+            pollInterval: 1,
+            touchInterval: 5,
             onTouch: { counter.increment() },
             now: { clock.now() },
             sleep: { clock.advance(by: $0) },
@@ -205,7 +202,7 @@ extension SerializedSharedState {
             // test fail with one touch.
             isReady: { false })
 
-        _ = await activator.activate(timeout: 0.35)
+        _ = await activator.activate(timeout: 18)
 
         #expect(counter.count > 1, "expected more than one touch across the wait, got \(counter.count)")
     }
@@ -353,14 +350,21 @@ extension SerializedSharedState {
     /// Gate for ``GatedActivator``: lets a test hold one `activate()` call
     /// suspended mid-wait to simulate another device's takeover wait still
     /// being in flight, then release it on demand.
-    private actor Gate {
+    /// `isWaiting` turns true only once the continuation is stored, so a
+    /// test that waits for it knows a later `release()` cannot miss it.
+    private final class Gate: @unchecked Sendable {
+        private let lock = NSLock()
         private var continuation: CheckedContinuation<Void, Never>?
+        var isWaiting: Bool { lock.withLock { continuation != nil } }
         func wait() async {
-            await withCheckedContinuation { self.continuation = $0 }
+            await withCheckedContinuation { c in lock.withLock { continuation = c } }
         }
         func release() {
-            continuation?.resume()
-            continuation = nil
+            let c: CheckedContinuation<Void, Never>? = lock.withLock {
+                defer { continuation = nil }
+                return continuation
+            }
+            c?.resume()
         }
     }
 
@@ -397,14 +401,14 @@ extension SerializedSharedState {
         // cycle immediately, but must be deferred while call #1 is still
         // mid-flight.
         let call1 = Task { await activator.activate(timeout: 1) }
-        try? await Task.sleep(nanoseconds: 100_000_000)   // let call #1 register as in-flight
+        await SuiteWait.until("call #1 is parked mid-wait inside the inner activator") { gate.isWaiting }
         let call2Outcome = await activator.activate(timeout: 1)
 
         #expect(call2Outcome == .timingPortsUnavailable)
         #expect(helper.recordedCalls.isEmpty,
                 "call #2 must not cycle while call #1's takeover wait is still mid-flight")
 
-        await gate.release()
+        gate.release()
         _ = await call1.value
 
         #expect(helper.recordedCalls == ["unregister", "register"],

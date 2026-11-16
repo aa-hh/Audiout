@@ -22,6 +22,8 @@ import AudioutProtocol
 /// (the type is only ever inferred, never spelled).
 @Suite struct CompanionSnapshotBuilderTests {
 
+    private let isolation = TestIsolation(owner: "CompanionSnapshotBuilderTests")
+
     // MARK: Shared inert defaults (plain stdlib types only — see the note above)
 
     private let noExcludedBundleIDs: Set<String> = []
@@ -56,25 +58,8 @@ import AudioutProtocol
     private func makeBackend(_ fleet: [Device] = fixtureFleet) async throws -> MockBackend {
         let backend = MockBackend(fleet: fleet, staggerDiscovery: false, emitsLevels: false,
                                   simulatesDropouts: false)
-        let stream = backend.makeEventStream()
-        let box = CountBox()
-        try await confirmation("fleet discovered") { discovered in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceAdded = event, await box.increment() >= fleet.count {
-                        discovered(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
-        }
+        backend.start()
+        await SuiteWait.until("the fleet to be discovered") { backend.devices.count >= fleet.count }
         return backend
     }
 
@@ -177,6 +162,29 @@ import AudioutProtocol
             startBufferOptionsMs: defaultStartBufferOptionsMs
         )
         #expect(after.devices.first { $0.id == "speaker-b" }?.isMuted == true)
+    }
+
+    // Turns red if `GroupController.setMuted` stops forwarding the Mac to `backend.setMuted`, or the phone snapshot stops reporting the Mac's mute.
+    @Test func macRowIsMutedFollowsTheHardwareMute() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        controller.setMuted(true, for: "local")
+        await SuiteWait.until("local to read muted on the backend") {
+            backend.devices.first { $0.id == "local" }?.isMuted == true
+        }
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        let mac = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(mac.isMuted == true)
     }
 
     // MARK: Trap 3 — isMainOutMember
@@ -353,19 +361,24 @@ import AudioutProtocol
     // MARK: Connection fields (D9 full parity)
 
     /// Dropping `failureCause`, or sending `credentialKind` for a speaker that
-    /// already has a stored password (or never sending it), turns it red.
+    /// already has a stored password (or never sending it), turns it red;
+    /// so does sending a password wait as `"failed"` or with a cause, or sending
+    /// no `"onScreenCode"` credential kind for a code speaker with no pairing.
     @Test func connectionCarriesFailureHeadlineAndSuggestion() async throws {
         let backend = try await makeBackend()
         let controller = makeGroupController(backend: backend)
         let appRouting = makeAppRouting()
 
-        func build(storedPassword: Bool) -> Snapshot {
+        func build(storedPassword: Bool, awaitingPassword: Bool = false,
+                   access: AirPlayAccess = .password, cause: ConnectionFailure.Cause? = nil) -> Snapshot {
             CompanionSnapshotBuilder.build(
                 devices: backend.devices.map { device in
                     var device = device
                     if device.id == "speaker-b" {
-                        device.airPlayAccess = .password
+                        device.airPlayAccess = access
                         device.hasStoredPassword = storedPassword
+                        if awaitingPassword { device.connectionState = .awaitingPassword }
+                        if let cause { device.connectionState = .failed(ConnectionFailure(cause: cause)) }
                     }
                     return device
                 },
@@ -397,6 +410,28 @@ import AudioutProtocol
 
         let stored = try #require(build(storedPassword: true).devices.first { $0.id == "speaker-b" })
         #expect(stored.connection.credentialKind == nil)
+
+        let waiting = try #require(
+            build(storedPassword: false, awaitingPassword: true).devices.first { $0.id == "speaker-b" })
+        #expect(waiting.connection.state == "awaitingPassword")
+        #expect(waiting.connection.credentialKind == "password")
+        #expect(waiting.connection.access == "password")
+        #expect(waiting.connection.failureHeadline == nil)
+        #expect(waiting.connection.failureSuggestion == nil)
+        #expect(waiting.connection.failureCause == nil)
+
+        let code = try #require(
+            build(storedPassword: false, access: .onScreenCode).devices.first { $0.id == "speaker-b" })
+        #expect(code.connection.credentialKind == "onScreenCode")
+        let paired = try #require(
+            build(storedPassword: true, access: .onScreenCode).devices.first { $0.id == "speaker-b" })
+        #expect(paired.connection.credentialKind == nil)
+        let everyTime = try #require(
+            build(storedPassword: false, access: .onScreenCodeEveryTime, cause: .codeEveryTimeUnsupported)
+                .devices.first { $0.id == "speaker-b" })
+        #expect(everyTime.connection.access == "onScreenCodeEveryTime")
+        #expect(everyTime.connection.credentialKind == nil)
+        #expect(everyTime.connection.failureCause == "codeEveryTimeUnsupported")
     }
 
     /// Dropping `access` from the `off` or `failed` state in
@@ -457,6 +492,125 @@ import AudioutProtocol
         #expect(snapshot.settings.startBufferMs == 1500)
         #expect(snapshot.settings.startBufferOptionsMs == [1000, 1500, 2250])
         #expect(snapshot.devices.first { $0.id == "speaker-a" }?.iconSymbolName == "icon:speaker-a")
+        // Not passed above: every device reads as from an older Mac, and the
+        // two snapshot-level additions are empty.
+        #expect(snapshot.devices.allSatisfy { $0.mixerVisibility == nil && $0.isVisibleInMixer == nil })
+        #expect(snapshot.missingSpeakers == [])
+        #expect(snapshot.note == nil)
+    }
+
+    /// Turns red if the builder stops copying `Device.model` onto the row, or
+    /// invents one for a speaker that reported none — the phone's sync events
+    /// read this to say which product a measurement was taken on, and a name
+    /// must never end up in it.
+    @Test func theSpeakersModelReachesTheSnapshotAndIsNeverInvented() async throws {
+        let backend = try await makeBackend([
+            Device(id: "speaker-m", name: "Den", kind: .homePod, model: "AudioAccessory5,1"),
+            Device(id: "speaker-n", name: "Hall", kind: .sonos),
+        ])
+        let controller = makeGroupController(backend: backend)
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: makeAppRouting(),
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: [:],
+            localFallbackActive: false, takeoverStatus: nil, serverName: "Owner's Mac",
+            connectVolume: 42, connectVolumeMin: 0, connectVolumeMax: 100,
+            startBufferMs: 200, startBufferOptionsMs: [200]
+        )
+
+        #expect(snapshot.devices.first { $0.id == "speaker-m" }?.model == "AudioAccessory5,1")
+        #expect(snapshot.devices.first { $0.id == "speaker-n" }?.model == nil)
+    }
+
+    /// Turns red if `deviceState(for:)` stops reading the library record for
+    /// `mixerVisibility`/`isVisibleInMixer`, or `build` drops, reorders or
+    /// renames the missing speakers or the note it was handed.
+    @Test func speakerVisibilityMissingSpeakersAndTheNoteReachTheSnapshot() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+        let library = SpeakerLibraryController(store: SpeakerLibraryStore(directory: tempDirectory()),
+                                               loadPersisted: false)
+        library.update(liveDevices: backend.devices, groups: [])
+        library.setVisibility(.hideWhenNotInUse, for: "speaker-b")
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs,
+            speakerRecord: { library.record(for: $0.id) },
+            missingSpeakers: [(id: "gone-2", name: "Garage", kind: "sonos"),
+                              (id: "gone-1", name: "Attic", kind: nil)],
+            note: (text: "Audiout isn't your Mac's output device.", severity: "warning")
+        )
+
+        let hidden = try #require(snapshot.devices.first { $0.id == "speaker-b" })
+        #expect(hidden.mixerVisibility == "hideWhenNotInUse")
+        #expect(hidden.isVisibleInMixer == false)
+        let local = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(local.mixerVisibility == "whenAvailable")
+        #expect(local.isVisibleInMixer == true)
+        #expect(snapshot.missingSpeakers == [MissingSpeakerState(id: "gone-1", name: "Attic", kind: nil),
+                                             MissingSpeakerState(id: "gone-2", name: "Garage", kind: "sonos")])
+        #expect(snapshot.note == NoteState(text: "Audiout isn't your Mac's output device.", severity: "warning"))
+    }
+
+    /// Turns red if `deviceState(for:)` stops matching the popover's sounding
+    /// rule: Main Out membership or a live routed app, a connected session
+    /// (This Mac counts at `.off`), the speaker's own mute, or Main Audio's
+    /// mute for a member only.
+    @Test func isPlayingNeedsAConnectedUnmutedMemberAndMainAudioUnmuted() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+        controller.setDeviceSelected("speaker-a", true)
+        controller.setDeviceSelected("speaker-b", true)
+        try #require(controller.isMainOutMember("speaker-a") && controller.isMainOutMember("speaker-b"))
+
+        func playing(_ devices: [Device], in controller: GroupController,
+                     liveRoutedAppNames: [String: [String]] = [:]) -> [String: Bool?] {
+            let snapshot = CompanionSnapshotBuilder.build(
+                devices: devices, groupController: controller, appRouting: appRouting,
+                excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+                runningRouted: noRunningRouted, liveRoutedAppNames: liveRoutedAppNames,
+                localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+                connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+                connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+                startBufferOptionsMs: defaultStartBufferOptionsMs
+            )
+            return Dictionary(uniqueKeysWithValues: snapshot.devices.map { ($0.id, $0.isPlaying) })
+        }
+        let connected = [
+            Device(id: "speaker-a", name: "Speaker A", kind: .sonos, connectionState: .connected),
+            Device(id: "speaker-b", name: "Speaker B", kind: .homePod, connectionState: .connected),
+        ]
+
+        controller.setMuted(true, for: "speaker-b")
+        let mixed = playing(connected, in: controller)
+        #expect(mixed["speaker-a"] == true, "connected, unmuted member")
+        #expect(mixed["speaker-b"] == false, "muted member")
+
+        let unconnected = playing([Device(id: "speaker-a", name: "Speaker A", kind: .sonos,
+                                          connectionState: .connecting)], in: controller)
+        #expect(unconnected["speaker-a"] == false, "member not connected yet")
+
+        controller.setMainOutMuted(true)
+        let routedOnly = Device(id: "speaker-c", name: "Speaker C", kind: .sonos, connectionState: .connected)
+        let mainMuted = playing(connected + [routedOnly], in: controller,
+                                liveRoutedAppNames: ["speaker-c": ["Music"]])
+        #expect(mainMuted["speaker-a"] == false, "Main Audio muted")
+        #expect(mainMuted["speaker-c"] == true, "a live routed app plays whatever Main Audio does")
+
+        let macOnly = makeGroupController(backend: backend)
+        macOnly.setDeviceSelected("local", true)
+        try #require(macOnly.isMainOutMember("local"))
+        let mac = playing([Device(id: "local", name: "Mac", kind: .localMac, isLocalDevice: true)], in: macOnly)
+        #expect(mac["local"] == true, "This Mac sits at .off while it plays Main Audio")
     }
 
     // MARK: Main Out target mapping
@@ -693,9 +847,222 @@ import AudioutProtocol
         #expect(snapshot.devices.first { $0.id == "local" }?.alignment == nil,
                 "only Bluetooth rows ever carry an alignment")
     }
-}
 
-private actor CountBox {
-    private var count = 0
-    func increment() -> Int { count += 1; return count }
+    /// The phone shows the Mac row's own number: the report's `delayMs` (trim
+    /// plus measured latency, what the row prints as "286 ms") goes over as-is
+    /// for a tuned speaker, and stays nil for one the row reads "Not set" on.
+    /// Turns red if the builder stops copying `delayMs` onto the wire, which
+    /// sends the phone back to showing only the last run's measured gap.
+    @Test func aBluetoothRowCarriesTheRowsDelayOntoTheWireAndNilWhenNoneIsSet() async throws {
+        let backend = try await makeBackend([
+            Device(id: "local", name: "Mac", kind: .localMac, isLocalDevice: true),
+            Device(id: "bt-tuned", name: "Move", kind: .bluetooth),
+            Device(id: "bt-unset", name: "Flip", kind: .bluetooth),
+        ])
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs,
+            alignmentFor: { device in
+                switch device.id {
+                case "bt-tuned": return BTSpeakerTimingReport(status: .tuned, source: .measured, delayMs: 286)
+                case "bt-unset": return BTSpeakerTimingReport(status: .notSet)
+                default: return nil
+                }
+            }
+        )
+        #expect(snapshot.devices.first { $0.id == "bt-tuned" }?.alignment?.delayMs == 286)
+        #expect(snapshot.devices.first { $0.id == "bt-unset" }?.alignment?.delayMs == nil)
+    }
+
+    /// Turns red if the published reference or its candidate list is filtered
+    /// by Main Out membership again, if a non-local device enters the
+    /// candidate list, or if the fallback default is dropped when the Mac
+    /// exposes no hardware output.
+    @Test func theReferenceIsTheMacsOwnOutputWhateverIsSelected() async throws {
+        func alignment(of fleet: [Device], selecting ids: Set<String>) async throws
+            -> DeviceState.AlignmentState {
+            let backend = try await makeBackend(fleet)
+            let controller = makeGroupController(backend: backend)
+            for id in ids { controller.setDeviceSelected(id, true) }
+            for device in fleet where !ids.contains(device.id) {
+                controller.setDeviceSelected(device.id, false)
+            }
+            try #require(controller.selectedDeviceIDs == ids)
+            let snapshot = CompanionSnapshotBuilder.build(
+                devices: backend.devices, groupController: controller, appRouting: makeAppRouting(),
+                excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+                runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+                localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+                connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+                connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+                startBufferOptionsMs: defaultStartBufferOptionsMs,
+                alignmentFor: { $0.kind == .bluetooth ? BTSpeakerTimingReport(status: .tuned) : nil })
+            return try #require(snapshot.devices.first { $0.id == "bt-a" }?.alignment)
+        }
+        let local = Device(id: "local", name: "Mac", kind: .localMac, isLocalDevice: true)
+        let bt = Device(id: "bt-a", name: "Kitchen", kind: .bluetooth)
+        let airPlay = Device(id: "airplay", name: "Lounge", kind: .homePod)
+
+        let withMac = try await alignment(of: [local, bt, airPlay], selecting: ["bt-a"])
+        #expect(withMac.referenceID == "local")
+        #expect(withMac.referenceCandidateIDs == ["local"])
+
+        let withoutMac = try await alignment(of: [bt, airPlay], selecting: ["bt-a", "airplay"])
+        #expect(withoutMac.referenceID == "airplay")
+        #expect(withoutMac.referenceCandidateIDs == [])
+    }
+
+    // MARK: The Mac's app version
+
+    /// Turns red if the builder stops passing `macAppVersion` through to the
+    /// snapshot, or starts inventing a value when the caller gives it none.
+    @Test func macAppVersionIsAPassthroughAndDefaultsToNothing() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let given = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs,
+            macAppVersion: "1.3"
+        )
+        #expect(given.macAppVersion == "1.3")
+
+        let omitted = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(omitted.macAppVersion == nil, "a caller with no version to give sends none")
+    }
+
+    // MARK: The Mac's licence state
+
+    /// Red if any state maps to a different status or the hash stops matching
+    /// the proof's `key_hash`.
+    @Test func macLicenseMapsEveryLicenceStateToOneStatus() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let day: TimeInterval = 86_400
+        let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        let h = "6f62d73e8c909255e4e316529181272822590cba0c8512748ac133d1ba141994"
+        let settings = AppSettings(defaults: isolation.isolatedDefaults,
+                                   licenseServerURL: URL(string: "https://license.example.com")!)
+        let rows: [(String, (AppSettings) -> Void, MacLicense)] = [
+            ("no key, no trial", { _ in }, MacLicense(status: .unlicensed)),
+            ("local trial, no key", { TrialClock.start(settings: $0, now: now - day) },
+             MacLicense(status: .trial, trialEndsAt: now + 13 * day)),
+            ("active trial key", {
+                $0.licenseKey = key; $0.licenseStatus = .active
+                $0.trialStartedAt = now - day; $0.trialExpiresAt = now + 13 * day
+            }, MacLicense(status: .trial, keyHash: h, trialEndsAt: now + 13 * day)),
+            ("active trial key past its end", {
+                $0.licenseKey = key; $0.licenseStatus = .active
+                $0.trialStartedAt = now - day; $0.trialExpiresAt = now - 60
+            }, MacLicense(status: .trialEnded, keyHash: h, trialEndsAt: now - 60)),
+            ("trial key revoked as expired", {
+                $0.licenseKey = key; $0.licenseStatus = .revoked; $0.licenseReason = "trial_expired"
+            }, MacLicense(status: .trialEnded, keyHash: h)),
+            ("paid key after a trial", {
+                $0.licenseKey = key; $0.licenseStatus = .active; $0.trialStartedAt = now - 30 * day
+            }, MacLicense(status: .active, keyHash: h)),
+            ("refunded key", {
+                $0.licenseKey = key; $0.licenseStatus = .revoked; $0.licenseReason = "refund"
+            }, MacLicense(status: .revoked, keyHash: h)),
+            ("unknown key", { $0.licenseKey = key; $0.licenseStatus = .unknown },
+             MacLicense(status: .unlicensed, keyHash: h)),
+            ("key with no verdict", { $0.licenseKey = key }, MacLicense(status: .unchecked, keyHash: h)),
+            ("key typed in lower case, no verdict", { $0.licenseKey = "audt-aaaaa-bbbbb-ccccc-ddddd" },
+             MacLicense(status: .unchecked, keyHash: h)),
+            ("local trial ended, no key", { TrialClock.start(settings: $0, now: now - 15 * day) },
+             MacLicense(status: .trialEnded, trialEndsAt: now - day)),
+        ]
+        for (name, setUp, expected) in rows {
+            settings.licenseKey = nil
+            setUp(settings)
+            #expect(CompanionSnapshotBuilder.macLicense(settings: settings, now: now) == expected,
+                    Comment(rawValue: name))
+        }
+    }
+
+    /// Red if a running trial's recompute date were not its end, or a state the
+    /// clock cannot change got one. It checks only the date: AppDelegate's
+    /// timer that acts on it has no test (the app target has none).
+    @Test func theLicenceIsRecomputedWhenARunningTrialEnds() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let day: TimeInterval = 86_400
+        let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        let rows: [(String, (AppSettings) -> Void, Date?)] = [
+            ("no key, no trial", { _ in }, nil),
+            ("local trial, no key", { TrialClock.start(settings: $0, now: now - day) }, now + 13 * day),
+            ("local trial ended, no key", { TrialClock.start(settings: $0, now: now - 15 * day) }, nil),
+            ("active trial key", {
+                $0.licenseKey = key; $0.licenseStatus = .active
+                $0.trialStartedAt = now - day; $0.trialExpiresAt = now + 13 * day
+            }, now + 13 * day),
+            ("active trial key past its end", {
+                $0.licenseKey = key; $0.licenseStatus = .active
+                $0.trialStartedAt = now - day; $0.trialExpiresAt = now - 60
+            }, nil),
+            ("paid key", { $0.licenseKey = key; $0.licenseStatus = .active }, nil),
+            ("refunded key", { $0.licenseKey = key; $0.licenseStatus = .revoked }, nil),
+        ]
+        for (name, setUp, expected) in rows {
+            let settings = AppSettings(defaults: isolation.makeDefaults(),
+                                       licenseServerURL: URL(string: "https://license.example.com")!)
+            settings.licenseKey = nil
+            setUp(settings)
+            let license = CompanionSnapshotBuilder.macLicense(settings: settings, now: now)
+            #expect(CompanionSnapshotBuilder.macLicenseRecomputeAt(license, now: now) == expected,
+                    Comment(rawValue: name))
+        }
+    }
+
+    /// Red if the builder stops passing `macLicense` through to the snapshot,
+    /// or starts inventing one when the caller gives it none.
+    @Test func macLicenseIsAPassthroughAndDefaultsToNothing() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+        let license = MacLicense(status: .active, keyHash: "ab12")
+
+        let given = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs,
+            macLicense: license
+        )
+        #expect(given.macLicense == license)
+
+        let omitted = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(omitted.macLicense == nil, "a caller with no licence state to give sends none")
+    }
 }

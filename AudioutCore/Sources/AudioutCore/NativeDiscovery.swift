@@ -289,6 +289,10 @@ public final class NativeDiscovery: @unchecked Sendable {
     /// default: one browse blip is not a departure.
     public static let defaultRemoveGrace: TimeInterval = 3
 
+    /// Schedules each removal's `removeGrace` hold. Only the tests pass anything
+    /// but ``NativeBackend/dispatchDelayClock``, so they decide when a grace ends.
+    private let delayClock: NativeBackend.DelayClock
+
     /// Removal timers, keyed by device id then by service leg. Armed by
     /// `handleRemove` and fired on `queue`; a resolve of the same leg cancels
     /// that leg's timer (`handleResolve`); `stop()` clears them all.
@@ -326,11 +330,18 @@ public final class NativeDiscovery: @unchecked Sendable {
     ///   - localHostname: this machine's own mDNS hostname for the self-receiver
     ///     filter (see `localHostname` above). Defaults to the system's
     ///     `SCDynamicStoreCopyLocalHostName` + ".local"; tests inject a fixture.
-    public init(browser: ServiceBrowsing? = nil,
-                localHostname: String? = NativeDiscovery.systemLocalHostname(),
-                removeGrace: TimeInterval = NativeDiscovery.defaultRemoveGrace) {
+    public convenience init(browser: ServiceBrowsing? = nil,
+                            localHostname: String? = NativeDiscovery.systemLocalHostname(),
+                            removeGrace: TimeInterval = NativeDiscovery.defaultRemoveGrace) {
+        self.init(browser: browser, localHostname: localHostname, removeGrace: removeGrace,
+                  delayClock: NativeBackend.dispatchDelayClock)
+    }
+
+    init(browser: ServiceBrowsing?, localHostname: String?, removeGrace: TimeInterval,
+         delayClock: @escaping NativeBackend.DelayClock) {
         self.localHostname = localHostname.map(Self.normalizedHostname)
         self.removeGrace = removeGrace
+        self.delayClock = delayClock
         self.browser = browser ?? NetworkFrameworkBrowser()
         self.browser.onResolve = { [weak self] service in
             guard let self else { return }
@@ -499,7 +510,7 @@ public final class NativeDiscovery: @unchecked Sendable {
             self?.commitRemove(id: id, serviceType: serviceType)
         }
         pendingRemoves[id, default: [:]][serviceType] = work
-        queue.asyncAfter(deadline: .now() + removeGrace, execute: work)
+        delayClock(removeGrace, queue, work)
     }
 
     /// Applies a removal that outlasted `removeGrace`: clears the departed leg,
@@ -571,11 +582,13 @@ public final class NativeDiscovery: @unchecked Sendable {
         // advertised `_airplay._tcp` with the AP2 feature bits stays AP1-only.
         let isAP2 = entry.hasEverBeenAP2 || classify(airplay: entry.airplay)
         // A sticky-AP2 device that has gone offline (lost `_airplay._tcp`, only
-        // `_raop._tcp` lingers) keeps its last AP2-sourced descriptor — name,
-        // address, port, TXT all stay put — so the row doesn't cosmetically flip
-        // to the raop-decorated name just because the device powered off. It's
-        // the same physical device at the same address; only availability changed.
-        let built: DeviceDescriptor = (entry.hasEverBeenAP2 && entry.airplay == nil)
+        // `_raop._tcp` lingers) keeps its last AP2-sourced descriptor and access
+        // — name, address, port, TXT, the advertised lock all stay put — so the
+        // row doesn't cosmetically flip to the raop-decorated name, or change its
+        // lock glyph, just because the device powered off. It's the same physical
+        // device at the same address; only availability changed.
+        let carriesForward = entry.hasEverBeenAP2 && entry.airplay == nil
+        let built: DeviceDescriptor = carriesForward
             ? entry.device.descriptor
             : descriptor(from: source)
         // The `DeviceDescriptor` is the ENGINE-facing contract, so its `name`
@@ -602,7 +615,7 @@ public final class NativeDiscovery: @unchecked Sendable {
             outputID: outputID,
             isAirPlay2Supported: isAP2,
             isAvailable: available,
-            access: access(airplay: entry.airplay, raop: entry.raop)
+            access: carriesForward ? entry.device.access : access(airplay: entry.airplay, raop: entry.raop)
         )
     }
 
@@ -643,8 +656,9 @@ public final class NativeDiscovery: @unchecked Sendable {
     /// and `sf` (`_raop._tcp`) as hex status flags, plus `pw` and `act` on
     /// either record. `pw` counts when present, non-empty and not "false",
     /// the same test as the vendored `raop_device_cb` (`raop.c` ~:4446).
-    /// Precedence: Home-only (`act=2`, bit 10), then on-screen code (bits 3,
-    /// 9), then password (`pw`, bit 7).
+    /// Precedence: Home-only (`act=2`, bit 10), then on-screen code on every
+    /// join (bit 3), then on-screen code the first time only (bit 9), then
+    /// password (`pw`, bit 7).
     static func access(airplay: ResolvedService?, raop: ResolvedService?) -> AirPlayAccess {
         let records = [airplay?.txtRecord, raop?.txtRecord].compactMap { $0 }
         let flags = [airplay?.txtRecord["flags"], raop?.txtRecord["sf"]]
@@ -657,7 +671,8 @@ public final class NativeDiscovery: @unchecked Sendable {
         }
         let homeOnly = records.contains { $0["act"] == "2" }
         if homeOnly || bit(10) { return .homeMembersOnly }
-        if bit(3) || bit(9) { return .onScreenCode }
+        if bit(3) { return .onScreenCodeEveryTime }
+        if bit(9) { return .onScreenCode }
         if pw || bit(7) { return .password }
         return .open
     }

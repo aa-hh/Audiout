@@ -79,14 +79,13 @@ extension SerializedEngineState {
         /// Poll until the waiter for slot 0 is armed (see AirPlayEngineAPITests for
         /// why this can't just fire immediately), then resolve it.
         private func fireWhenArmed(id: UInt64, state: output_device_state, engine: AirPlayEngine) async throws {
-            for _ in 0..<200 {
-                if await engine.hasArmedWaiterForTest(callbackId: 0) {
-                    fireCompletion(id: id, cbIdSlot: 0, state: state)
-                    return
-                }
-                try await Task.sleep(nanoseconds: 1_000_000) // 1ms
+            await SuiteWait.until("the waiter for callbackId 0 is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
             }
-            Issue.record("waiter for callbackId 0 never armed")
+            // An actor call runs only after startOp's headless body (arm, issue) has finished.
+            if await engine.hasArmedWaiterForTest(callbackId: 0) {
+                fireCompletion(id: id, cbIdSlot: 0, state: state)
+            }
         }
 
         // MARK: - write(pcm:streamId:pts:): no cross-talk between two streams.
@@ -217,9 +216,14 @@ extension SerializedEngineState {
             let pts = timespec(tv_sec: 0, tv_nsec: 0)
 
             engine.write(pcm: pcm(samples: 15), streamId: 404, pts: pts) // no ams for 404
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            // A later write on stream 1 lands after the 404 write, so once it shows
+            // up anything the 404 write misrouted would already be counted too.
+            engine.write(pcm: pcm(samples: 5), streamId: 1, pts: pts)
+            await SuiteWait.until("the follow-up write to land on stream 1") {
+                airplay_test_master_session_input_buffer_samples(ams1) >= 5
+            }
 
-            #expect(airplay_test_master_session_input_buffer_samples(ams1) == 0,
+            #expect(airplay_test_master_session_input_buffer_samples(ams1) == 5,
                 "a write for an unregistered stream_id must not misroute onto an unrelated master session")
         }
 
@@ -291,15 +295,14 @@ extension SerializedEngineState {
             to state: output_device_state,
             engine: AirPlayEngine
         ) async throws {
-            for _ in 0..<400 {
-                if await engine.hasArmedWaiterForTest(callbackId: 0) {
-                    outputs_device_get(id)?.pointee.state = state
-                    fireCompletion(id: id, cbIdSlot: 0, state: state)
-                    return
-                }
-                try await Task.sleep(nanoseconds: 1_000_000) // 1ms
+            await SuiteWait.until("the waiter for callbackId 0 is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
             }
-            Issue.record("waiter for callbackId 0 never armed")
+            // An actor call runs only after startOp's headless body (arm, issue) has finished.
+            if await engine.hasArmedWaiterForTest(callbackId: 0) {
+                outputs_device_get(id)?.pointee.state = state
+                fireCompletion(id: id, cbIdSlot: 0, state: state)
+            }
         }
 
         /// Re-adding a live device on the stream it is ALREADY on (the converge
@@ -465,19 +468,20 @@ extension SerializedEngineState {
                 return
             }
             let engine = AirPlayEngine()
-            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.5)
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 5)
             await engine.registerKnownOutputForTest(id)
 
             async let a: OutputBindResult = engine.addOutput(id, streamId: 1)
-            for _ in 0..<200 {
-                if await engine.hasArmedWaiterForTest(callbackId: 0) { break }
-                try await Task.sleep(nanoseconds: 1_000_000) // 1ms
+            await SuiteWait.until("bind A's waiter is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
             }
             #expect(await engine.hasArmedWaiterForTest(callbackId: 0), "bind A never armed its waiter")
             #expect(device.pointee.stream_id == 1)
 
             async let b: OutputBindResult = engine.addOutput(id, streamId: 2)
-            for _ in 0..<50 { try await Task.sleep(nanoseconds: 1_000_000) } // 50ms in 1ms steps
+            await SuiteWait.until("bind B waits at the gate") {
+                engine.opWaiterCountForTest(id) == 1
+            }
             #expect(device.pointee.stream_id == 1,
                 "a second bind wrote stream_id before taking the per-output gate")
 

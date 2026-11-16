@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import CryptoKit
 import Foundation
 import AudioutProtocol
 
@@ -36,6 +37,49 @@ public enum CompanionSnapshotBuilder {
     /// Ceiling on names per device in `Snapshot.liveRoutedAppNames`
     /// (stable prefix of the backend's confirmed-streaming list).
     public static let maxLiveRoutedAppNamesPerDevice = 20
+
+    /// The Mac's licence state for the phone. Unsigned and used for wording
+    /// only; the phone never unlocks on it. Reads the keychain, so the
+    /// coordinator caches it.
+    public static func macLicense(settings: AppSettings, now: Date = Date()) -> MacLicense {
+        let keyHash = settings.licenseKey.flatMap(LicenseValidator.canonicalKey).map {
+            SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+        switch settings.licenseStatus {
+        case .active:
+            guard let expiresAt = settings.trialExpiresAt else {
+                return MacLicense(status: .active, keyHash: keyHash)
+            }
+            return MacLicense(status: now < expiresAt ? .trial : .trialEnded,
+                              keyHash: keyHash, trialEndsAt: expiresAt)
+        case .revoked:
+            if settings.licenseReason == "trial_expired" {
+                return MacLicense(status: .trialEnded, keyHash: keyHash, trialEndsAt: settings.trialExpiresAt)
+            }
+            return MacLicense(status: .revoked, keyHash: keyHash)
+        case .unknown, .invalid:
+            return MacLicense(status: .unlicensed, keyHash: keyHash)
+        case nil:
+            switch TrialClock.state(settings: settings, now: now) {
+            case .active(_, let expiresAt, _):
+                return MacLicense(status: .trial, keyHash: keyHash, trialEndsAt: expiresAt)
+            case .expired(let expiresAt):
+                return MacLicense(status: .trialEnded, keyHash: keyHash, trialEndsAt: expiresAt)
+            case .none:
+                return MacLicense(status: settings.hasLicenseKey ? .unchecked : .unlicensed, keyHash: keyHash)
+            }
+        }
+    }
+
+    /// When `license`, computed by ``macLicense(settings:now:)``, next changes
+    /// with nothing but the clock moving: the end of a running trial. Nil for
+    /// every other state, which changes only when the stored licence does.
+    /// Takes the computed licence rather than settings so callers read the
+    /// keychain once.
+    public static func macLicenseRecomputeAt(_ license: MacLicense, now: Date = Date()) -> Date? {
+        guard license.status == .trial, let end = license.trialEndsAt, end > now else { return nil }
+        return end
+    }
 
     /// - Parameters:
     ///   - devices: the live device list (already resolved by the caller —
@@ -96,6 +140,18 @@ public enum CompanionSnapshotBuilder {
     ///     ``alignmentReferenceID(forTarget:among:isAudible:)`` computes it
     ///     here and the phone's CTA and the Mac's staging can never disagree
     ///     about which speaker a run would measure against.
+    ///   - speakerRecord: the speaker library's record for a device
+    ///     (`SpeakerLibraryController.record(for:)` on the caller's side),
+    ///     backing each `DeviceState.mixerVisibility` and `isVisibleInMixer`.
+    ///     `nil` leaves both unset, which the phone reads as an older Mac.
+    ///   - missingSpeakers: the speakers the Mac remembers but cannot find
+    ///     right now, backing `Snapshot.missingSpeakers`; sorted by id here.
+    ///   - note: the Mac's note slot, backing `Snapshot.note`; `severity` is
+    ///     `"info"` or `"warning"`.
+    ///   - macAppVersion: passthrough to `Snapshot.macAppVersion`, the Mac
+    ///     app's `CFBundleShortVersionString`. `nil` from a dev run with no
+    ///     bundle to read; the phone only names it in a problem report.
+    ///   - macLicense: passthrough to `Snapshot.macLicense`.
     public static func build(
         devices: [Device],
         groupController: GroupController,
@@ -115,13 +171,22 @@ public enum CompanionSnapshotBuilder {
         connectVolumeMax: Int,
         startBufferMs: Int,
         startBufferOptionsMs: [Int],
-        alignmentFor: (Device) -> BTSpeakerTimingReport? = { _ in nil }
+        alignmentFor: (Device) -> BTSpeakerTimingReport? = { _ in nil },
+        speakerRecord: (Device) -> SpeakerPresentationRecord? = { _ in nil },
+        missingSpeakers: [(id: String, name: String, kind: String?)] = [],
+        note: (text: String, severity: String)? = nil,
+        macAppVersion: String? = nil,
+        macLicense: MacLicense? = nil
     ) -> Snapshot {
         let deviceStates = devices.map { device in
             deviceState(for: device, groupController: groupController, iconFor: iconFor,
                         alignment: alignmentState(for: device, among: devices,
                                                   groupController: groupController,
-                                                  alignmentFor: alignmentFor))
+                                                  alignmentFor: alignmentFor),
+                        record: speakerRecord(device),
+                        hasLiveApps: !(device.isLocalDevice
+                            ? appRouting.routedAppNames(for: device.id, isLocalDevice: true)
+                            : liveRoutedAppNames[device.id] ?? []).isEmpty)
         }
 
         // Live names win over the caller's last-known map — a rename arriving
@@ -190,6 +255,14 @@ public enum CompanionSnapshotBuilder {
             localFallbackActive: localFallbackActive,
             takeoverStatus: takeoverStatus,
             systemDefaultIsAirPlayActive: systemDefaultIsAirPlayActive,
+            // Sorted by id for the same Equatable-stability reason as
+            // `addableApps` above.
+            missingSpeakers: missingSpeakers
+                .sorted { $0.id < $1.id }
+                .map { MissingSpeakerState(id: $0.id, name: $0.name, kind: $0.kind) },
+            note: note.map { NoteState(text: $0.text, severity: $0.severity) },
+            macAppVersion: macAppVersion,
+            macLicense: macLicense,
             settings: SettingsState(
                 connectVolume: connectVolume,
                 connectVolumeMin: connectVolumeMin,
@@ -200,34 +273,43 @@ public enum CompanionSnapshotBuilder {
         )
     }
 
-    /// The speaker a sync-calibration run for `targetID` would be measured
-    /// against, or `nil` when there is nothing usable — which is what turns
+    /// The Mac's own hardware outputs a sync-calibration run for `targetID`
+    /// may be measured against, in list order. The phone shows a picker only
+    /// when this holds more than one entry.
+    public static func alignmentReferenceCandidateIDs(
+        forTarget targetID: String,
+        among devices: [Device]
+    ) -> [String] {
+        devices.filter { $0.id != targetID && $0.isAvailable && $0.isLocalDevice }.map(\.id)
+    }
+
+    /// The speaker a sync-calibration run for `targetID` is measured against
+    /// by default, or `nil` when there is nothing usable — which is what turns
     /// the phone's "Fix timing" CTA off.
     ///
-    /// Mirrors the Mac wizard's own ordering
-    /// (`PopoverController.btWizardDefaultReference`): the Mac's own output
-    /// first (always present, always in step, nothing to set up), then any
-    /// other non-Bluetooth speaker, then a Bluetooth one. Cast is never
-    /// offered — a Cast receiver plays seconds behind live, which no
-    /// ±500 ms correction can resolve against.
+    /// Mirrors the Mac wizard's own rule
+    /// (`PopoverController.btWizardDefaultReference`): the Mac's own hardware
+    /// output first; else, when exactly one other speaker is audible, that
+    /// one; else the first. Cast is never offered — a Cast receiver plays
+    /// seconds behind live, which no ±500 ms correction can resolve against.
     ///
-    /// Restricted to devices the user currently has audio on: a reference that
-    /// is not playing makes no sound for the phone's microphone to hear, so
-    /// offering it would stage a run that cannot produce a measurement.
-    /// `isAudible` must be `GroupController.isMainOutMember(_:)` — the
-    /// group-aware read; `isSpeakerSelected(_:)` is blind to group membership
-    /// and would drop every member of an active group from the candidates.
+    /// Nothing here asks what is playing: `CompanionCoordinator` selects the
+    /// comparison output and the target for the run itself, so the choice
+    /// never depends on what is selected. `isAudible` only breaks the tie in
+    /// the fallback and must be `GroupController.isMainOutMember(_:)`, the
+    /// group-aware read.
     public static func alignmentReferenceID(
         forTarget targetID: String,
         among devices: [Device],
         isAudible: (String) -> Bool
     ) -> String? {
-        let candidates = devices.filter {
-            $0.id != targetID && $0.isAvailable && !$0.isCast && isAudible($0.id)
+        if let local = alignmentReferenceCandidateIDs(forTarget: targetID, among: devices).first {
+            return local
         }
-        if let local = candidates.first(where: \.isLocalDevice) { return local.id }
-        if let wired = candidates.first(where: { !$0.isBluetooth }) { return wired.id }
-        return candidates.first?.id
+        let fallback = devices.filter { $0.id != targetID && $0.isAvailable && !$0.isCast }
+        let audible = fallback.filter { isAudible($0.id) }
+        if audible.count == 1 { return audible[0].id }
+        return fallback.first?.id
     }
 
     /// The wire alignment struct for one device: the caller's timing report
@@ -246,18 +328,32 @@ public enum CompanionSnapshotBuilder {
             referenceID: alignmentReferenceID(
                 forTarget: device.id, among: devices,
                 isAudible: groupController.isMainOutMember),
+            referenceCandidateIDs: alignmentReferenceCandidateIDs(
+                forTarget: device.id, among: devices),
             settleRemainingSeconds: report.settleRemainingSeconds,
             clockState: report.clockState.rawValue,
-            source: report.source?.rawValue)
+            source: report.source?.rawValue,
+            delayMs: report.delayMs)
     }
 
     private static func deviceState(
         for device: Device,
         groupController: GroupController,
         iconFor: (Device) -> String,
-        alignment: DeviceState.AlignmentState?
+        alignment: DeviceState.AlignmentState?,
+        record: SpeakerPresentationRecord?,
+        hasLiveApps: Bool
     ) -> DeviceState {
-        DeviceState(
+        let isMember = groupController.isMainOutMember(device.id)
+        // The popover's sounding-row rule (`PopoverController.refreshCardHeaderLiveness`
+        // with `drawsConnected`) is the reference, and a change there must change this too.
+        let connectedForPlayback = device.connectionState == .connected
+            || (device.isLocalDevice && device.isAvailable && device.connectionState == .off
+                && (isMember || hasLiveApps))
+        let isPlaying = (isMember || hasLiveApps) && connectedForPlayback
+            && !groupController.isMuted(device.id)
+            && (isMember ? !groupController.isMainOutMuted : true)
+        return DeviceState(
             id: device.id,
             name: device.name,
             kind: device.kind.rawValue,
@@ -279,15 +375,27 @@ public enum CompanionSnapshotBuilder {
             isSelected: groupController.isSpeakerSelected(device.id),
             isMainOutMember: groupController.isMainOutMember(device.id),
             connection: connectionInfo(device),
-            alignment: alignment
+            alignment: alignment,
+            mixerVisibility: record?.visibility.rawValue,
+            isVisibleInMixer: record?.isVisibleInMixer,
+            isPlaying: isPlaying,
+            model: device.model
         )
     }
 
     /// `credentialKind` is `"password"` in every state while a password
-    /// speaker has none on file, so the phone can offer to enter one.
+    /// speaker has none on file, and `"onScreenCode"` while a speaker that
+    /// shows a code has no pairing on file, so the phone can offer to enter one.
+    /// An every-time code receiver takes no code (`.codeEveryTimeUnsupported`), so it has none.
+    /// A password wait is `"awaitingPassword"` with no failure fields: it is
+    /// not a failure; a refused password is `"failed"` with its cause.
     private static func connectionInfo(_ device: Device) -> DeviceState.ConnectionInfo {
-        let credentialKind: String? =
-            device.airPlayAccess == .password && !device.hasStoredPassword ? "password" : nil
+        let credentialKind: String?
+        switch device.airPlayAccess {
+        case .password where !device.hasStoredPassword: credentialKind = "password"
+        case .onScreenCode where !device.hasStoredPassword: credentialKind = "onScreenCode"
+        default: credentialKind = nil
+        }
         let access = device.airPlayAccess.rawValue
         switch device.connectionState {
         case .off:
@@ -298,6 +406,8 @@ public enum CompanionSnapshotBuilder {
             return DeviceState.ConnectionInfo(state: "connected", credentialKind: credentialKind, access: access)
         case .reconnecting:
             return DeviceState.ConnectionInfo(state: "reconnecting", credentialKind: credentialKind, access: access)
+        case .awaitingPassword:
+            return DeviceState.ConnectionInfo(state: "awaitingPassword", credentialKind: credentialKind, access: access)
         case .failed(let failure):
             return DeviceState.ConnectionInfo(
                 state: "failed",

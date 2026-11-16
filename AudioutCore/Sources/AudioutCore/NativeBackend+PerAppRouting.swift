@@ -27,8 +27,9 @@ extension NativeBackend {
     /// pushed in before discovery has found anything, and each one engages as its
     /// device shows up.
     ///
-    /// A speaker waiting for a password or code (`.failed` with `.authRequired`
-    /// or `.codeRequired`) stays available so its row offers "Enter password",
+    /// A speaker waiting for a password or code (`.awaitingPassword`, or
+    /// `.failed` with `.authRequired` or `.codeRequired`) stays available so its
+    /// row offers "Enter password",
     /// but it cannot carry audio until one is entered, so it reads unreachable
     /// here; its `.connected` edge replays the route.
     func isRouteTargetReachableLocked(_ id: String) -> Bool {   // on stateQueue
@@ -62,26 +63,31 @@ extension NativeBackend {
     /// Report a per-app-only target's connection state. Whole-system routing
     /// owns the state of any device it claims, so this writes nothing for one;
     /// the claim is read at write time, so a device whole-system took over
-    /// mid-op is left alone. On `stateQueue`.
-    func setPerAppConnectionStateLocked(_ state: ConnectionState, for id: String) {   // on stateQueue
+    /// mid-op is left alone. `makingAvailable` sets `isAvailable` in the same
+    /// commit, so the eligibility check sees both changes as one edge. On `stateQueue`.
+    func setPerAppConnectionStateLocked(_ state: ConnectionState, for id: String, makingAvailable: Bool = false) {   // on stateQueue
         guard !isWholeSystemOperationallyClaimedLocked(id) else { return }
-        setConnectionState(state, for: id)
+        setConnectionState(state, for: id, makingAvailable: makingAvailable)
     }
 
     /// Whether a route leaving `id` was dropped by the speaker's own failure
     /// (unavailable and `.failed`, or available and waiting for a password or
-    /// code) rather than removed by the user; such a route keeps its `.failed`,
-    /// so a password speaker keeps its "Enter password" prompt and its `.off`
-    /// cannot make it reachable again and re-bind into the same refusal. The
-    /// Bluetooth caller is unaffected: Bluetooth never reports those causes.
-    /// On `stateQueue`.
+    /// code, `.awaitingPassword` included) rather than removed by the user;
+    /// such a route keeps its state, so a password speaker keeps its "Enter
+    /// password" prompt and its `.off` cannot make it reachable again and
+    /// re-bind into the same refusal. The Bluetooth caller is unaffected:
+    /// Bluetooth never reports those states. On `stateQueue`.
     func droppedByOwnFailureLocked(_ id: String) -> Bool {   // on stateQueue
-        guard let device = known[id], case .failed = device.connectionState else { return false }
-        return !device.isAvailable || Self.waitsForPasswordEntry(device.connectionState)
+        guard let device = known[id] else { return false }
+        if case .failed = device.connectionState, !device.isAvailable { return true }
+        return Self.waitsForPasswordEntry(device.connectionState)
     }
 
-    /// Whether `state` is a password or code demand the user has yet to answer.
+    /// Whether `state` is a password or code demand the user has yet to answer
+    /// (`.awaitingPassword`) or answered wrongly (`.failed` with `.authRequired`
+    /// or `.codeRequired`).
     static func waitsForPasswordEntry(_ state: ConnectionState) -> Bool {
+        if state == .awaitingPassword { return true }
         guard case .failed(let failure) = state else { return false }
         return failure.cause == .authRequired || failure.cause == .codeRequired
     }
@@ -293,11 +299,20 @@ extension NativeBackend {
         // and same non-blocking contract as `setOutputSet`'s — see `onRoutingAction`.
         onRoutingAction?()
         let plan: UpdateRoutesPlan = stateQueue.sync {
+            let waitingForPassword = self.known.values
+                .filter { Self.waitsForPasswordEntry($0.connectionState) && self.routesTargetDeviceLocked($0.id) }
+                .map(\.id)
             self.lastRoutes = routes
             // A `.group` route is a live reference: this snapshot is what it
             // resolves against, so a group edit re-pushing an unchanged route
             // table still moves the audio.
             self.lastGroupTargets = groupTargets
+            // The user's table stopped naming a speaker that was waiting for a
+            // password or code, so its row reads `.off`. The self-drop keeps its
+            // `.failed` in `handleDestinationSetsChanged` because the table still names it there.
+            for id in waitingForPassword where !self.routesTargetDeviceLocked(id) {
+                self.setPerAppConnectionStateLocked(.off, for: id)
+            }
             // Retained so the metering-only target set can subtract it and so a
             // denylist change alone re-reconciles the metering taps (T3, PRIVACY).
             self.lastExcludedBundleIDs = excludedBundleIDs
@@ -543,6 +558,10 @@ extension NativeBackend {
                 excludedBundleIDs: excludedBundleIDs
                     .union(plan.localExcluded)
                     .union(plan.leveled))
+            // `.currentDevice` and leveled apps play on the Mac through our own (self-excluded)
+            // process, so the listen-only tap must keep their own process to meter them at all.
+            self.localMeterCapture?.updateRouting(
+                appRoutes: plan.effectiveRoutes, excludedBundleIDs: excludedBundleIDs)
         }
     }
 
@@ -604,6 +623,9 @@ extension NativeBackend {
                 let wantsLocal = self.localBundleIDs.contains(bundleID)
                     || (self.leveledBundleIDs.contains(bundleID) && !self.captureRunning)
                 guard wantsLocal else { return nil }
+                // Re-assert the Mac row's level on every start, so an engine
+                // swapped in after the last push still plays at the row's level.
+                self.pushLocalPlaybackGainLocked()
                 let vol = self.lastRoutes.first { $0.bundleID == bundleID }?.volume ?? 100
                 return Float(vol) / 100.0
             }
@@ -741,6 +763,7 @@ extension NativeBackend {
             // excluded/routed-away, so it's cheap for a bundle that turns out not
             // to be excluded (a `.currentDevice` app, or metering-only capture).
             captureCoordinator?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
+            localMeterCapture?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
 
         case .failed(let error):
             let (justDied, shouldRetry, attempt): (Bool, Bool, Int) = stateQueue.sync {
@@ -1246,9 +1269,11 @@ extension NativeBackend {
         // clockless one re-establishes a session that plays silence, so it stays
         // gated. Practically instant mid-session (the clock is already up); on a
         // genuine refusal the `false` return feeds this chain's backoff/give-up.
-        guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+        let gate = await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)")
+        guard gate == .ready else {
             Telemetry.log(.airplay, "rebind_recover_failed", [
                 "output": "\(outputID)", "scope": label, "error": "timingUnavailable",
+                "gate": gate.telemetryName,
             ])
             return false
         }
@@ -1544,6 +1569,7 @@ extension NativeBackend {
         // coordinator itself no-ops unless `bundleID` is actually in that set,
         // so this is cheap to call for every app launch, routed or not.
         captureCoordinator?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
+        localMeterCapture?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
 
         // `localBundleIDs` is ours (synced-local): an app routed to the Mac itself
         // still has a capture slot to revive on relaunch, so it takes this path too.
@@ -1774,8 +1800,9 @@ extension NativeBackend {
             }
             for deviceID in previousDeviceIDs
             where self.outputIDs[deviceID] != nil && newBindings[deviceID] == nil {
-                // A route the speaker's unavailability dropped is not the user
-                // removing it, and the engine's cause must outlive the route.
+                // A route the speaker's own failure dropped (unavailable, or
+                // waiting for a password or code) is not the user removing it,
+                // and the engine's cause must outlive the route.
                 if !self.droppedByOwnFailureLocked(deviceID) {
                     self.setPerAppConnectionStateLocked(.off, for: deviceID)
                 }
@@ -1919,10 +1946,11 @@ extension NativeBackend {
             // used to skip this entirely). `clearBinding` on failure is what
             // lets the clock-recovery replay / discovery re-drive re-issue
             // this op without a topology change.
-            guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+            let gate = await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)")
+            guard gate == .ready else {
                 handleBindFailure(
                     outputID: outputID, stream: stream, op: "bind",
-                    error: PTPClockUnavailableError(), clearBinding: true)
+                    error: PTPClockUnavailableError(outcome: gate), clearBinding: true)
                 return
             }
             // Roadmap 008 fire-time gate — AFTER the PTP wait (the widest window
@@ -1938,10 +1966,11 @@ extension NativeBackend {
             }
         case .rebind(let outputID, let stream):
             reportPerAppConnectionState(.connecting, outputID: outputID)
-            guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+            let gate = await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)")
+            guard gate == .ready else {
                 handleBindFailure(
                     outputID: outputID, stream: stream, op: "rebind",
-                    error: PTPClockUnavailableError(), clearBinding: true)
+                    error: PTPClockUnavailableError(outcome: gate), clearBinding: true)
                 return
             }
             guard perAppOpMayFire(outputID: outputID, op: "rebind", stream: stream) else { return }
@@ -2039,8 +2068,9 @@ extension NativeBackend {
 
     /// A per-app bind was refused because no PTP clock is available (the T4
     /// gate said not-ready). Distinct from an engine throw only so telemetry
-    /// reads the actual cause.
+    /// reads the actual cause, and carries the gate's outcome for its `reason`.
     struct PTPClockUnavailableError: Error, CustomStringConvertible {
+        let outcome: PTPHelperActivationOutcome
         var description: String { "timingUnavailable" }
     }
 
@@ -2129,25 +2159,41 @@ extension NativeBackend {
             // password speaker's refused bind reads `.authRequired` whichever of
             // this and the state stream's report lands first.
             let access = self.known[deviceID]?.airPlayAccess
+            let kind = self.lastDescriptors[deviceID]?.kind
             let cause: ConnectionFailure.Cause
             switch error {
             case is PTPClockUnavailableError:
                 cause = .timingUnavailable
             case AirPlayEngineError.passwordRequired:
-                cause = Self.accessCause(access, passwordRequired: true)
+                cause = Self.accessCause(access, kind: kind, passwordRequired: true)
             case AirPlayEngineError.opTimedOut:
                 cause = .timedOut
             case AirPlayEngineError.sessionFailed:
-                cause = Self.accessCause(access, passwordRequired: false)
+                cause = Self.accessCause(access, kind: kind, passwordRequired: false)
             default:
                 cause = .unknown
             }
-            Telemetry.fail(.airplay, "airplay:connect_failed",
-                           local: ["device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)"],
-                           shared: ["cause": "\(cause)"])
+            // A password demand nobody answered yet is a wait, not a failure.
+            let fedCredential = self.fedCredential(deviceID)
+            let awaitsPassword = Self.awaitsPassword(cause, fedPassword: fedCredential)
+            if !awaitsPassword {
+                // The sender drops its own copy of the key when an
+                // encrypted SETUP times out (airplay.c `start_failure`),
+                // reported as a plain failure. Forget the fed key so the
+                // next feed sends the stored one again; the Keychain
+                // keeps it, since the receiver did not refuse it.
+                self.fedDescriptors[deviceID]?.authKey = nil
+                Telemetry.fail(.airplay, "airplay:connect_failed",
+                               local: ["device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)"],
+                               shared: ["cause": "\(cause)", "reason": Self.failureReason(error),
+                                        "speaker": self.btSpeakerKey(forDevice: deviceID)])
+            }
             if self.streamBindings[deviceID] != nil {
                 self.setPerAppConnectionStateLocked(
-                    .failed(ConnectionFailure(cause: cause, detail: String(describing: error))), for: deviceID)
+                    awaitsPassword
+                        ? .awaitingPassword
+                        : .failed(ConnectionFailure(cause: cause, detail: String(describing: error))),
+                    for: deviceID)
             }
             if clearBinding { self.streamBindings.removeValue(forKey: deviceID) }
             guard self.routedAppNames[deviceID] != nil else { return }

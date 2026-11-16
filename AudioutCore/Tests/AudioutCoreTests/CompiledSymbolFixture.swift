@@ -29,6 +29,25 @@ enum CompiledSymbolFixture {
         return bundle
     }
 
+    /// The bounding box of everything `image` actually paints, in points.
+    @MainActor
+    static func inkBounds(_ image: NSImage) -> NSRect? {
+        guard let rep = image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
+        else { return nil }
+        let scale = CGFloat(rep.pixelsWide) / image.size.width
+        var minX = rep.pixelsWide, maxX = -1, minY = rep.pixelsHigh, maxY = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= 0 else { return nil }
+        return NSRect(x: CGFloat(minX) / scale, y: CGFloat(minY) / scale,
+                      width: CGFloat(maxX - minX + 1) / scale,
+                      height: CGFloat(maxY - minY + 1) / scale)
+    }
+
     private static func compile() -> Bundle? {
         // The catalogue lives beside this test target's own sources.
         let here = URL(fileURLWithPath: #filePath)

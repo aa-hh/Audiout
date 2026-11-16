@@ -26,7 +26,7 @@ import AudioutSharedUI
     @Test func allCausesRenderTheirOwnCopy() {
         let causes: [ConnectionFailure.Cause] = [
             .notResponding, .vanished, .refusedOrBusy, .authRequired,
-            .codeRequired, .homeMembersOnly,
+            .codeRequired, .codeEveryTimeUnsupported, .homeMembersOnly,
             .droppedMidStream, .timedOut, .unknown,
         ]
         for cause in causes {
@@ -170,12 +170,12 @@ import AudioutSharedUI
                 "the failure tint must re-resolve on a live light/dark switch")
 
         // And the re-resolved color is exactly the spec §5.6 treatment — the
-        // `panel` seat washed with the failure-exclusive red at ~12% — under
-        // the NEW appearance, not some third value.
+        // failure-exclusive red at the inset-card alpha — under the NEW
+        // appearance, not some third value.
         var expected: CGColor?
         view.effectiveAppearance.performAsCurrentDrawingAppearance {
-            let seat = Tokens.Color.panel
-            expected = (seat.blended(withFraction: 0.12, of: Tokens.Color.failure) ?? seat).cgColor
+            expected = Tokens.Color.failure
+                .withAlphaComponent(PopoverColumnGrid.insetCardTintAlpha).cgColor
         }
         #expect(dark?.components == expected?.components)
     }

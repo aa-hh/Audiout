@@ -23,7 +23,7 @@ import AudioutSharedUI
 /// selection persists here and fires ``onThemeChanged`` for the app to apply —
 /// the same value the app also reads from `AppSettings` at launch.
 @MainActor
-public final class AppearanceSettingsViewController: NSViewController {
+public final class AppearanceSettingsViewController: NSViewController, SettingsReadoutProviding {
 
     private let settings: AppSettings
 
@@ -38,6 +38,8 @@ public final class AppearanceSettingsViewController: NSViewController {
     /// `Tokens.accentStyle` from `AppSettings.accentStyle` there.
     public var onAccentChanged: ((AccentStyle) -> Void)?
 
+    var onReadoutChanged: (() -> Void)?
+
     /// Tile order == this array; the single source of truth mapping a tile index
     /// to a theme (no parallel `switch` to drift out of sync).
     private let order: [AppearanceTheme] = [.system, .light, .dark]
@@ -47,7 +49,6 @@ public final class AppearanceSettingsViewController: NSViewController {
     /// Radio order == this array — same single-source-of-truth idiom as `order`.
     private let accentOrder: [AccentStyle] = [.fullGold, .subtle]
     private var accentRadios: [NSButton] = []
-    private let accentHint = SettingsForm.hintLabel()
 
     public init(settings: AppSettings) {
         self.settings = settings
@@ -57,7 +58,19 @@ public final class AppearanceSettingsViewController: NSViewController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    // MARK: Readout
+
+    var readoutLines: [String] {
+        ["\(settings.theme.displayName) · \(settings.accentStyle.displayName)"]
+    }
+
+    var readoutGlyphTint: NSColor { Tokens.Color.labelCool }
+
+    // MARK: Layout
+
     public override func loadView() {
+        let (header, _) = SettingsPane.makeHeader(symbolName: "paintpalette", title: "Appearance")
+
         tiles = order.map(makeTile)
         selectTile(for: settings.theme)
 
@@ -66,38 +79,19 @@ public final class AppearanceSettingsViewController: NSViewController {
         tileRow.spacing = 12
         tileRow.translatesAutoresizingMaskIntoConstraints = false
 
-        // Section-header voice (roadmap 050 typeset pass): the same role must
-        // read the same in every pane — Audio's headers already use it.
-        let heading = SettingsForm.sectionHeader("Theme")
-        let subtitle = SettingsForm.label("Follow the system, or force light or dark.")
-        subtitle.font = Tokens.Font.caption
-        subtitle.textColor = Tokens.Color.label2
+        let themeTitle = SettingsPane.makeSectionTitle("Theme")
 
-        let column = NSStackView(views: [heading, tileRow, subtitle])
-        column.orientation = .vertical
-        column.alignment = .leading
-        column.spacing = 8
+        let rule = RuleView(tone: .hairline)
+        rule.translatesAutoresizingMaskIntoConstraints = false
+        rule.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
-        view = SettingsForm.paneView(rows: [column, makeAccentSection()])
-    }
-
-    /// The **Accent** dial (Warm Signal spec §1.3 / §5.2 — decision i): two
-    /// stock radios under a hairline. The pane persists the choice AND applies
-    /// the live token remap itself (`Tokens.accentStyle` — the token module is
-    /// process-local state, not an `NSApp` side effect, so unlike the theme
-    /// there is no app-layer apply step to defer to); ``onAccentChanged`` then
-    /// lets the app nudge open surfaces to repaint.
-    private func makeAccentSection() -> NSView {
-        let hairline = NSBox()
-        hairline.boxType = .separator
-        hairline.translatesAutoresizingMaskIntoConstraints = false
-
-        // Same section-header voice as Theme and the Audio pane's headers.
-        let heading = SettingsForm.sectionHeader("Accent")
-
-        let subtitle = SettingsForm.label("How strongly meters, dots, and rings use the brand gold.")
-        subtitle.font = Tokens.Font.caption
-        subtitle.textColor = Tokens.Color.label2
+        // The **Accent** dial (Warm Signal spec §1.3 / §5.2 — decision i): two
+        // stock radios. The pane persists the choice AND applies the live token
+        // remap itself (`Tokens.accentStyle` — the token module is
+        // process-local state, not an `NSApp` side effect, so unlike the theme
+        // there is no app-layer apply step to defer to); ``onAccentChanged``
+        // then lets the app nudge open surfaces to repaint.
+        let accentTitle = SettingsPane.makeSectionTitle("Accent")
 
         accentRadios = accentOrder.map { style in
             let radio = NSButton(radioButtonWithTitle: style.displayName,
@@ -107,32 +101,35 @@ public final class AppearanceSettingsViewController: NSViewController {
             radio.setAccessibilityLabel(style.displayName)
             return radio
         }
-        // Horizontal on purpose: the two dial names fit comfortably in the
-        // fixed 460 pt form width and keep the pane short (see
-        // `eachTabHasNonDegenerateFittedSize`).
-        let radioColumn = NSStackView(views: accentRadios)
-        radioColumn.orientation = .horizontal
-        radioColumn.alignment = .firstBaseline
-        radioColumn.spacing = 12
+        // Horizontal on purpose: the two dial names fit comfortably on one
+        // line and keep the pane short.
+        let radioRow = NSStackView(views: accentRadios)
+        radioRow.orientation = .horizontal
+        radioRow.alignment = .firstBaseline
+        radioRow.spacing = 12
 
         applyAccentSelection(settings.accentStyle)
 
-        let column = NSStackView(views: [hairline, heading, subtitle, radioColumn, accentHint])
-        column.orientation = .vertical
-        column.alignment = .leading
-        column.spacing = 8
-        hairline.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        return column
+        let page = SettingsForm.pageView(content: [
+            header, themeTitle, tileRow, rule, accentTitle, radioRow,
+        ])
+        if let stack = page.subviews.first as? NSStackView {
+            stack.setCustomSpacing(6, after: themeTitle)
+            stack.setCustomSpacing(14, after: tileRow)
+            stack.setCustomSpacing(13, after: rule)
+            stack.setCustomSpacing(9, after: accentTitle)
+            stack.setCustomSpacing(8, after: radioRow)
+        }
+        view = page
     }
 
-    /// Reflect `style` in the radio group + the live hint line (no persistence,
+    /// Reflect `style` in the radio group (no persistence,
     /// no side effects — shared by `loadView` and the click path).
     private func applyAccentSelection(_ style: AccentStyle) {
         let index = accentOrder.firstIndex(of: style) ?? 0
         for (radioIndex, radio) in accentRadios.enumerated() {
             radio.state = radioIndex == index ? .on : .off
         }
-        accentHint.stringValue = style.hintLine
     }
 
     @objc private func accentTapped(_ sender: NSButton) {
@@ -142,6 +139,7 @@ public final class AppearanceSettingsViewController: NSViewController {
         settings.accentStyle = style
         Tokens.accentStyle = style
         onAccentChanged?(style)
+        onReadoutChanged?()
     }
 
     private func makeTile(for theme: AppearanceTheme) -> ThemeTileButton {
@@ -181,6 +179,7 @@ public final class AppearanceSettingsViewController: NSViewController {
         let theme = order[index]
         settings.theme = theme
         onThemeChanged?(theme)
+        onReadoutChanged?()
     }
 
     // MARK: Test-support hooks
@@ -227,11 +226,6 @@ public final class AppearanceSettingsViewController: NSViewController {
         accentTapped(radio)
     }
 
-    /// The live hint line under the accent radios.
-    public var test_accentHint: String {
-        _ = view
-        return accentHint.stringValue
-    }
 }
 
 /// A theme-picker tile: a miniature window preview rendered *in* its target
@@ -558,14 +552,6 @@ private extension AccentStyle {
         }
     }
 
-    /// The live hint line for the current dial position — what this choice
-    /// actually does to the instruments, per §1.3's remap table.
-    var hintLine: String {
-        switch self {
-        case .fullGold: return "Meters, dots, and rings glow in the full brand gold."
-        case .subtle:   return "A quieter gold — softer meters, and no glow around the routing dot."
-        }
-    }
 }
 
 private extension Array {

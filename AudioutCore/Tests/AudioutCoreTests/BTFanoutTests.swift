@@ -312,8 +312,9 @@ import AVFoundation
         #expect(tap.creates == 1)
         #expect(tap.excludes(pid: syncedRenderPID))
 
+        // `setBTSink` makes the rebuild decision, and any recreate, on this
+        // thread before it returns, so the count below is final.
         coordinator.setBTSink(SpyFanoutSink(), renderProcessPID: syncedRenderPID)
-        SuiteWait.settle(0.3)
         #expect(tap.creates == 1,
                 "an already-excluded render pid must not force a tap recreate (no per-toggle rebuild storm)")
     }

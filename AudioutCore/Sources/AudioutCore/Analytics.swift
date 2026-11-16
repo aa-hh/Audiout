@@ -41,15 +41,26 @@ public enum Analytics {
         /// pre-consent buffer flush uses it (see ``capture(_:_:)``); a sink
         /// that leaves it nil sends those events stamped at flush time.
         public let captureAt: (@Sendable (String, [String: String], Date) -> Void)?
+        /// `capture` for properties that are not all strings. Only
+        /// ``captureStructured(_:_:)`` uses it; a sink that leaves it nil
+        /// drops those events.
+        public let captureStructured: (@Sendable (String, [String: any Sendable]) -> Void)?
+        /// The id the SDK files this Mac's events under, for Settings to show
+        /// so the user can quote it in a deletion or access request.
+        public let anonymousID: (@Sendable () -> String)?
 
         public init(capture: @escaping @Sendable (String, [String: String]) -> Void,
                     captureError: @escaping @Sendable (String, [String: String]) -> Void,
                     consentChanged: @escaping @Sendable (Bool) -> Void,
-                    captureAt: (@Sendable (String, [String: String], Date) -> Void)? = nil) {
+                    captureAt: (@Sendable (String, [String: String], Date) -> Void)? = nil,
+                    captureStructured: (@Sendable (String, [String: any Sendable]) -> Void)? = nil,
+                    anonymousID: (@Sendable () -> String)? = nil) {
             self.capture = capture
             self.captureError = captureError
             self.consentChanged = consentChanged
             self.captureAt = captureAt
+            self.captureStructured = captureStructured
+            self.anonymousID = anonymousID
         }
     }
 
@@ -70,6 +81,13 @@ public enum Analytics {
     /// opt in to, so the ask must not appear there at all.
     public static var isAvailable: Bool {
         state.withLock { $0.sink != nil }
+    }
+
+    /// The sink's anonymous id while consent is on; nil with no sink or no
+    /// consent, so Settings never shows an id that nothing is being sent under.
+    public static var anonymousID: String? {
+        let read = state.withLock { s in s.consent ? s.sink?.anonymousID : nil }
+        return read?()
     }
 
     /// Updates the consent flag, then forwards the new value to the
@@ -157,12 +175,40 @@ public enum Analytics {
     /// One difference from ``capture(_:_:)``: a failure that happens before
     /// the user answers the consent ask is dropped, not held for a later
     /// grant. Only events are buffered.
+    ///
+    /// A `cause` property gets its own error-tracking issue. These errors
+    /// share one synthetic stack, so PostHog grouped them by name alone, and
+    /// in October 2026 a Home-restricted speaker's refusals were 88 of the
+    /// 100 `airplay:connect_failed` events, hiding the timeouts beside them.
     public static func captureError(_ name: StaticString, _ properties: [String: String] = [:]) {
         let snapshot: Sink? = state.withLock { s in
             guard s.consent else { return nil }
             return s.sink
         }
+        var properties = properties
+        if let cause = properties["cause"] {
+            properties["$exception_fingerprint"] = "\(name):\(cause)"
+            properties["$issue_name"] = "\(name) (\(cause))"
+        }
         snapshot?.captureError(name.description, properties)
+    }
+
+    /// Sends an event whose properties are not all strings. It exists for
+    /// PostHog survey events (``ExpiredTrialSurvey``), whose properties carry
+    /// arrays of strings and of dictionaries that ``capture(_:_:)`` cannot.
+    /// No sink, no consent, or a sink without `captureStructured`: no send.
+    ///
+    /// Like ``captureError(_:_:)``, nothing is held while consent is off.
+    ///
+    /// The privacy fence (PRODUCT.md Data Collection) applies to every
+    /// property, with one owner-approved exception: the survey's free-text
+    /// answer, which is typed by the user and sent as written.
+    public static func captureStructured(_ event: StaticString, _ properties: [String: any Sendable]) {
+        let snapshot: Sink? = state.withLock { s in
+            guard s.consent else { return nil }
+            return s.sink
+        }
+        snapshot?.captureStructured?(event.description, properties)
     }
 
     // MARK: - Implementation

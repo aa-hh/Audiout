@@ -647,6 +647,23 @@ import Testing
                        "neither .noRedirect nor .currentDevice routes are ever routed to a device")
     }
 
+    /// Turns red if `routedAppNames(for:isLocalDevice:)` stops matching
+    /// `.currentDevice` routes for the local device, or starts matching them
+    /// for any other device.
+    @Test func routedAppNamesNamesThisMacPicksOnlyOnTheLocalDevice() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.setDestination(.currentDevice, for: "com.apple.Safari")
+        controller.setDestination(.device(id: "homepod-1"), for: "com.apple.Music")
+
+        #expect(controller.routedAppNames(for: "mac", isLocalDevice: true) == ["Safari"])
+        #expect(controller.routedAppNames(for: "homepod-1", isLocalDevice: false) == ["Music"],
+                "a named-device route never leaks onto a row that merely claims to be local")
+        #expect(controller.routedAppNames(for: "mac") == [],
+                "the default keeps every other caller's behaviour")
+    }
+
     @Test func routedAppNamesPreservesStableRouteOrder() {
         let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
         controller.addRoute(bundleID: "b", displayName: "Zebra App")

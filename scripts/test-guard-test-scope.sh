@@ -87,20 +87,37 @@ else
 fi
 
 got="$(scope_for "$SRC/AudioutCore/OutputBackend.swift")"
-[ "$got" = FULL ] && ok "unmatched AudioutCore file runs FULL" \
-  || fail "unmatched AudioutCore file printed '$got', expected FULL"
+[ "$got" = BUILD ] && ok "unmatched AudioutCore file only builds" \
+  || fail "unmatched AudioutCore file printed '$got', expected BUILD"
 
 got="$(scope_for "$SRC/AudioutApp/AppDelegate.swift")"
-[ "$got" = FULL ] && ok "AudioutApp file runs FULL" \
-  || fail "AudioutApp file printed '$got', expected FULL"
+[ "$got" = BUILD ] && ok "AudioutApp file only builds" \
+  || fail "AudioutApp file printed '$got', expected BUILD"
 
-# --- Existing fail-closed rule: a deletion is FULL ----------------------------
+# An unmatched file next to a matched one must not drop the matched suites.
+base="$(scope_for "$SRC/AudioutCore/NativeBackend.swift")"
+got="$(scope_for "$SRC/AudioutCore/NativeBackend.swift" "$SRC/AudioutCore/OutputBackend.swift")"
+[ "$got" = "$base" ] && ok "unmatched file beside a matched one keeps its suites" \
+  || fail "mixed commit printed '$got', expected '$base'"
+
+got="$(cd "$CLONE" && AUDIOUT_FULL_SUITE=1 sh "$SCOPE")"
+[ "$got" = FULL ] && ok "AUDIOUT_FULL_SUITE=1 runs FULL" \
+  || fail "AUDIOUT_FULL_SUITE=1 printed '$got', expected FULL"
+
+# --- A deletion maps by its old name ------------------------------------------
 
 git -C "$CLONE" reset -q --hard
 git -C "$CLONE" rm -q -- "$SRC/AudioutCore/NativeBackend+Tone.swift"
 got="$(cd "$CLONE" && env -u AUDIOUT_FULL_SUITE sh "$SCOPE")"
-[ "$got" = FULL ] && ok "a deleted Swift file runs FULL" \
-  || fail "a deleted Swift file printed '$got', expected FULL"
+[ "$got" = "$base" ] && ok "a deleted Swift file runs its old name's suites" \
+  || fail "a deleted Swift file printed '$got', expected '$base'"
+
+git -C "$CLONE" reset -q --hard
+victim="$(cd "$CLONE" && ls AudioutCore/Tests/*/*Tests.swift | head -1)"
+git -C "$CLONE" rm -q -- "$victim"
+got="$(cd "$CLONE" && env -u AUDIOUT_FULL_SUITE sh "$SCOPE")"
+[ "$got" = BUILD ] && ok "a deleted test file only builds" \
+  || fail "a deleted test file printed '$got', expected BUILD"
 
 # --- The dependents table matches AudioutCore/Package.swift -------------------
 

@@ -181,6 +181,45 @@ check_route "1${TAB}10001${TAB}orphaned${TAB}10${TAB}swift test
 remote_mule_permits() { return 1; }
 check_route "" 0 local "mule permit table unavailable — local"
 
+# --- a job waiting for a local permit moves to the mule when one frees -------
+remote_configured() { return 0; }
+mule_calls=0
+fake_mule_job() { mule_calls=$((mule_calls + 1)); remote_status="$fake_status"; }
+
+# Catches: the wait loop never looking at the mule, so a waiting job sits here
+# while a mule permit stands free (the gap this check was added for).
+remote_mule_free_count() { echo 1; }
+capacity_mule_retry=fake_mule_job; fake_status=""; mule_calls=0
+capacity_try_mule 2>/dev/null
+capacity_try_mule 2>/dev/null
+if [ "$mule_calls" -eq 2 ] && [ "$capacity_mule_retry" = fake_mule_job ]; then
+  echo "  ok — free mule permit: job offered there, and again after it filled up"
+else
+  fail "free mule permit: expected 2 offers and checking kept on, got $mule_calls, retry='$capacity_mule_retry'"
+fi
+
+# Catches: offering the job to a mule with no free permit, or one that cannot
+# be asked — each such offer costs a full sync for nothing.
+remote_mule_free_count() { echo 0; }
+mule_calls=0; capacity_try_mule 2>/dev/null
+remote_mule_free_count() { return 1; }
+capacity_try_mule 2>/dev/null
+if [ "$mule_calls" -eq 0 ]; then
+  echo "  ok — full or silent mule: job not offered"
+else
+  fail "full or silent mule: job offered $mule_calls time(s)"
+fi
+
+# Catches: a job that already ran on the mule and failed being sent back every
+# minute, when that failure must be re-confirmed on this machine instead.
+remote_mule_free_count() { echo 1; }
+fake_status=1; capacity_try_mule 2>/dev/null
+if [ -z "$capacity_mule_retry" ]; then
+  echo "  ok — job that failed on the mule stops being offered there"
+else
+  fail "job that failed on the mule is still being offered there"
+fi
+
 if [ "$FAILURES" -gt 0 ]; then
   echo "$FAILURES capacity test(s) FAILED" >&2
   exit 1

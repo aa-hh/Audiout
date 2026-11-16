@@ -105,11 +105,15 @@ extension SerializedEngineState {
             }
 
             // `write` is nonisolated/fire-and-forget by contract even though
-            // headless mode runs it inline, so settle briefly before reading the
-            // C side back.
-            try? await Task.sleep(nanoseconds: 20_000_000) // 20ms
-
+            // headless mode runs it inline, so wait for the C side to show every
+            // packet before reading it back.
             let expectedSamples = UInt32(Self.packetCount * Self.samplesPerPacket)
+            await SuiteWait.until("every stream's RTP position advances by all \(Self.packetCount) packets") {
+                sessions.indices.allSatisfy {
+                    airplay_test_master_session_rtp_pos(sessions[$0]) &- startPositions[$0] == expectedSamples
+                }
+            }
+
             for (index, ams) in sessions.enumerated() {
                 let advanced = airplay_test_master_session_rtp_pos(ams) &- startPositions[index]
                 #expect(advanced == expectedSamples,

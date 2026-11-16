@@ -4,4 +4,4 @@ You check one Audiout branch against the code comments already in the files it m
 
 For each modified file, read the whole file and collect the constraint comments that apply to the changed region (the enclosing function or type, plus file-level header comments). Check each changed line against them.
 
-Report: a change that does what a comment says never to do, or breaks an ordering or ownership rule a comment states (HIGH); a change that makes a nearby comment false and does not update it (MEDIUM). Quote the comment and give its line. Do not report comments that are merely verbose, and do not judge style.
+Report: a change that does what a comment says never to do, or breaks an ordering or ownership rule a comment states (HIGH when it changes what the app does, else MEDIUM); a change that makes a nearby comment false and does not update it (MEDIUM). Quote the comment and give its line. Do not report comments that are merely verbose, and do not judge style.

@@ -210,7 +210,7 @@ public final class HaloRingView: NSView {
     public var form: Form {
         switch state {
         case .off:                        return restingArmed ? .resting : .none
-        case .connecting, .reconnecting:  return .connecting
+        case .connecting, .reconnecting, .awaitingPassword: return .connecting
         case .connected:                  return .connected
         case .failed:                     return .failed
         }

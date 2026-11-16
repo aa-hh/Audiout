@@ -813,6 +813,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // `recreateTap`: `teardown()` above already blocked until in-flight IO
             // quiesced, so no delivery thread can be mid-`noteDelivered`.
             self.feedGap.reset()
+            // A rebuild that does not commit drops a coalesced request: the next
+            // start() snapshots the current exclusions anyway.
+            _ = self.rebuildCoalescer.takePending()
             self.transition(to: .idle)
         }
     }
@@ -2434,6 +2437,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 // A stop() may have raced in while we were recreating: don't clobber
                 // an idle/stopping state with a fresh capturing one.
                 guard case .creatingTap = _state else {
+                    // A rebuild that does not commit drops a coalesced request: the
+                    // next start() snapshots the current exclusions anyway.
+                    _ = rebuildCoalescer.takePending()
                     // stop() won. Return the just-created tap and tear it down OUTSIDE
                     // this lock: teardown() blocks until in-flight IO quiesces, and a
                     // blocking HAL call under `queue` head-of-line blocks the `state`
@@ -2532,6 +2538,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 ?? .tapCreationFailed(reason: String(describing: error))
             queue.sync {
                 guard case .creatingTap = _state else { return }
+                // A rebuild that does not commit drops a coalesced request: the
+                // next start() snapshots the current exclusions anyway.
+                _ = rebuildCoalescer.takePending()
                 self.tap = nil
                 self.converter = nil
                 self.publishBufferSnapshot()

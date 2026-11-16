@@ -723,6 +723,41 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
+    /// An exclusion change coalesced into a rebuild that then fails must not be
+    /// replayed by a later, unrelated rebuild after the next start().
+    // Turns red if a coalesced rebuild request survives a rebuild that never commits.
+    @Test func coalescedRequestDoesNotOutliveAFailedRebuild() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: singleProcessResolver(["com.google.Chrome": 111]))
+
+        coordinator.start()
+        #expect(tap.creates == 1)
+
+        tap.onCreateAndStart = { [weak tap, weak coordinator] in
+            guard let tap, let coordinator, tap.creates == 2 else { return }
+            coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.google.Chrome"])
+            tap.startError = .deviceLost(reason: "gone")
+        }
+
+        tap.fireDeviceChange()
+        #expect(tap.creates == 2)
+        #expect(coordinator.state == .failed(.deviceLost(reason: "gone")))
+
+        tap.onCreateAndStart = nil
+        tap.startError = nil
+        coordinator.start()
+        #expect(tap.creates == 3)
+        #expect(tap.excludedProcessObjectIDs == [111], "the restart snapshots the current exclusions")
+
+        tap.fireDeviceChange()
+        #expect(tap.creates == 4, "one device change must rebuild once, with no stale replay")
+        #expect(coordinator.state == .capturing(tap.format))
+
+        coordinator.stop()
+    }
+
     // MARK: - T1: nominal-sample-rate renegotiation drives a tap rebuild (Part A1).
     //
     // The tapped output device's nominal-sample-rate renegotiation (44.1<->48kHz —

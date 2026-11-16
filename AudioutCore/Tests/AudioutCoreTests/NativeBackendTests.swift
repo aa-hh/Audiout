@@ -427,6 +427,18 @@ private final class FakeDiscovery: DiscoverySource, @unchecked Sendable {
     func fire(_ event: DiscoveryEvent) { onEvent?(event) }
 }
 
+/// Fires the Mac's own network path recovery on demand, so a test drives the
+/// Wi-Fi blip without an `NWPathMonitor`. Same shape as `FakeDiscovery`.
+private final class FakePathRecoveryMonitor: NetworkPathRecoveryObserving, @unchecked Sendable {
+    var onRecovered: (@Sendable () -> Void)?
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    func start() { startCount += 1 }
+    func stop() { stopCount += 1 }
+    func fireRecovered() { onRecovered?() }
+}
+
+
 /// A no-socket ``DACPEndpoint`` double: the REAL `DACPServer.start(dacpID:)`
 /// binds an `NWListener` and advertises `_dacp._tcp` over Bonjour, which fires
 /// the macOS Local Network permission prompt once per `--parallel` worker
@@ -718,6 +730,11 @@ private func makeBackend(
     takeoverStripDelay: TimeInterval = 0,
     watchdogScheduler: SilenceWatchdogScheduling? = nil,
     silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
+    /// The Mac's own network path. Every call site gets an inert fake it never
+    /// fires; the path-recovery tests construct their own and pass it in so they
+    /// hold the handle.
+    pathRecoveryMonitor: FakePathRecoveryMonitor = FakePathRecoveryMonitor(),
+    pathRecoverySettle: TimeInterval = NativeBackend.defaultPathRecoverySettle,
     systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = { false },
     /// The Mac's default-output UID. `nil` by default — no device, so the
     /// volume-ownership gate reads "not our aggregate" unless a test says otherwise.
@@ -759,6 +776,8 @@ private func makeBackend(
         takeoverStripDelay: takeoverStripDelay,
         watchdogScheduler: watchdogScheduler,
         silenceFallbackDelay: silenceFallbackDelay,
+        pathRecoveryMonitor: pathRecoveryMonitor,
+        pathRecoverySettle: pathRecoverySettle,
         systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass,
         aggregateControl: NoOpAggregateControl(),
         currentDefaultOutputUID: currentDefaultOutputUID,
@@ -5179,6 +5198,64 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
         #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected,
                 "drop-off-and-return auto-reconnects a still-desired device (episode ended at disappear)")
+    }
+
+    // MARK: Network path recovery (Mac-side Wi-Fi blip)
+
+    /// A Mac-side Wi-Fi blip parked a streaming speaker and no automatic attempt
+    /// ever followed. No discovery event fires for a blip on this end, so the path
+    /// signal is the only thing that can un-park it. Turns red if
+    /// `firePathRecoveryRekick` stops un-parking or stops kicking a converge.
+    @Test func pathRecoveryReconnectsParkedDesiredDeviceOnce() async {
+        let monitor = FakePathRecoveryMonitor()
+        let clock = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            pathRecoveryMonitor: monitor, delayClock: clock.queueHoppingClock)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Blip Speaker")
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { isFailedNow(backend, device.id) }
+        let adds = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        monitor.fireRecovered()
+        backend.stateQueue.sync {}   // the settle is armed
+        clock.advance(by: NativeBackend.defaultPathRecoverySettle)
+        await pollUntil {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == adds + 1,
+                "the path coming back runs exactly one reconnect attempt for the parked device")
+        #expect(backend.devices.first { $0.id == device.id }?.isSelected == true,
+                "the reconnect re-selects the row the blip deselected")
+    }
+
+    /// A monitor never started is a silently dead feature; one never stopped is a
+    /// leaked NWPathMonitor per backend. Turns red if `start()` or `stop()` drops
+    /// its `pathRecoveryMonitor` call.
+    @Test func stopStopsThePathRecoveryMonitor() async {
+        let monitor = FakePathRecoveryMonitor()
+        let (backend, engine, _) = makeBackend(pathRecoveryMonitor: monitor)
+        backend.start()
+        await waitUntilStarted(engine)
+        await pollUntil { monitor.startCount == 1 }
+        #expect(monitor.startCount == 1, "start() must start watching the Mac's path")
+
+        backend.stop()
+        // The stop rides the backend's state queue, same as the start above, so
+        // it lands a beat after the call returns.
+        await pollUntil { monitor.stopCount == 1 }
+        #expect(monitor.stopCount == 1, "stop() must stop watching it")
     }
 
     // MARK: State-stream vs converge ordering (2026-07-17 findings)
@@ -12204,7 +12281,7 @@ extension SerializedSharedState {
 /// mutually excludes them from each other AND from every other suite under it.
 ///
 /// THREE kinds qualify, and nothing else does:
-///  - **`Telemetry._installTestSink` users** (17 of them). The sink is one
+///  - **`Telemetry._installTestSink` users** (20 of them). The sink is one
 ///    process-global slot: a second test's `_installTestSink(nil)` teardown tears
 ///    this one's sink out mid-run, and each reads back a mixture of both tests'
 ///    lines. That is the hazard the parent suite exists for.
@@ -12228,10 +12305,218 @@ extension SerializedSharedState {
 ///
 /// NOTE for the inner loop: `--filter NativeBackendTests` reaches this suite
 /// too — it matches all three suites nested here: `NativeBackendGlobalStateTests`,
-/// `SerializedSharedState`, and `NativeBackendTests` itself, 254 tests total.
+/// `SerializedSharedState`, and `NativeBackendTests` itself, 259 tests total.
 @Suite struct NativeBackendGlobalStateTests {
 
     private let isolation = TestIsolation(owner: "NativeBackendGlobalStateTests")
+
+    /// The park rows and the re-kick row are the evidence a live Wi-Fi blip
+    /// session lacked: nothing in `telemetry.jsonl` said the speaker had been
+    /// parked, why, or whether anything ever tried again. A device id or name in
+    /// any of them breaks the privacy fence in PRODUCT.md.
+    ///
+    /// Second defect: a per-signal re-kick would turn Wi-Fi association flicker
+    /// into a retry storm. The row count is the only observable that separates
+    /// one settled fire from three. Turns red if `schedulePathRecoveryRekick`
+    /// stops cancelling the armed settle, or a park row gains a device id.
+    @Test func pathRecoveryLogsParkLifecycleAndRekickWithoutIdentifiers() async {
+        let monitor = FakePathRecoveryMonitor()
+        let clock = ManualDelayClock()
+        // A settle no other test uses. The sink is process-global and the re-kick
+        // row carries no device id (the privacy fence), so `settle_ms` is what
+        // tells this backend's rows from those a concurrent test's backend logs
+        // into the same box.
+        let (backend, engine, discovery) = makeBackend(
+            pathRecoveryMonitor: monitor, pathRecoverySettle: 7,
+            delayClock: clock.queueHoppingClock)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:73", name: "Telemetry Speaker")
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        engine.pushState(device.outputID, .failed)
+        func lines(_ evt: String, _ reason: String) -> [String] {
+            box.snapshot().filter { $0.contains("\"evt\":\"\(evt)\"") && $0.contains("\"reason\":\"\(reason)\"") }
+        }
+        await pollUntil { !lines("park_set", "engine_failed").isEmpty }
+
+        monitor.fireRecovered()
+        monitor.fireRecovered()
+        monitor.fireRecovered()
+        func rekickLines() -> [String] {
+            box.snapshot().filter {
+                $0.contains("\"evt\":\"path_recovery_rekick\"") && $0.contains("\"settle_ms\":\"7000\"")
+            }
+        }
+        backend.stateQueue.sync {}   // all three signals have armed the settle
+        clock.advance(by: 7)          // every armed settle is due; cancelled ones skip
+        backend.stateQueue.sync {}   // every due settle has run or been skipped
+        Telemetry._installTestSink { box.append($0) }   // flush barrier
+        await pollUntil {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        #expect(rekickLines().count == 1,
+                "three signals inside the settle window produce one re-kick, not three")
+
+        let rekick = rekickLines()
+        #expect(rekick.contains { $0.contains("\"parked_count\":\"1\"") },
+                "the re-kick row says how many parked devices it un-parked")
+        #expect(rekick.contains { $0.contains("\"desired_count\":\"1\"") },
+                "and how many were desired at all, so a zero-park row is still readable")
+        #expect(rekick.contains { $0.contains("\"settle_ms\":\"7000\"") },
+                "and the settle it waited out")
+
+        let cleared = lines("park_cleared", "path_recovery")
+        #expect(!cleared.isEmpty, "the un-park is recorded with the reason that drove it")
+
+        let matched = lines("park_set", "engine_failed") + cleared + rekick
+        #expect(matched.allSatisfy { !$0.contains(device.id) && !$0.contains(device.descriptor.name) },
+                "no park or re-kick row carries a device id or name")
+    }
+
+    /// Defect: a recovery that lands while a converge is in flight used to un-park
+    /// and skip; the in-flight attempt then failed, re-parked, and the real
+    /// recovery was lost. The re-kick row is the proof that the branch which
+    /// records the recovery against the held slot ran before the hold opened.
+    /// Turns red if `releaseConvergingAndRequeueIfNeeded` stops clearing the park
+    /// for an id in `pathRecoveryPending`.
+    @Test func pathRecoveryDuringInFlightConvergeRetriesAfterRelease() async {
+        let monitor = FakePathRecoveryMonitor()
+        let clock = ManualDelayClock()
+        // A settle no other test uses, so the row read back out of the
+        // process-global sink is this backend's own. See the test above.
+        let (backend, engine, discovery) = makeBackend(
+            pathRecoveryMonitor: monitor, pathRecoverySettle: 9,
+            delayClock: clock.queueHoppingClock)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:72", name: "In Flight Speaker")
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let addsWhenParked = await parkDevice(backend, engine, discovery, device)
+
+        let hold = HoldPoint()
+        let firstHeldAdd = OnceFlag()
+        // Any stream: a whole-system connect goes to the speaker's own stream
+        // (`connectTargetStreamLocked`), not stream 0.
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            // The first held add is the one the blip lands on and it keeps
+            // failing. Every attempt after it is the recovery's own, and it
+            // connects, so "the gate no longer blocks it" is visible as a
+            // connected row rather than as a bare op count.
+            if firstHeldAdd.testAndSet() { engine.addFailures = []; return }
+            await hold.hold()
+        }
+
+        monitor.fireRecovered()
+        backend.stateQueue.sync {}
+        clock.advance(by: 9)
+        await pollUntil { hold.entered }             // an attempt is in flight
+
+        // The blip's own NACK, mid-attempt: the device is parked again while its
+        // converge still holds the slot.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil {
+            if case .failed(let failure) = backend.devices.first(
+                where: { $0.id == device.id })?.connectionState {
+                return failure.detail == "engine state: failed"
+            }
+            return false
+        }
+
+        // The sink goes in after the first recovery's row has been logged, so the
+        // only re-kick row in the box is the one this second recovery writes.
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        monitor.fireRecovered()
+        backend.stateQueue.sync {}
+        clock.advance(by: 9)
+        // The re-kick has to reach a parked, converging id, which is the whole
+        // case. The row is written at the end of that settle, so waiting for it
+        // is what says the settle has run.
+        await pollUntil {
+            box.snapshot().contains {
+                $0.contains("\"evt\":\"path_recovery_rekick\"") && $0.contains("\"settle_ms\":\"9000\"")
+            }
+        }
+        hold.open()
+
+        await pollUntil {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsWhenParked + 2,
+                "the failed in-flight attempt is followed by the recovery's own attempt")
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected,
+                "and the park no longer blocks it, so the speaker comes back")
+    }
+
+    /// A Mac-side Wi-Fi blip left no trace in `telemetry.jsonl`: nothing said
+    /// whether discovery had seen anything at all. These rows are the trace, and
+    /// they must never carry a device id or name: the privacy fence in PRODUCT.md
+    /// "Data Collection". Turns red if `addOrUpdate` or the disappear path stops
+    /// logging its `discovery` row, or one of them gains a device id.
+    @Test func discoveryEventsLogAppearUpdateDisappearWithoutIdentifiers() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Discovery Row Speaker")
+        // Same descriptor: the update must report no descriptor change.
+        // Changed port: the receiver restarted, so it must report one.
+        let restarted = DiscoveredDevice(
+            id: device.id,
+            descriptor: DeviceDescriptor(
+                name: device.descriptor.name, address: device.descriptor.address,
+                family: .ipv4, port: device.descriptor.port + 1,
+                txtRecord: device.descriptor.txtRecord),
+            outputID: device.outputID, isAirPlay2Supported: true)
+
+        discovery.fire(.appeared(device))
+        discovery.fire(.updated(device))
+        discovery.fire(.updated(restarted))
+        discovery.fire(.disappeared(id: device.id, wasAirPlay2Supported: true))
+
+        // The sink is process-global and carries no backend identity, so keep
+        // only this category's rows before counting them.
+        func discoveryLines() -> [String] { box.snapshot().filter { $0.contains("\"cat\":\"discovery\"") } }
+        await pollUntil { discoveryLines().contains { $0.contains("\"evt\":\"disappeared\"") } }
+
+        let lines = discoveryLines()
+        let appeared = lines.filter { $0.contains("\"evt\":\"appeared\"") }
+        #expect(appeared.count == 1, "a first sighting logs exactly one appeared row")
+        #expect(appeared.first?.contains("\"available\":\"true\"") == true)
+
+        let updated = lines.filter { $0.contains("\"evt\":\"updated\"") }
+        #expect(updated.count == 2, "two re-resolves log two updated rows")
+        #expect(updated.first?.contains("\"descriptor_changed\":\"false\"") == true,
+                "a re-resolve announcing the same descriptor is not a change")
+        #expect(updated.last?.contains("\"descriptor_changed\":\"true\"") == true,
+                "a re-resolve announcing a new port is a change")
+
+        #expect(lines.filter { $0.contains("\"evt\":\"disappeared\"") }.count == 1)
+
+        for line in lines {
+            #expect(!line.contains(device.id), "a discovery row must never carry the device id")
+            #expect(!line.contains(device.descriptor.name), "a discovery row must never carry the device name")
+        }
+    }
 
     /// A corrupt tone store must REPORT its failed load. `DeviceEQStore.load()`
     /// quarantines the bad file and throws; `init` swallowed that throw, so every

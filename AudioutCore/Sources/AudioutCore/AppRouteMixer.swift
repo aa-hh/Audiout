@@ -622,12 +622,64 @@ public final class AppRouteMixer: @unchecked Sendable {
         return out
     }
 
-    /// Clamp one summed `Int32` sample to the Int16 range (hard limiter — the
-    /// only defence against multiple loud apps wrapping into noise).
+    /// Clamp one summed `Int32` sample to the Int16 range: the final safety
+    /// after ``limit(_:state:)``, so nothing can ever wrap into noise.
     static func clip(_ sample: Int32) -> Int16 {
         if sample > 32767 { return 32767 }
         if sample < -32768 { return -32768 }
         return Int16(sample)
+    }
+
+    // razor: a peak limiter with no lookahead, so it adds no latency and the
+    // room delay accounting is untouched. Instant attack: the frame that would
+    // go over full scale sets the gain that lands it exactly on full scale.
+    // Stereo-linked. The gain then holds 20 ms (one period of 50 Hz, so it does
+    // not ride a bass waveform) and releases toward 1 with a 100 ms time
+    // constant. The threshold is full scale itself, so a sum that never exceeds
+    // it passes bit-identical. Cost: an onset's first rise past full scale is
+    // pinned at full scale for under a quarter period, where a hard clip pins
+    // every cycle. Upgrade path, if onsets audibly crunch: a lookahead delay of
+    // a few ms here, added to the per-app latency the room delay accounts for.
+    static let limiterHoldFrames = 882
+    static let limiterReleaseCoefficient = 1 - exp(-1.0 / (0.1 * Double(outputSampleRate)))
+
+    /// Gain state one mixed stream carries between emissions.
+    struct LimiterState {
+        var gain: Double = 1
+        var holdRemaining = 0
+    }
+
+    /// Scale interleaved-stereo summed samples in place so no frame exceeds
+    /// full scale (see the razor note above). Allocation-free and lock-free;
+    /// leaves every sample untouched while `state.gain` is 1.
+    static func limit(_ samples: UnsafeMutableBufferPointer<Int32>, state: inout LimiterState) {
+        var gain = state.gain
+        var hold = state.holdRemaining
+        var i = 0
+        while i + 1 < samples.count {
+            let left = samples[i], right = samples[i + 1]
+            let peak = max(left.magnitude, right.magnitude)
+            if peak > 32767 {
+                let needed = 32767 / Double(peak)
+                if needed < gain { gain = needed }
+                hold = limiterHoldFrames
+            } else if hold > 0 {
+                hold -= 1
+            } else if gain < 1 {
+                gain += (1 - gain) * limiterReleaseCoefficient
+                // Within one LSB of unity at full scale: snap, so recovered
+                // audio is bit-identical again. Double, not Float: near 1 a
+                // Float step rounds away and the gain stalls short of this.
+                if gain >= 1 - 1.0 / 32768 { gain = 1 }
+            }
+            if gain < 1 {
+                samples[i] = Int32((Double(left) * gain).rounded())
+                samples[i + 1] = Int32((Double(right) * gain).rounded())
+            }
+            i += 2
+        }
+        state.gain = gain
+        state.holdRemaining = hold
     }
 
     /// Pack `[Int32]` accumulated samples into interleaved S16LE `Data`, clipping
@@ -683,6 +735,8 @@ private final class MixTimeline {
     /// pre-`startFrame` contribution must be dropped, never re-inserted — see
     /// ``add(firstFrame:stereo:)``.
     private var hasEmitted = false
+    /// This stream's limiter gain, carried across emissions and drained runs.
+    private var limiter = AppRouteMixer.LimiterState()
 
     private var frameCount: Int { acc.count / 2 }
     private var endFrame: Int64 { startFrame + Int64(frameCount) }
@@ -764,6 +818,10 @@ private final class MixTimeline {
     /// Pop `frames` from the head: clip → pack → advance `startFrame`.
     private func emit(streamID: Int, frames: Int) -> AppRouteMixer.MixedBuffer {
         let sampleCount = frames * 2
+        acc.withUnsafeMutableBufferPointer { all in
+            AppRouteMixer.limit(UnsafeMutableBufferPointer(rebasing: all[0..<sampleCount]),
+                                state: &limiter)
+        }
         let pcm = AppRouteMixer.packClipped(acc[0..<sampleCount])
         let pts = AppRouteMixer.timestamp(ofFrame: startFrame)
         let emitted = AppRouteMixer.MixedBuffer(

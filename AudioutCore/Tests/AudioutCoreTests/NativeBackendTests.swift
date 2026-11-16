@@ -2055,7 +2055,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // (1) Drive the REAL NativeDiscovery → descriptor(from:) production.
         let browser = ScriptedBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = NativeDiscovery(browser: browser, localAddresses: { [] })
         let box = DiscoveredBox()
         discovery.onEvent = { if case .appeared(let d) = $0 { box.set(d) } }
         discovery.start()

@@ -112,6 +112,8 @@ dns-sd -B _raop._tcp          # confirm it advertises
    `fake-speakers.sh` runs a health check and tells you if the instance died on
    this collision.
 
+**The native backend hides a same-Mac fake speaker.** `NativeDiscovery` drops every AirPlay service that resolves to one of this Mac's own addresses, so "Dev Speaker" does not appear under `AIRPLAY_BACKEND=native` on the Mac that runs it. Run the app on a second Mac to send to it.
+
 ### Why not run a real AirPlay-2 receiver locally?
 
 That would need a source build of shairport-sync with `--with-airplay-2` + `nqptp`,

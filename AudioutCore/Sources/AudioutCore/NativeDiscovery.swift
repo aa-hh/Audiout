@@ -258,6 +258,11 @@ public final class NativeDiscovery: @unchecked Sendable {
     /// `nil` disables the filter (hostname unavailable — fail open: a phantom
     /// self row is annoying, a silently missing REAL speaker is a support case).
     private let localHostname: String?
+    /// This Mac's own addresses, called on every resolve because addresses
+    /// change with the network. A service resolved to one of them is hosted on
+    /// this Mac. The production browser reports the instance name as
+    /// `hostname`, so this address check is the one that fires in the shipped app.
+    private let localAddresses: @Sendable () -> Set<String>
     /// Instance names whose self-drop was already logged — one stderr line per
     /// service, not one per re-announce (D6: drops are loud, but not spam).
     private var loggedSelfDrops: Set<String> = []
@@ -330,16 +335,21 @@ public final class NativeDiscovery: @unchecked Sendable {
     ///   - localHostname: this machine's own mDNS hostname for the self-receiver
     ///     filter (see `localHostname` above). Defaults to the system's
     ///     `SCDynamicStoreCopyLocalHostName` + ".local"; tests inject a fixture.
+    ///   - localAddresses: this Mac's own addresses for the same filter (see
+    ///     `localAddresses` above). Defaults to `systemLocalAddresses()`.
     public convenience init(browser: ServiceBrowsing? = nil,
                             localHostname: String? = NativeDiscovery.systemLocalHostname(),
+                            localAddresses: @escaping @Sendable () -> Set<String> = { NativeDiscovery.systemLocalAddresses() },
                             removeGrace: TimeInterval = NativeDiscovery.defaultRemoveGrace) {
-        self.init(browser: browser, localHostname: localHostname, removeGrace: removeGrace,
-                  delayClock: NativeBackend.dispatchDelayClock)
+        self.init(browser: browser, localHostname: localHostname, localAddresses: localAddresses,
+                  removeGrace: removeGrace, delayClock: NativeBackend.dispatchDelayClock)
     }
 
-    init(browser: ServiceBrowsing?, localHostname: String?, removeGrace: TimeInterval,
+    init(browser: ServiceBrowsing?, localHostname: String?,
+         localAddresses: @escaping @Sendable () -> Set<String>, removeGrace: TimeInterval,
          delayClock: @escaping NativeBackend.DelayClock) {
         self.localHostname = localHostname.map(Self.normalizedHostname)
+        self.localAddresses = localAddresses
         self.removeGrace = removeGrace
         self.delayClock = delayClock
         self.browser = browser ?? NetworkFrameworkBrowser()
@@ -393,6 +403,27 @@ public final class NativeDiscovery: @unchecked Sendable {
         return name + ".local"
     }
 
+    /// This Mac's own IPv4 addresses, dotted-quad, for the self-receiver
+    /// filter. An empty set (`getifaddrs` failed) means the address check
+    /// matches nothing: fail open, see `localHostname`.
+    public static func systemLocalAddresses() -> Set<String> {
+        var addrs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addrs) == 0 else { return [] }
+        defer { freeifaddrs(addrs) }
+        var result: Set<String> = []
+        var cursor = addrs
+        while let ifa = cursor {
+            defer { cursor = ifa.pointee.ifa_next }
+            guard let sa = ifa.pointee.ifa_addr,
+                  sa.pointee.sa_family == UInt8(AF_INET) else { continue }
+            var addr = UnsafeRawPointer(sa).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
+            var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            guard inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else { continue }
+            result.insert(String(cString: buf))
+        }
+        return result
+    }
+
     /// Bonjour hostnames compare loosely: announcements carry a trailing dot
     /// ("Some-MacBook-Pro-2.local.") and mDNS names are case-insensitive.
     static func normalizedHostname(_ hostname: String) -> String {
@@ -409,11 +440,13 @@ public final class NativeDiscovery: @unchecked Sendable {
         // event, or a popover row. Both service types funnel through here, so
         // one check covers `_airplay._tcp` and `_raop._tcp`. Logged once per
         // instance name (D6: no silent drops), then quiet across re-announces.
-        if let localHostname, Self.normalizedHostname(service.hostname) == localHostname {
+        // The address check is what matches the production browser's resolves.
+        let isSelfHostname = localHostname.map { Self.normalizedHostname(service.hostname) == $0 } ?? false
+        if isSelfHostname || localAddresses().contains(service.address) {
             if loggedSelfDrops.insert(service.name).inserted {
                 let message = "[Audiout] NativeDiscovery: dropping " +
                     "\(service.serviceType.rawValue) service \"\(service.name)\" — it is this " +
-                    "Mac's own AirPlay receiver (\(service.hostname)); use the This Mac row instead\n"
+                    "Mac's own AirPlay receiver (\(service.address)); use the This Mac row instead\n"
                 FileHandle.standardError.write(Data(message.utf8))
             }
             return

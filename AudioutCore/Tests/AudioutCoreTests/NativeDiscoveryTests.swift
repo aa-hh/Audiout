@@ -94,9 +94,10 @@ import AirPlayEngine
     private func makeDiscovery(
         browser: FakeBrowser,
         localHostname: String? = NativeDiscovery.systemLocalHostname(),
+        localAddresses: @escaping @Sendable () -> Set<String> = { [] },
         delayClock: @escaping NativeBackend.DelayClock = { _, queue, work in queue.async(execute: work) }
     ) -> NativeDiscovery {
-        NativeDiscovery(browser: browser, localHostname: localHostname,
+        NativeDiscovery(browser: browser, localHostname: localHostname, localAddresses: localAddresses,
                         removeGrace: NativeDiscovery.defaultRemoveGrace, delayClock: delayClock)
     }
 
@@ -143,6 +144,43 @@ import AirPlayEngine
                 "only the non-self host surfaced; the self receiver produced no event")
         #expect(discovery.devices.map(\.id) == ["AA:BB:CC:DD:EE:07"],
                 "the self receiver never entered the known set either")
+    }
+
+    /// Shaped like production: `NetworkFrameworkBrowser` reports the instance
+    /// name as `hostname`, so only the resolved address identifies this Mac's
+    /// own receiver, on both service types.
+    /// Turns red if handleResolve stops dropping a service whose resolved address is one of this Mac's own addresses.
+    @Test func ownAddressServicesAreNeverSurfaced() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser, localHostname: "andys-macbook-pro.local",
+                                      localAddresses: { ["192.168.1.20"] })
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        browser.resolve(airplayService(id: "AA:BB:CC:DD:EE:FF", name: "Andy's MacBook Pro",
+                                       features: ap2Features, address: "192.168.1.20"))
+        browser.resolve(ResolvedService(
+            serviceType: .raop,
+            name: "AABBCCDDEEFF@Andy's MacBook Pro",
+            hostname: "AABBCCDDEEFF@Andy's MacBook Pro",
+            address: "192.168.1.20",
+            family: .ipv4,
+            port: 7000,
+            txtRecord: [:]
+        ))
+        browser.resolve(airplayService(id: "11:22:33:44:55:66", name: "Kitchen",
+                                       features: ap2Features, address: "192.168.1.30"))
+
+        let received = events.wait(count: 1)
+        guard case .appeared(let device)? = received.first else {
+            Issue.record("expected exactly the Kitchen speaker's .appeared, got \(received)")
+            return
+        }
+        #expect(device.id == "11:22:33:44:55:66",
+                "only the speaker on another address surfaced; this Mac's services produced no event")
+        #expect(discovery.devices.map(\.id) == ["11:22:33:44:55:66"],
+                "this Mac's services never entered the known set either")
     }
 
     /// An `_airplay._tcp` resolve with valid AP2 feature bits appears as an

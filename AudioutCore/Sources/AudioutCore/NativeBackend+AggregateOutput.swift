@@ -342,7 +342,7 @@ extension NativeBackend {
         let desiredIDs = self.order.filter { self.desiredOn[$0] == true }
         for id in desiredIDs {
             guard let outputID = self.outputIDs[id] else { continue }
-            self.failedGate.remove(id)
+            self.unparkLocked(id, reason: "handoff_resume")
             self.setConnectionState(.connecting, for: id)
             if !self.converging.contains(id) {
                 self.converging.insert(id)

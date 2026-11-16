@@ -394,7 +394,7 @@ extension NativeBackend {
                 // autonomous zero-backoff retry storm (live, 2026-08-06). The
                 // deliberate same-membership retry ("Try again") now travels
                 // its own entry point, `retryOutput(_:)`.
-                if previous != wantOn { self.failedGate.remove(id) }
+                if previous != wantOn { self.unparkLocked(id, reason: "membership_edge") }
 
                 // A speaker the user no longer wants, with NO session and NO
                 // engine op in flight, gives its whole-system stream back here.
@@ -753,7 +753,7 @@ extension NativeBackend {
             // THE explicit un-park site for a same-membership retry: `setOutputSet`
             // only clears the park on a genuine membership edge now (storm fix,
             // 2026-08-06), so "Try again" clears it here — for THIS id only.
-            self.failedGate.remove(id)
+            self.unparkLocked(id, reason: "retry")
             self.desiredOn[id] = true
             // Eager `.connecting`, mirroring `setOutputSet`'s newly-desired-ON arm:
             // the spinner is immediate, and the fresh `.failed → .connecting` edge

@@ -62,3 +62,4 @@ not the primary offline tool, which is the in-app `MockBackend` in
 | `notes/p1-*.md` | Phase 1 UI/API research. |
 | `notes/0e-taps-brief.md`, `0f-pipe-brief.md`, `p2-ptp-bind-probe.md` | Early capture/pipe/PTP-bind spikes. |
 | `../AirPlayEngine/docs/first-light-report.md` | Live-hardware-test ledger (that package). |
+| `notes/006-cast-latency-rig-2026-10-04.md` | Cast latency rig: Mac-side stage stamps, acoustic procedure, budget and decision tables for the 9.5 s cap and the 10-sample settle. |

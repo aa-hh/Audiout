@@ -15,8 +15,8 @@ import AudioutSharedUI
 /// bottom, padded 20 pt.
 ///
 /// The panel has two states, the title and subtitle leading-aligned in both.
-/// `offer`: the title, a subtitle, then the gold "Buy Audiout" and under it
-/// the trial button (only before any trial), both 320 x 36 pt and centred,
+/// `offer`: the title, a subtitle, then the gold "Buy Audiout" (carrying the
+/// price when one is known) and under it the trial button (only before any trial), both 320 x 36 pt and centred,
 /// the reassurance line under the trial (with the trial only), and "I have a
 /// key" on the bottom row. On a Mac that has held a paid licence the trial
 /// slot reads "Continue on one speaker" and the line under it says there is
@@ -74,6 +74,8 @@ public final class LicenseGateViewController: NSViewController {
     /// The panel's one gold button, a gold `CTAButton` and the offer's Return
     /// default.
     private var buyButton: CTAButton!
+    /// This launch's price from the licence server, or `nil` when none arrived.
+    private var localPrice: String?
     private let trialButton = CTAButton(title: LicenseGateViewController.trialTitle,
                                         style: .secondary, target: nil, action: nil)
     private let haveKeyButton = TextActionButton(title: "I have a key")
@@ -177,6 +179,20 @@ public final class LicenseGateViewController: NSViewController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// The gold button's title: the licence server's price for this buyer
+    /// when one arrived this launch, plain words otherwise.
+    static func buyTitle(price: String?) -> String {
+        guard let price else { return "Buy Audiout" }
+        return "Buy Audiout · \(price)"
+    }
+
+    /// Show this launch's price on the gold button. Never loads the view: a
+    /// gate not yet on screen picks it up when it builds the button.
+    public func setLocalPrice(_ formatted: String?) {
+        localPrice = formatted
+        buyButton?.title = Self.buyTitle(price: formatted)
+    }
+
     public override func loadView() {
         headlineLabel.font = Tokens.Font.heading
         headlineLabel.textColor = Tokens.Color.label
@@ -189,7 +205,7 @@ public final class LicenseGateViewController: NSViewController {
         offerSubtitle.alignment = .natural
         offerSubtitle.preferredMaxLayoutWidth = Self.subtitleWidth
 
-        buyButton = CTAButton(title: "Buy Audiout", style: .primary, target: self,
+        buyButton = CTAButton(title: Self.buyTitle(price: localPrice), style: .primary, target: self,
                               action: #selector(buyTapped))
         buyButton.keyEquivalent = state == .offer ? "\r" : ""
 

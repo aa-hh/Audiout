@@ -695,6 +695,34 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
+    /// An exclusion change arriving while the whole-system tap is mid-rebuild
+    /// (.creatingTap) is coalesced and replayed, so the rebuilt tap ends up
+    /// excluding the app instead of capturing it twice.
+    // Turns red if updateRouting stops requesting a rebuild while the state is .creatingTap.
+    @Test func exclusionChangeDuringRebuildIsCoalescedAndReplayed() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(
+            tap: tap, sink: SpySink(), converter: FakeConverter(),
+            processResolver: singleProcessResolver(["com.google.Chrome": 111]))
+
+        coordinator.start()
+        #expect(tap.creates == 1)
+        #expect(tap.excludedProcessObjectIDs == [])
+
+        tap.onCreateAndStart = { [weak tap, weak coordinator] in
+            guard let tap, let coordinator, tap.creates == 2 else { return }
+            coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.google.Chrome"])
+        }
+
+        tap.fireDeviceChange()
+
+        #expect(tap.creates == 3, "the exclusion change made mid-rebuild must be replayed after the rebuild commits")
+        #expect(tap.excludedProcessObjectIDs == [111], "the replayed rebuild must exclude the app")
+        #expect(coordinator.state == .capturing(tap.format))
+
+        coordinator.stop()
+    }
+
     // MARK: - T1: nominal-sample-rate renegotiation drives a tap rebuild (Part A1).
     //
     // The tapped output device's nominal-sample-rate renegotiation (44.1<->48kHz —

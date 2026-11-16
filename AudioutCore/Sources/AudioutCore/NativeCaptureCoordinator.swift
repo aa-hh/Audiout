@@ -843,8 +843,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// unrelated tick) never recreates the tap. When it does differ: if a
     /// tap is currently `.capturing`, it's recreated immediately so the new
     /// exclusion list takes effect without waiting for the next device
-    /// change; otherwise the new set is simply stored for the next
-    /// `start()`.
+    /// change. A change arriving mid-rebuild (`.creatingTap`) is coalesced
+    /// and replayed once that rebuild commits. In every other state the new
+    /// set is simply stored for the next `start()`.
     ///
     /// A later task (T6) is expected to call this from an AppKit-importing
     /// layer (`NativeBackend`/`AppDelegate`) whenever `AppRoutingController`
@@ -859,8 +860,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let needsRecreate: Bool = queue.sync {
             guard union != currentExcludedBundleIDs else { return false }
             currentExcludedBundleIDs = union
-            let capturing: Bool
-            if case .capturing = _state { capturing = true } else { capturing = false }
+            let liveOrRebuilding: Bool
+            switch _state {
+            case .capturing, .creatingTap: liveOrRebuilding = true
+            default: liveOrRebuilding = false
+            }
             // Telemetry (T2): the exclusion-list choke point — the only place
             // the live routed/excluded union actually changes. Cleartext
             // bundle IDs are deliberate (PLAN-TELEMETRY-SYSTEM.md Q6): this is
@@ -868,9 +872,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             Telemetry.log(.captureWS, "exclusion_changed", [
                 "excludedCount": "\(union.count)",
                 "excluded": union.sorted().joined(separator: ","),
-                "recreate": capturing ? "true" : "false",
+                "recreate": liveOrRebuilding ? "true" : "false",
             ])
-            return capturing
+            return liveOrRebuilding
         }
         guard needsRecreate else { return }
         // Exclusion-set change only (routed/excluded apps): the tapped output device
@@ -2506,11 +2510,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 // landed back in `.capturing` — see "rebuild_coalesced".
                 Telemetry.log(.captureWS, "rebuild_replay", [:])
                 // A trigger coalesced while we were mid-rebuild (C6). It may have been
-                // a device/rate change, so replay as `.deviceOrRateChange`: a missed
-                // reset would reintroduce the dropout, whereas an extra reset here is
-                // at worst harmless and this path only fires on rapid device/rate
-                // bounces, never on a plain connect (the sink-attach rebuild lands
-                // while `.capturing`, not `.creatingTap`, so it is never coalesced).
+                // a device/rate change or an exclusion change from `updateRouting`; the
+                // flag does not record which, so replay as `.deviceOrRateChange`. A
+                // missed reset would reintroduce the dropout; the price is one extra
+                // session reset when the trigger was only an exclusion change.
                 recreateTap(cause: .deviceOrRateChange)
             }
         } catch {

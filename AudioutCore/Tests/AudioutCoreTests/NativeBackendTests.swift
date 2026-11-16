@@ -5240,6 +5240,38 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "the reconnect re-selects the row the blip deselected")
     }
 
+    /// A speaker waiting for a password or an on-screen code is parked too, but
+    /// a fresh connect would make an Apple TV show a new code while the user types
+    /// the old one. Turns red if `firePathRecoveryRekick` stops skipping ids whose
+    /// row is `.awaitingPassword`.
+    @Test func pathRecoveryLeavesASpeakerWaitingForItsPasswordAlone() async {
+        let monitor = FakePathRecoveryMonitor()
+        let clock = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            pathRecoveryMonitor: monitor, delayClock: clock.queueHoppingClock)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:74", name: "Password Speaker")
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(backend.stateQueue.sync { backend.failedGate.contains(device.id) },
+                "precondition: the password wait parks the speaker")
+
+        monitor.fireRecovered()
+        backend.stateQueue.sync {}   // the settle is armed
+        clock.advance(by: NativeBackend.defaultPathRecoverySettle)
+        backend.stateQueue.sync {}   // the re-kick has run
+
+        #expect(backend.stateQueue.sync { backend.failedGate.contains(device.id) },
+                "the network coming back does not un-park a speaker waiting for its password")
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+    }
+
     /// A monitor never started is a silently dead feature; one never stopped is a
     /// leaked NWPathMonitor per backend. Turns red if `start()` or `stop()` drops
     /// its `pathRecoveryMonitor` call.
@@ -12305,7 +12337,7 @@ extension SerializedSharedState {
 ///
 /// NOTE for the inner loop: `--filter NativeBackendTests` reaches this suite
 /// too — it matches all three suites nested here: `NativeBackendGlobalStateTests`,
-/// `SerializedSharedState`, and `NativeBackendTests` itself, 259 tests total.
+/// `SerializedSharedState`, and `NativeBackendTests` itself, 260 tests total.
 @Suite struct NativeBackendGlobalStateTests {
 
     private let isolation = TestIsolation(owner: "NativeBackendGlobalStateTests")
@@ -12493,24 +12525,24 @@ extension SerializedSharedState {
         discovery.fire(.updated(restarted))
         discovery.fire(.disappeared(id: device.id, wasAirPlay2Supported: true))
 
-        // The sink is process-global and carries no backend identity, so keep
-        // only this category's rows before counting them.
+        // The sink is process-global and carries no backend identity: tests
+        // running beside this one log `discovery` rows into it too. So check that
+        // each expected row exists, never how many rows there are or their order.
         func discoveryLines() -> [String] { box.snapshot().filter { $0.contains("\"cat\":\"discovery\"") } }
-        await pollUntil { discoveryLines().contains { $0.contains("\"evt\":\"disappeared\"") } }
+        func has(_ evt: String, _ fields: String...) -> Bool {
+            discoveryLines().contains { line in
+                line.contains("\"evt\":\"\(evt)\"") && fields.allSatisfy { line.contains($0) }
+            }
+        }
+        await pollUntil { has("disappeared") }
 
-        let lines = discoveryLines()
-        let appeared = lines.filter { $0.contains("\"evt\":\"appeared\"") }
-        #expect(appeared.count == 1, "a first sighting logs exactly one appeared row")
-        #expect(appeared.first?.contains("\"available\":\"true\"") == true)
-
-        let updated = lines.filter { $0.contains("\"evt\":\"updated\"") }
-        #expect(updated.count == 2, "two re-resolves log two updated rows")
-        #expect(updated.first?.contains("\"descriptor_changed\":\"false\"") == true,
+        #expect(has("appeared", "\"available\":\"true\""), "a first sighting logs an appeared row")
+        #expect(has("updated", "\"descriptor_changed\":\"false\""),
                 "a re-resolve announcing the same descriptor is not a change")
-        #expect(updated.last?.contains("\"descriptor_changed\":\"true\"") == true,
+        #expect(has("updated", "\"descriptor_changed\":\"true\""),
                 "a re-resolve announcing a new port is a change")
 
-        #expect(lines.filter { $0.contains("\"evt\":\"disappeared\"") }.count == 1)
+        let lines = discoveryLines()
 
         for line in lines {
             #expect(!line.contains(device.id), "a discovery row must never carry the device id")

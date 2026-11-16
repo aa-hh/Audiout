@@ -1255,8 +1255,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// threw). While parked, converge does NOT keep issuing new sessions for the id
     /// (root cause 5: "converge kept issuing sessions post-failure"). The park is
     /// cleared — making the device re-enableable — on the next discovery update or
-    /// engine state-stream transition for the id, or by an explicit user re-toggle
-    /// to `on` after the in-flight op settled (root cause 4: no permanent wedge).
+    /// engine state-stream transition for the id, by an explicit user re-toggle
+    /// to `on` after the in-flight op settled (root cause 4: no permanent wedge),
+    /// by a wake or handoff resume, or when the Mac's own network path recovers
+    /// (`firePathRecoveryRekick`). Every change goes through `parkLocked` /
+    /// `unparkLocked`, which log it.
     var failedGate: Set<String> = []
 
     /// on stateQueue. Park `id` and record why. Logs only when the set actually
@@ -4793,7 +4796,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         pathRecoverySettleWork = nil
         guard started, !suspended, !handoffReleased else { return }
         let desiredIDs = order.filter { desiredOn[$0] == true }
-        let parked = desiredIDs.filter { failedGate.contains($0) }
+        // A speaker waiting for a password or an on-screen code is parked too, but
+        // the network is not what stopped it: a fresh connect would make an Apple
+        // TV show a new code while the user types the old one.
+        let parked = desiredIDs.filter {
+            failedGate.contains($0) && known[$0]?.connectionState != .awaitingPassword
+        }
         for id in parked {
             // The in-flight attempt was issued against the path that just came
             // back, so it is not the recovery's attempt. Un-parking here would be
@@ -5311,8 +5319,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // every mDNS re-announce, one driver of the autonomous retry
             // storm. The edge IS the backoff; a same-descriptor receiver
             // recovers via its next engine good-state transition
-            // (`applyEngineState` clears the park), a user re-toggle, or
-            // "Try again" (`retryOutput`).
+            // (`applyEngineState` clears the park), a user re-toggle,
+            // "Try again" (`retryOutput`), or the Mac's own network path
+            // recovering (`firePathRecoveryRekick`, one attempt per recovery).
             let cameBack = self.lastDescriptors[id].map {
                 !Self.descriptorsEqual($0, discovered.descriptor)
             } ?? true

@@ -161,6 +161,11 @@ airplay_test_master_session_count(void);
 void
 airplay_test_master_sessions_reset(void);
 
+/* [AirPlayEngine vendored change 2026-11-17] sender/airplay.c's PTP gate on the
+ * receiver's srcvers TXT value (NULL allowed). Exposed for the engine tests. */
+bool
+airplay_srcvers_allows_ptp(const char *srcvers);
+
 /* [idle session fill 2026-09-12] TEST/DIAGNOSTIC SEAM for the shim's idle
  * silence fill (shims/outputs.c). In production an 8 ms timer on evbase_player
  * drives the fill; headless test mode has no event base, so a test runs one

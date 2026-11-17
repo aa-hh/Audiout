@@ -261,6 +261,10 @@ evrtsp_method(enum evrtsp_cmd_type type)
 	  method = "SETPEERS";
 	  break;
 
+	case EVRTSP_REQ_SETPEERSX: // [AirPlayEngine vendored change 2026-11-17]
+	  method = "SETPEERSX";
+	  break;
+
 	default:
 	  method = NULL;
 	  break;

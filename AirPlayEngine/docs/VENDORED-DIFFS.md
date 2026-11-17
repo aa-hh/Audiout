@@ -29,9 +29,11 @@ had gone unrecorded: the speaker-input `device_id` threading and inbound
 volume parse (`83dc9483`), four verified memory leaks (`a10defd3`), the
 pair-verify double-free (`5c1f5969`), and the overridable PTP shared-memory
 name (`b961398e`). The stream-cap raise the 2026-09-17 review listed as
-missing is not missing: it is Entry 2, item 8.
-**Total vendored files touched: 11** (`sender/airplay.c`,
-`sender/airplay_events.c`, `sender/airplay_events.h`, `sender/raop.c`,
+missing is not missing: it is Entry 2, item 8. Entry 11 (2026-11-17) is the
+HomePod OS 27 change: SETPEERSX, the shared timing peer record and the
+srcvers gate for PTP.
+**Total vendored files touched: 13** (`sender/airplay.c`,
+`evrtsp/evrtsp.h`, `evrtsp/rtsp.c`, `sender/airplay_events.c`, `sender/airplay_events.h`, `sender/raop.c`,
 `pair_ap/pair_fruit.c`, `pair_ap/pair_homekit.c`,
 `libairptp/src/ptp_msg_handle.c`, `libairptp/airptp.h`,
 `libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
@@ -915,6 +917,252 @@ the "Total vendored diffs to date" count at the top of this file.
 
 ---
 
+## Entry 11 — `sender/airplay.c`, `evrtsp/evrtsp.h`, `evrtsp/rtsp.c`: SETPEERSX, Apple's timing peer record, and the srcvers gate for PTP (HomePod OS 27, 2026-11-17)
+
+- **Files**: `AirPlayEngine/Sources/CAirPlayEngine/sender/airplay.c`,
+  `evrtsp/evrtsp.h`, `evrtsp/rtsp.c`
+- **License**: GPL-2.0-or-later (`AirPlayEngine/COPYING`)
+- **Landed in**: branch `claude/homepod-user-agent` (2026-11-17)
+- **Rationale**: a standalone HomePod on HomePod OS 27 (verified on a
+  HomePod mini 2, `AudioAccessory11,1`, OS 27.0) ignores our PTP clock when
+  it only receives the legacy `SETPEERS`: packet captures showed it never sent
+  a Delay_Req to us, and it stayed silent. macOS 27 (static read of AirPlay
+  980.71.1) sends `SETPEERSX /peer-list-changed-x` to receivers with features
+  bit 52 (`SupportsSetPeersExtendedMessage`): a binary-plist array of peer
+  records, the sender's first. With that, the HomePod followed our clock and
+  played. macOS also gates PTP on `srcvers >= 354.54.6` as well as features bit
+  41. A new RTSP method needs the request enum and method-name table in
+  `evrtsp`, and the request sequence lives in `airplay.c`, so neither fits in
+  a shim.
+- **Exact hunks** (`git diff main` over the three files, 2-line context):
+
+  ```diff
+  diff --git a/AirPlayEngine/Sources/CAirPlayEngine/evrtsp/evrtsp.h b/AirPlayEngine/Sources/CAirPlayEngine/evrtsp/evrtsp.h
+  --- a/AirPlayEngine/Sources/CAirPlayEngine/evrtsp/evrtsp.h
+  +++ b/AirPlayEngine/Sources/CAirPlayEngine/evrtsp/evrtsp.h
+  @@ -68,4 +68,5 @@ enum evrtsp_cmd_type {
+     EVRTSP_REQ_GET,
+     EVRTSP_REQ_SETPEERS,
+  +  EVRTSP_REQ_SETPEERSX, // [AirPlayEngine vendored change 2026-11-17]
+   };
+
+  diff --git a/AirPlayEngine/Sources/CAirPlayEngine/evrtsp/rtsp.c b/AirPlayEngine/Sources/CAirPlayEngine/evrtsp/rtsp.c
+  --- a/AirPlayEngine/Sources/CAirPlayEngine/evrtsp/rtsp.c
+  +++ b/AirPlayEngine/Sources/CAirPlayEngine/evrtsp/rtsp.c
+  @@ -262,4 +262,8 @@ evrtsp_method(enum evrtsp_cmd_type type)
+   	  break;
+
+  +	case EVRTSP_REQ_SETPEERSX: // [AirPlayEngine vendored change 2026-11-17]
+  +	  method = "SETPEERSX";
+  +	  break;
+  +
+   	default:
+   	  method = NULL;
+  diff --git a/AirPlayEngine/Sources/CAirPlayEngine/sender/airplay.c b/AirPlayEngine/Sources/CAirPlayEngine/sender/airplay.c
+  --- a/AirPlayEngine/Sources/CAirPlayEngine/sender/airplay.c
+  +++ b/AirPlayEngine/Sources/CAirPlayEngine/sender/airplay.c
+  @@ -206,4 +206,5 @@ struct airplay_extra
+     bool supports_auth_setup;
+     bool supports_encryption;
+  +  bool supports_setpeersx; // [AirPlayEngine vendored change 2026-11-17] features bit 52
+     bool use_ptp;
+   };
+  @@ -269,4 +270,7 @@ struct airplay_session
+     bool supports_auth_setup;
+     bool supports_encryption;
+  +  // [AirPlayEngine vendored change 2026-11-17] SETPEERSX state
+  +  bool supports_setpeersx;
+  +  plist_t peer_timing_info; // the receiver's timingPeerInfo from SETUP (session), for SETPEERSX
+
+     struct event *deferredev;
+  @@ -431,5 +435,5 @@ static const struct features_type_map features_map[] =
+       { 38, "SupportsUnifiedMediaControl" },
+       { 40, "SupportsBufferedAudio" }, // srcvers >= 354.54.6 && 40
+  -    { 41, "SupportsPTP" }, // srcvers >= 366 && 41
+  +    { 41, "SupportsPTP" }, // srcvers >= 366 && 41 // [AirPlayEngine vendored change 2026-11-17] our gate: airplay_srcvers_allows_ptp (>= 354.54.6, as macOS 27)
+       { 42, "SupportsScreenMultiCodec" },
+       { 43, "SupportsSystemPairing" },
+  @@ -1338,4 +1342,7 @@ session_free(struct airplay_session *session)
+       ptpd_slave_remove(session->ptpd_slave_id);
+
+  +  if (session->peer_timing_info) // [AirPlayEngine vendored change 2026-11-17]
+  +    plist_free(session->peer_timing_info);
+  +
+     chacha_close(session->packet_cipher_hd);
+
+  @@ -1709,4 +1716,5 @@ session_make(struct output_device *device, int callback_id)
+     session->wanted_metadata = extra->wanted_metadata;
+     session->supports_encryption = extra->supports_encryption;
+  +  session->supports_setpeersx = extra->supports_setpeersx; // [AirPlayEngine vendored change 2026-11-17]
+
+     session->next_seq = AIRPLAY_SEQ_CONTINUE;
+  @@ -2780,4 +2788,92 @@ payload_make_record(struct evrtsp_request *req, struct airplay_session *session,
+   }
+
+  +// [AirPlayEngine vendored change 2026-11-17] Our own timing peer record, as
+  +// macOS 27 builds it (APSNetworkClockDetermineAndSetOrUpdateLocalPeerInfo):
+  +// sent as timingPeerInfo, as the first timingPeerList entry, and as the first
+  +// SETPEERSX entry (static read of macOS 27 AirPlay 980.71.1).
+  +static plist_t
+  +timing_peer_info_make(struct airplay_session *session)
+  +{
+  +  plist_t addresses;
+  +  plist_t info;
+  +
+  +  addresses = plist_new_array();
+  +  if (session->local_v4_address)
+  +    plist_array_append_item(addresses, plist_new_string(session->local_v4_address));
+  +  if (session->local_v6_address)
+  +    plist_array_append_item(addresses, plist_new_string(session->local_v6_address));
+  +
+  +  info = plist_new_dict();
+  +  wplist_dict_add_string(info, "ID", airplay_ptp_clock_uuid);
+  +  wplist_dict_add_uint(info, "DeviceType", 0); // 0 = Mac (1 = Apple TV, 2 = HomePod-class)
+  +  wplist_dict_add_int(info, "ClockID", (int64_t)ptpd_clock_id_get()); // ClockID in plist is signed, so e.g. 0xf842885f71750008 -> -557733460333756408
+  +  wplist_dict_add_bool(info, "SupportsClockPortMatchingOverride", false); // macOS 27 sends true, but only while following the receiver's clock; false held a 32-minute HomePod session on 2026-11-17
+  +  plist_dict_set_item(info, "Addresses", addresses);
+  +
+  +  return info;
+  +}
+  +
+  +// [AirPlayEngine vendored change 2026-11-17] macOS 27 uses PTP only when srcvers >= 354.54.6 and
+  +// features bit 41 (endpoint_getPreferredNetworkClockType). A receiver without a
+  +// parsable srcvers keeps the old rule (features bit 41 alone). Not static: the
+  +// engine tests call it through engine_bridge.h.
+  +bool
+  +airplay_srcvers_allows_ptp(const char *srcvers)
+  +{
+  +  int sv[3] = { 0, 0, 0 };
+  +
+  +  if (!srcvers || sscanf(srcvers, "%d.%d.%d", &sv[0], &sv[1], &sv[2]) < 1)
+  +    return true;
+  +
+  +  return sv[0] > 354 || (sv[0] == 354 && (sv[1] > 54 || (sv[1] == 54 && sv[2] >= 6)));
+  +}
+  +
+  +// [AirPlayEngine vendored change 2026-11-17] SETPEERSX (features bit 52): a binary plist array of peer
+  +// records, ours first.
+  +static int
+  +payload_make_setpeersx(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+  +{
+  +  plist_t root;
+  +  uint8_t *data;
+  +  size_t len;
+  +  int ret;
+  +
+  +  if (!session->master_session->use_ptp || !session->supports_setpeersx)
+  +    return 1; // Skip to next request
+  +
+  +  root = plist_new_array();
+  +  plist_array_append_item(root, timing_peer_info_make(session));
+  +  if (session->peer_timing_info)
+  +    plist_array_append_item(root, plist_copy(session->peer_timing_info));
+  +
+  +  ret = wplist_to_bin(&data, &len, root);
+  +  plist_free(root);
+  +
+  +  if (ret < 0)
+  +    return -1;
+  +
+  +  evbuffer_add(req->output_buffer, data, len);
+  +  free(data); // evbuffer_add copies
+  +
+  +  return 0;
+  +}
+  +
+  +// [AirPlayEngine vendored change 2026-11-17]
+  +static enum airplay_seq_type
+  +response_handler_setpeersx(struct evrtsp_request *req, struct airplay_session *session)
+  +{
+  +  // razor: an OK reply is only logged; macOS updates its record of the receiver
+  +  // from a dictionary reply. Upgrade path: parse it into session->peer_timing_info.
+  +  DPRINTF(E_LOG, L_AIRPLAY, "SETPEERSX reply from '%s': %d, %zu bytes\n",
+  +    session->devname, req->response_code, evbuffer_get_length(req->input_buffer));
+  +
+  +  // A receiver that advertises bit 52 but refuses SETPEERSX gets the legacy
+  +  // SETPEERS, the next row, instead of no peer list at all.
+  +  if (req->response_code != RTSP_OK)
+  +    session->supports_setpeersx = false;
+  +
+  +  return AIRPLAY_SEQ_CONTINUE;
+  +}
+  +
+   static int
+   payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+  @@ -2787,5 +2883,6 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
+     int ret;
+
+  -  if (!session->master_session->use_ptp)
+  +  // [AirPlayEngine vendored change 2026-11-17] SETPEERSX replaces SETPEERS when the receiver supports it
+  +  if (!session->master_session->use_ptp || session->supports_setpeersx)
+       return 1; // Skip to next request
+
+  @@ -2843,5 +2940,4 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
+   {
+     plist_t root;
+  -  plist_t addresses;
+     plist_t timingpeerinfo;
+     plist_t timingpeerlist;
+  @@ -2853,16 +2949,5 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
+     device_id_colon_make(device_id_colon, sizeof(device_id_colon), airplay_device_id);
+
+  -  addresses = plist_new_array();
+  -  if (session->local_v4_address)
+  -    plist_array_append_item(addresses, plist_new_string(session->local_v4_address));
+  -  if (session->local_v6_address)
+  -    plist_array_append_item(addresses, plist_new_string(session->local_v6_address));
+  -
+  -  timingpeerinfo = plist_new_dict();
+  -  wplist_dict_add_string(timingpeerinfo, "ID", airplay_ptp_clock_uuid); // iOS sends a UUID, but where does it come from?
+  -  wplist_dict_add_uint(timingpeerinfo, "DeviceType", 0);
+  -  wplist_dict_add_int(timingpeerinfo, "ClockID", (int64_t)ptpd_clock_id_get()); // ClockID in plist is signed, so e.g. 0xf842885f71750008 -> -557733460333756408
+  -  wplist_dict_add_bool(timingpeerinfo, "SupportsClockPortMatchingOverride", false); // iOS says true, no idea what it means
+  -  plist_dict_set_item(timingpeerinfo, "Addresses", addresses);
+  +  timingpeerinfo = timing_peer_info_make(session); // [AirPlayEngine vendored change 2026-11-17]
+
+     timingpeerlist = plist_new_array();
+  @@ -3356,4 +3441,9 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
+     if (session->master_session->use_ptp)
+       {
+  +      // [AirPlayEngine vendored change 2026-11-17] keep the receiver's record for SETPEERSX
+  +      item = plist_dict_get_item(response, "timingPeerInfo");
+  +      if (item && !session->peer_timing_info)
+  +	session->peer_timing_info = plist_copy(item);
+  +
+         ret = handle_timingpeerinfo(&session->ptpd_slave_id, response, session->local_v4_address, session->local_v6_address);
+         if (ret < 0)
+  @@ -3761,5 +3851,6 @@ static struct airplay_seq_definition airplay_seq_definition[] =
+   // The size of the second array dimension MUST at least be the size of largest
+   // sequence + 1, because then we can count on a zero terminator when iterating
+  -static struct airplay_seq_request airplay_seq_request[][7] =
+  +// [AirPlayEngine vendored change 2026-11-17] second dimension 7 -> 8 for the SETPEERSX row
+  +static struct airplay_seq_request airplay_seq_request[][8] =
+   {
+     {
+  @@ -3774,4 +3865,7 @@ static struct airplay_seq_request airplay_seq_request[][7] =
+       { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (session)", EVRTSP_REQ_SETUP, payload_make_setup_session, response_handler_setup_session, "application/x-apple-binary-plist", NULL, true },
+       { AIRPLAY_SEQ_START_PLAYBACK, "RECORD", EVRTSP_REQ_RECORD, payload_make_record, response_handler_record, NULL, NULL, false },
+  +    // [AirPlayEngine vendored change 2026-11-17] SETPEERSX row (array second dimension raised 7 -> 8),
+  +    // before SETPEERS so a rejected SETPEERSX falls back to it
+  +    { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERSX", EVRTSP_REQ_SETPEERSX, payload_make_setpeersx, response_handler_setpeersx, "application/x-apple-binary-plist", "/peer-list-changed-x", true },
+       { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERS", EVRTSP_REQ_SETPEERS, payload_make_setpeers, NULL, "/peer-list-changed", NULL, false },
+       { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (stream)", EVRTSP_REQ_SETUP, payload_make_setup_stream, response_handler_setup_stream, "application/x-apple-binary-plist", NULL, false },
+  @@ -4187,5 +4281,8 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const
+     if (keyval_get(&features_kv, "Authentication_8"))
+       extra->supports_auth_setup = 1;
+  -  if (keyval_get(&features_kv, "SupportsPTP") && !(devcfg && cfg_getbool(devcfg, "ptp_disable")) && !airplay_ptp_is_disabled)
+  +  if (keyval_get(&features_kv, "SupportsSetPeersExtendedMessage")) // [AirPlayEngine vendored change 2026-11-17]
+  +    extra->supports_setpeersx = 1;
+  +  bool srcvers_ptp_ok = airplay_srcvers_allows_ptp(keyval_get(txt, "srcvers")); // [AirPlayEngine vendored change 2026-11-17]
+  +  if (keyval_get(&features_kv, "SupportsPTP") && srcvers_ptp_ok && !(devcfg && cfg_getbool(devcfg, "ptp_disable")) && !airplay_ptp_is_disabled)
+       extra->use_ptp = 1;
+
+  ```
+- **In-file marker**: `[AirPlayEngine vendored change 2026-11-17]` on every
+  hunk in all three files.
+
+---
+
 ## Not a vendored diff — `libairptp/module.modulemap`
 
 `libairptp/module.modulemap` (added in commit `9c082f06`) sits inside a
@@ -927,13 +1175,13 @@ file is modified by it, so it needs no entry above.
 
 ---
 
-**Total vendored files touched: 11** — `sender/airplay.c`,
-`sender/airplay_events.c`, `sender/airplay_events.h`, `sender/raop.c`,
+**Total vendored files touched: 13** — `sender/airplay.c`,
+`evrtsp/evrtsp.h`, `evrtsp/rtsp.c`, `sender/airplay_events.c`, `sender/airplay_events.h`, `sender/raop.c`,
 `pair_ap/pair_fruit.c`, `pair_ap/pair_homekit.c`,
 `libairptp/src/ptp_msg_handle.c`, `libairptp/airptp.h`,
 `libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
 `libairptp/src/daemon.c`. Several carry more than one distinct diff:
-`airplay.c` (Entries 2, 4, 7), `raop.c` (Entries 3a, 3b, 4, 8, 9),
+`airplay.c` (Entries 2, 4, 7, 11), `raop.c` (Entries 3a, 3b, 4, 8, 9),
 `airplay_events.c` (Entries 7, 8), `ptp_msg_handle.c` (Entries 1, 6), and the
 four libairptp files (Entries 5, 10). (Note: the sibling `stream_id`
 additions to `shims/outputs.h` and `shims/engine_bridge.h`, and T3's

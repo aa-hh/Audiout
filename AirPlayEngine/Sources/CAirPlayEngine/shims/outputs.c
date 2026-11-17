@@ -96,12 +96,57 @@ outputs_device_add(struct output_device *add, bool new_deselect)
   if (!add)
     return NULL;
 
-  // Ported from OwnTone outputs.c:outputs_device_add (the AP1/AP2 dual-type
-  // priority merge is dropped — this engine has a single backend, so a device
-  // with the same id is always the same type). Two cases: brand-new device
-  // (take ownership, prepend), or re-appearing device (merge addresses/name/
-  // password into the existing entry, then free `add`).
+  // Ported from OwnTone outputs.c:outputs_device_add. Two cases: brand-new
+  // device (take ownership, prepend), or re-appearing device (merge addresses/
+  // name/password into the existing entry, then free `add`).
   device = outputs_device_get(add->id);
+
+  // A speaker that advertises both AirPlay 2 and AirPlay 1 arrives as two adds
+  // with the same id. OwnTone's dual-type merge (dropped while this engine had
+  // one backend, never restored when raop.c landed in 54edd352) keeps the
+  // backend with the lower priority number — AirPlay 2, since Package.swift
+  // defines PREFER_AIRPLAY2 — whichever listing arrives first. Unlike OwnTone, a
+  // device with a live session keeps its backend and holds the better listing
+  // until outputs_device_apply_held_upgrade runs before the next start, and the
+  // caller always gets a device back (a NULL return makes the sender free `add`
+  // a second time).
+  if (device && device->type != add->type)
+    {
+      struct output_definition *have = backend_for(device);
+      struct output_definition *want = backend_for(add);
+      bool better = have && want && want->priority < have->priority;
+
+      if (better && device->session)
+        {
+          DPRINTF(E_INFO, L_AIRPLAY, "Holding %s listing for '%s' until its %s session ends\n",
+                  want->name, device->name, have->name);
+          outputs_device_free(device->held_upgrade);
+          device->held_upgrade = add;
+          return device;
+        }
+
+      if (!better)
+        {
+          DPRINTF(E_DBG, L_AIRPLAY, "Ignoring %s listing for '%s', keeping %s\n",
+                  want ? want->name : "?", device->name, have ? have->name : "?");
+          outputs_device_free(add);
+          return device;
+        }
+
+      DPRINTF(E_INFO, L_AIRPLAY, "Switching '%s' from %s to %s\n", device->name, have->name, want->name);
+
+      // The host writes these onto the registry entry (AirPlayEngine.swift:
+      // feedDescriptor sets auth_key, bind sets stream_id before device_start,
+      // volume follows the session), and an unchanged listing is not fed
+      // again, so carry them to the replacement.
+      if (!add->auth_key && device->auth_key)
+        add->auth_key = strdup(device->auth_key);
+      add->volume = device->volume;
+      add->stream_id = device->stream_id;
+
+      outputs_device_remove(device);
+      device = NULL;
+    }
 
   if (!device)
     {
@@ -150,6 +195,32 @@ outputs_device_add(struct output_device *add, bool new_deselect)
   return device;
 }
 
+struct output_device *
+outputs_device_apply_held_upgrade(uint64_t id)
+{
+  struct output_device *device = outputs_device_get(id);
+  struct output_device *held;
+
+  if (!device || !device->held_upgrade || device->session)
+    return device;
+
+  held = device->held_upgrade;
+  device->held_upgrade = NULL;
+  return outputs_device_add(held, false); // carries auth_key, volume, stream_id
+}
+
+void
+outputs_device_drop_held_upgrade(uint64_t id)
+{
+  struct output_device *device = outputs_device_get(id);
+
+  if (!device || !device->held_upgrade)
+    return;
+
+  outputs_device_free(device->held_upgrade);
+  device->held_upgrade = NULL;
+}
+
 void
 outputs_device_remove(struct output_device *remove)
 {
@@ -179,6 +250,8 @@ outputs_device_free(struct output_device *device)
   // then the stop_timer event, then the owned strings, then the struct.
   if (device->session)
     DPRINTF(E_LOG, L_PLAYER, "BUG! Freeing device with active session?\n");
+
+  outputs_device_free(device->held_upgrade);
 
   // device_free_extra frees the backend's per-device extra (airplay_extra:
   // mdns_name + struct; raop_extra: the struct) via the owning backend. Guard on

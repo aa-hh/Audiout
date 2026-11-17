@@ -26,12 +26,13 @@ import CAirPlayEngine
 
     @Test func outputRaopDescriptorIsWired() {
         // Neutral product name + shared "airplay" config section + the RAOP
-        // dispatch type (OUTPUT_TYPE_RAOP == 0). PREFER_AIRPLAY2 is not defined,
-        // so priority is 1.
+        // dispatch type (OUTPUT_TYPE_RAOP == 0). Package.swift defines
+        // PREFER_AIRPLAY2, so AirPlay 1 ranks second (priority 2).
         #expect(String(cString: output_raop.name) == "AirPlay 1")
         #expect(String(cString: output_raop.cfg_name) == "airplay")
         #expect(output_raop.type == OUTPUT_TYPE_RAOP)
-        #expect(output_raop.priority == 1)
+        #expect(output_raop.priority == 2)
+        #expect(output_airplay.priority == 1)
         #expect(output_raop.disabled == 0)
 
         // Every entry point the two-backend dispatcher will fan to must be wired.
@@ -58,6 +59,22 @@ import CAirPlayEngine
 
         // device_quality_set is deliberately NOT set (brief §8).
         #expect(output_raop.device_quality_set == nil, "raop must not set device_quality_set")
+    }
+
+    // MARK: - PTP gate on the receiver's srcvers
+
+    /// The defect this turns red: PTP offered to a receiver older than the
+    /// 354.54.6 macOS 27 requires, or refused to one with no srcvers at all.
+    @Test func srcversGateMatchesMacOS() {
+        let cases: [(String?, Bool)] = [
+            (nil, true), ("abc", true), ("354.54.5", false), ("354.54.6", true),
+            ("354.55", true), ("353.99.9", false), ("366.0", true), ("980.77.2", true),
+        ]
+        for (srcvers, expected) in cases {
+            let got = srcvers.map { $0.withCString { airplay_srcvers_allows_ptp($0) } }
+                ?? airplay_srcvers_allows_ptp(nil)
+            #expect(got == expected, "srcvers \(srcvers ?? "nil")")
+        }
     }
 
     // MARK: - Two-backend dispatch by device->type (T4, brief §6.1/§6.2)

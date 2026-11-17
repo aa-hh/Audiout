@@ -138,6 +138,11 @@ struct output_device
   void *extra_device_info;
   void *session;
 
+  // A preferred-protocol listing (AirPlay 2 over AirPlay 1) that arrived while
+  // this device had a live session; outputs_device_apply_held_upgrade swaps it
+  // in before the next start. Owned, freed with the device.
+  struct output_device *held_upgrade;
+
   struct output_device *next;
 };
 
@@ -387,6 +392,17 @@ outputs_device_remove(struct output_device *remove);
 
 void
 outputs_device_free(struct output_device *device);
+
+/* Swap in a held preferred-protocol listing for device `id` if it has one and
+ * no live session; returns the registry entry for `id` afterwards (or NULL).
+ * Engine thread. */
+struct output_device *
+outputs_device_apply_held_upgrade(uint64_t id);
+
+/* Forget a held listing for device `id` (its protocol stopped advertising).
+ * Engine thread. */
+void
+outputs_device_drop_held_upgrade(uint64_t id);
 
 /* --- Two-backend per-device dispatch (raop-seam-brief §6.2).
  *

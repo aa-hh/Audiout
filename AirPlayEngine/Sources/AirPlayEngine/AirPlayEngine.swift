@@ -84,7 +84,7 @@ public struct EngineConfig: Sendable {
 
     public init(
         clientName: String = "AirPlayEngine",
-        userAgent: String = "AirPlayEngine/0.1.0",
+        userAgent: String = "AirPlay/980.71.1",
         bindAddress: String? = nil,
         enableIPv6: Bool = true,
         timingPort: Int = 0,
@@ -725,6 +725,13 @@ public actor AirPlayEngine {
             }
         }
 
+        // The sender never reaches the registry for an AirPlay 2 listing whose
+        // entry is a playing AirPlay 1 device (airplay.c finds devices by type),
+        // so a listing held for it is dropped here when it stops advertising.
+        if !appearing, descriptor.kind == .airplay, let id = descriptor.parsedID {
+            outputs_device_drop_held_upgrade(id.rawValue)
+        }
+
         descriptor.name.withCString { name in
             descriptor.hostname.withCString { host in
                 descriptor.address.withCString { addr in
@@ -893,6 +900,11 @@ public actor AirPlayEngine {
         // follows (startOp runs unserialized because this call owns the slot).
         if serialize { await acquireOp(id) }
         defer { if serialize { releaseOp(id) } }
+
+        // An AirPlay 2 listing that arrived while this speaker played over
+        // AirPlay 1 was held by the registry (shims/outputs.c); swap it in now,
+        // before a fresh start, so the speaker moves to AirPlay 2.
+        await applyHeldUpgrade(id: id)
 
         // Idempotency guard (first-light hardening #5): an output already in a
         // live session is a no-op success — don't re-issue device_start, which
@@ -1150,6 +1162,15 @@ public actor AirPlayEngine {
             // Otherwise, map normalized 0.0–1.0 to device volume 0–100.
             device.pointee.volume = Int32(normalized < 0 ? -1 : (normalized * 100.0).rounded())
         }
+        if issueOverride != nil { apply() }
+        else if let t = engineThreadHolder.current { try? await t.run(apply) }
+    }
+
+    /// Swap in a preferred-protocol listing the registry held while `id` was
+    /// playing (shims/outputs.c `outputs_device_apply_held_upgrade`). No-op
+    /// when nothing is held or a session is live.
+    private func applyHeldUpgrade(id: OutputID) async {
+        let apply: () -> Void = { _ = outputs_device_apply_held_upgrade(id.rawValue) }
         if issueOverride != nil { apply() }
         else if let t = engineThreadHolder.current { try? await t.run(apply) }
     }

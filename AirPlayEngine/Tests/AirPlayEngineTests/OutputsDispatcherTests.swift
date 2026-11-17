@@ -451,5 +451,101 @@ extension SerializedEngineState {
             let dev = makeDevice(id: 0xCAFE + 1, session: true)
             #expect(AirPlayEngine.stopSessionIsLive(dev))
         }
+
+        // MARK: - A speaker advertising both AirPlay 2 and AirPlay 1
+        //
+        // Discovery feeds both listings under one id; outputs_device_add keeps
+        // AirPlay 2 (PREFER_AIRPLAY2) whichever arrives first, never swaps a device
+        // with a live session, and player_device_remove ignores the other
+        // protocol's listing going away.
+
+        @discardableResult
+        private func addListing(id: UInt64, type: output_types, address: String? = nil)
+            -> UnsafeMutablePointer<output_device>
+        {
+            let dev = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
+            dev.initialize(to: output_device())
+            dev.pointee.id = id
+            dev.pointee.type = type
+            if let address { dev.pointee.v4_address = strdup(address); dev.pointee.v4_port = 7000 }
+            return outputs_device_add(dev, false)!
+        }
+
+        /// The defect this turns red: the AirPlay 1 listing arriving first kept the
+        /// speaker on AirPlay 1 for the whole run (the merge rule was dropped).
+        @Test func airPlay2ListingReplacesEarlierAirPlay1() {
+            let first = addListing(id: 0xD0A1, type: OUTPUT_TYPE_RAOP)
+            // What the host wrote onto the AirPlay 1 entry must survive the swap
+            // (a per-app bind sets stream_id before device_start).
+            first.pointee.stream_id = 7
+            first.pointee.volume = 42
+            first.pointee.auth_key = strdup("pairing-key")
+            let kept = addListing(id: 0xD0A1, type: OUTPUT_TYPE_AIRPLAY)
+            #expect(kept.pointee.type == OUTPUT_TYPE_AIRPLAY)
+            #expect(outputs_device_get(0xD0A1)?.pointee.type == OUTPUT_TYPE_AIRPLAY)
+            #expect(kept.pointee.stream_id == 7)
+            #expect(kept.pointee.volume == 42)
+            #expect(kept.pointee.auth_key.map { String(cString: $0) } == "pairing-key")
+        }
+
+        /// The defect this turns red: a later AirPlay 1 listing overrode AirPlay 2.
+        @Test func airPlay1ListingIsIgnoredAfterAirPlay2() {
+            addListing(id: 0xD0A2, type: OUTPUT_TYPE_AIRPLAY)
+            let kept = addListing(id: 0xD0A2, type: OUTPUT_TYPE_RAOP)
+            #expect(kept.pointee.type == OUTPUT_TYPE_AIRPLAY)
+        }
+
+        /// The defect this turns red: swapping a playing AirPlay 1 device for its
+        /// AirPlay 2 listing freed the live session out from under the sender.
+        @Test func playingDeviceKeepsItsBackend() {
+            let playing = addListing(id: 0xD0A3, type: OUTPUT_TYPE_RAOP)
+            playing.pointee.session = UnsafeMutableRawPointer(bitPattern: 0x1)
+            let kept = addListing(id: 0xD0A3, type: OUTPUT_TYPE_AIRPLAY)
+            #expect(kept == playing)
+            #expect(kept.pointee.type == OUTPUT_TYPE_RAOP)
+            #expect(kept.pointee.held_upgrade?.pointee.type == OUTPUT_TYPE_AIRPLAY)
+            // Still playing: nothing is swapped yet.
+            #expect(outputs_device_apply_held_upgrade(0xD0A3) == playing)
+            playing.pointee.session = nil
+        }
+
+        /// The defect this turns red: a speaker whose AirPlay 2 listing arrived
+        /// mid-session stayed on AirPlay 1 for good, since discovery never feeds
+        /// an unchanged listing again.
+        @Test func heldAirPlay2ListingAppliesAfterSession() {
+            let playing = addListing(id: 0xD0A5, type: OUTPUT_TYPE_RAOP)
+            playing.pointee.session = UnsafeMutableRawPointer(bitPattern: 0x1)
+            addListing(id: 0xD0A5, type: OUTPUT_TYPE_AIRPLAY)
+            playing.pointee.session = nil
+            let after = outputs_device_apply_held_upgrade(0xD0A5)
+            #expect(after?.pointee.type == OUTPUT_TYPE_AIRPLAY)
+            #expect(after?.pointee.held_upgrade == nil)
+        }
+
+        /// The defect this turns red: a held AirPlay 2 listing whose speaker then
+        /// stopped advertising AirPlay 2 was still swapped in at the next start.
+        @Test func heldListingDroppedWhenItsProtocolGoes() {
+            let playing = addListing(id: 0xD0A6, type: OUTPUT_TYPE_RAOP)
+            playing.pointee.session = UnsafeMutableRawPointer(bitPattern: 0x1)
+            addListing(id: 0xD0A6, type: OUTPUT_TYPE_AIRPLAY)
+            outputs_device_drop_held_upgrade(0xD0A6)
+            #expect(playing.pointee.held_upgrade == nil)
+            playing.pointee.session = nil
+            #expect(outputs_device_apply_held_upgrade(0xD0A6)?.pointee.type == OUTPUT_TYPE_RAOP)
+        }
+
+        /// The defect this turns red: the AirPlay 1 listing going away cleared the
+        /// address of the AirPlay 2 entry kept under the same id.
+        @Test func otherProtocolRemovalKeepsAddress() {
+            addListing(id: 0xD0A4, type: OUTPUT_TYPE_AIRPLAY, address: "192.0.2.4")
+            let gone = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
+            gone.initialize(to: output_device())
+            gone.pointee.id = 0xD0A4
+            gone.pointee.type = OUTPUT_TYPE_RAOP
+            gone.pointee.v4_port = 1
+            #expect(player_device_remove(gone) == 0)
+            let kept = outputs_device_get(0xD0A4)
+            #expect(kept?.pointee.v4_address.map { String(cString: $0) } == "192.0.2.4")
+        }
     }
 }

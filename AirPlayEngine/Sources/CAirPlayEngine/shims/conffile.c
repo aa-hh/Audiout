@@ -11,7 +11,7 @@
 //
 // Keys served (seam-map §3.1, "global / shared" scope — the ~16 keys airplay.c
 // + ptpd.c + the net helpers read):
-//   general.user_agent            str   "AirPlayEngine/0.1.0"
+//   general.user_agent            str   "AirPlay/980.71.1"
 //   general.bind_address          str   NULL   (PTP bind addr; "::"->any)
 //   general.ipv6                  bool  false   (OwnTone's default; the Swift
 //                                                EngineConfig re-enables it via
@@ -89,7 +89,9 @@ struct conffile_config
 };
 
 static struct conffile_config config = {
-  .user_agent   = "AirPlayEngine/0.1.0", /* neutralized product name (SPEC §4) */
+  /* HomePod OS 27 answers GET /info with 403 unless the User-Agent looks like
+     Apple's own; macOS 27 sends "AirPlay/980.71.1" (OwnTone 34603ba, issue #2042, uses 999.0.0). */
+  .user_agent   = "AirPlay/980.71.1",
   .library_name = "My Music on %h",
   .bind_address = NULL,                  /* NULL => bind to any; ptpd maps "::"->NULL */
   .ipv6         = 0,                     /* OFF by default, matching OwnTone's own

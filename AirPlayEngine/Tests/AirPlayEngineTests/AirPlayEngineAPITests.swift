@@ -84,6 +84,37 @@ extension SerializedEngineState {
             #expect(state == .streaming)
         }
 
+        /// The defect this turns red: a speaker whose AirPlay 2 listing arrived
+        /// while it played over AirPlay 1 started its next session on AirPlay 1
+        /// again, without the pairing key the host had written.
+        @Test func addOutputSwapsInHeldAirPlay2Listing() async throws {
+            let id = OutputID(rawValue: 0xA1D2)
+            let raop = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
+            raop.initialize(to: output_device())
+            raop.pointee.id = id.rawValue
+            raop.pointee.type = OUTPUT_TYPE_RAOP
+            let playing = outputs_device_add(raop, false)!
+            playing.pointee.auth_key = strdup("pairing-key")
+            playing.pointee.session = UnsafeMutableRawPointer(bitPattern: 0x1)
+            let ap2 = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
+            ap2.initialize(to: output_device())
+            ap2.pointee.id = id.rawValue
+            ap2.pointee.type = OUTPUT_TYPE_AIRPLAY
+            _ = outputs_device_add(ap2, false)
+            playing.pointee.session = nil
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+            await engine.registerKnownOutputForTest(id)
+            async let op: Void = engine.addOutput(id)
+            try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
+            try await op
+
+            let device = outputs_device_get(id.rawValue)
+            #expect(device?.pointee.type == OUTPUT_TYPE_AIRPLAY)
+            #expect(device?.pointee.auth_key.map { String(cString: $0) } == "pairing-key")
+        }
+
         // MARK: - addOutput: CONNECTED resolves the waiter (the REAL Sonos/AP2 path).
         //
         // REGRESSION (2026-07-16 first-light hang): against a real AirPlay 2 buffered

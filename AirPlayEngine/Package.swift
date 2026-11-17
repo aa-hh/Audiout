@@ -303,6 +303,11 @@ let package = Package(
                 // always), NOT CONFIG_OPENSSL. Avoids an openssl dep. ---
                 .define("CONFIG_GCRYPT"),
 
+                // Prefer AirPlay 2 over AirPlay 1 for a speaker that advertises
+                // both (output_definition.priority in sender/airplay.c + raop.c,
+                // used by shims/outputs.c:outputs_device_add).
+                .define("PREFER_AIRPLAY2"),
+
                 // --- Brew include paths for the deps the cluster needs
                 // (seam-map §7 + Appendix A): libevent, libsodium, libgcrypt
                 // (+ its libgpg-error dep), libplist. Prefix is resolved

@@ -96,12 +96,36 @@ outputs_device_add(struct output_device *add, bool new_deselect)
   if (!add)
     return NULL;
 
-  // Ported from OwnTone outputs.c:outputs_device_add (the AP1/AP2 dual-type
-  // priority merge is dropped — this engine has a single backend, so a device
-  // with the same id is always the same type). Two cases: brand-new device
-  // (take ownership, prepend), or re-appearing device (merge addresses/name/
-  // password into the existing entry, then free `add`).
+  // Ported from OwnTone outputs.c:outputs_device_add. Two cases: brand-new
+  // device (take ownership, prepend), or re-appearing device (merge addresses/
+  // name/password into the existing entry, then free `add`).
   device = outputs_device_get(add->id);
+
+  // [AirPlayEngine vendored change 2026-11-17] A speaker that advertises both
+  // AirPlay 2 and AirPlay 1 arrives as two adds with the same id. OwnTone's
+  // dual-type merge (dropped while this engine had one backend, never restored
+  // when raop.c landed in 54edd352) keeps the backend with the lower priority
+  // number — AirPlay 2, since Package.swift defines PREFER_AIRPLAY2 — whichever
+  // listing arrives first. Unlike OwnTone, a device with a live session keeps
+  // its backend until that session ends, and the caller always gets a device
+  // back (a NULL return makes the sender free `add` a second time).
+  if (device && device->type != add->type)
+    {
+      struct output_definition *have = backend_for(device);
+      struct output_definition *want = backend_for(add);
+
+      if (device->session || !have || !want || have->priority <= want->priority)
+        {
+          DPRINTF(E_DBG, L_AIRPLAY, "Ignoring %s listing for '%s', keeping %s\n",
+                  want ? want->name : "?", device->name, have ? have->name : "?");
+          outputs_device_free(add);
+          return device;
+        }
+
+      DPRINTF(E_INFO, L_AIRPLAY, "Switching '%s' from %s to %s\n", device->name, have->name, want->name);
+      outputs_device_remove(device);
+      device = NULL;
+    }
 
   if (!device)
     {

@@ -67,6 +67,13 @@ player_device_remove(void *device)
     return -1;
 
   dev = outputs_device_get(remove->id);
+  // [AirPlayEngine vendored change 2026-11-17] The other protocol's listing of a
+  // dual AirPlay 1/2 speaker going away must not clear the kept entry's addresses.
+  if (dev && dev->type != remove->type)
+    {
+      outputs_device_free(remove);
+      return 0;
+    }
   if (!dev)
     {
       DPRINTF(E_WARN, L_PLAYER, "Device '%s' stopped advertising, but not in our list\n",

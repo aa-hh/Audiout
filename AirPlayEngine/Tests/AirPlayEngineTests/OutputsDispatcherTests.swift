@@ -451,5 +451,65 @@ extension SerializedEngineState {
             let dev = makeDevice(id: 0xCAFE + 1, session: true)
             #expect(AirPlayEngine.stopSessionIsLive(dev))
         }
+
+        // MARK: - A speaker advertising both AirPlay 2 and AirPlay 1
+        //
+        // Discovery feeds both listings under one id; outputs_device_add keeps
+        // AirPlay 2 (PREFER_AIRPLAY2) whichever arrives first, never swaps a device
+        // with a live session, and player_device_remove ignores the other
+        // protocol's listing going away.
+
+        @discardableResult
+        private func addListing(id: UInt64, type: output_types, address: String? = nil)
+            -> UnsafeMutablePointer<output_device>
+        {
+            let dev = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
+            dev.initialize(to: output_device())
+            dev.pointee.id = id
+            dev.pointee.type = type
+            if let address { dev.pointee.v4_address = strdup(address); dev.pointee.v4_port = 7000 }
+            return outputs_device_add(dev, false)!
+        }
+
+        /// The defect this turns red: the AirPlay 1 listing arriving first kept the
+        /// speaker on AirPlay 1 for the whole run (the merge rule was dropped).
+        @Test func airPlay2ListingReplacesEarlierAirPlay1() {
+            addListing(id: 0xD0A1, type: OUTPUT_TYPE_RAOP)
+            let kept = addListing(id: 0xD0A1, type: OUTPUT_TYPE_AIRPLAY)
+            #expect(kept.pointee.type == OUTPUT_TYPE_AIRPLAY)
+            #expect(outputs_device_get(0xD0A1)?.pointee.type == OUTPUT_TYPE_AIRPLAY)
+        }
+
+        /// The defect this turns red: a later AirPlay 1 listing overrode AirPlay 2.
+        @Test func airPlay1ListingIsIgnoredAfterAirPlay2() {
+            addListing(id: 0xD0A2, type: OUTPUT_TYPE_AIRPLAY)
+            let kept = addListing(id: 0xD0A2, type: OUTPUT_TYPE_RAOP)
+            #expect(kept.pointee.type == OUTPUT_TYPE_AIRPLAY)
+        }
+
+        /// The defect this turns red: swapping a playing AirPlay 1 device for its
+        /// AirPlay 2 listing freed the live session out from under the sender.
+        @Test func playingDeviceKeepsItsBackend() {
+            let playing = addListing(id: 0xD0A3, type: OUTPUT_TYPE_RAOP)
+            playing.pointee.session = UnsafeMutableRawPointer(bitPattern: 0x1)
+            let kept = addListing(id: 0xD0A3, type: OUTPUT_TYPE_AIRPLAY)
+            #expect(kept == playing)
+            #expect(kept.pointee.type == OUTPUT_TYPE_RAOP)
+            playing.pointee.session = nil
+        }
+
+        /// The defect this turns red: the AirPlay 1 listing going away cleared the
+        /// address of the AirPlay 2 entry kept under the same id.
+        @Test func otherProtocolRemovalKeepsAddress() {
+            addListing(id: 0xD0A4, type: OUTPUT_TYPE_AIRPLAY, address: "192.0.2.4")
+            let gone = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
+            gone.initialize(to: output_device())
+            gone.pointee.id = 0xD0A4
+            gone.pointee.type = OUTPUT_TYPE_RAOP
+            gone.pointee.v4_port = 1
+            #expect(player_device_remove(gone) == 0)
+            let kept = outputs_device_get(0xD0A4)
+            #expect(kept?.pointee.v4_address.map { String(cString: $0) } == "192.0.2.4")
+        }
     }
 }

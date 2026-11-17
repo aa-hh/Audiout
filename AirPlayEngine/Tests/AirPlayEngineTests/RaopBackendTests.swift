@@ -26,12 +26,13 @@ import CAirPlayEngine
 
     @Test func outputRaopDescriptorIsWired() {
         // Neutral product name + shared "airplay" config section + the RAOP
-        // dispatch type (OUTPUT_TYPE_RAOP == 0). PREFER_AIRPLAY2 is not defined,
-        // so priority is 1.
+        // dispatch type (OUTPUT_TYPE_RAOP == 0). Package.swift defines
+        // PREFER_AIRPLAY2, so AirPlay 1 ranks second (priority 2).
         #expect(String(cString: output_raop.name) == "AirPlay 1")
         #expect(String(cString: output_raop.cfg_name) == "airplay")
         #expect(output_raop.type == OUTPUT_TYPE_RAOP)
-        #expect(output_raop.priority == 1)
+        #expect(output_raop.priority == 2)
+        #expect(output_airplay.priority == 1)
         #expect(output_raop.disabled == 0)
 
         // Every entry point the two-backend dispatcher will fan to must be wired.

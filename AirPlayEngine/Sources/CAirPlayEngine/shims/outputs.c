@@ -134,6 +134,16 @@ outputs_device_add(struct output_device *add, bool new_deselect)
         }
 
       DPRINTF(E_INFO, L_AIRPLAY, "Switching '%s' from %s to %s\n", device->name, have->name, want->name);
+
+      // The host writes these onto the registry entry (AirPlayEngine.swift:
+      // feedDescriptor sets auth_key, bind sets stream_id before device_start,
+      // volume follows the session), and an unchanged listing is not fed
+      // again, so carry them to the replacement.
+      if (!add->auth_key && device->auth_key)
+        add->auth_key = strdup(device->auth_key);
+      add->volume = device->volume;
+      add->stream_id = device->stream_id;
+
       outputs_device_remove(device);
       device = NULL;
     }
@@ -196,15 +206,7 @@ outputs_device_apply_held_upgrade(uint64_t id)
 
   held = device->held_upgrade;
   device->held_upgrade = NULL;
-
-  // The host wrote these onto the entry being replaced (AirPlayEngine.swift
-  // feedDescriptor sets auth_key; volume comes from the session), and an
-  // unchanged listing is not fed again, so carry them across.
-  if (!held->auth_key && device->auth_key)
-    held->auth_key = strdup(device->auth_key);
-  held->volume = device->volume;
-
-  return outputs_device_add(held, false);
+  return outputs_device_add(held, false); // carries auth_key, volume, stream_id
 }
 
 void

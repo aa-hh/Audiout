@@ -975,6 +975,13 @@ the "Total vendored diffs to date" count at the top of this file.
   +  plist_t peer_timing_info; // the receiver's timingPeerInfo from SETUP (session), for SETPEERSX
 
      struct event *deferredev;
+  @@ -431,5 +435,5 @@ static const struct features_type_map features_map[] =
+       { 38, "SupportsUnifiedMediaControl" },
+       { 40, "SupportsBufferedAudio" }, // srcvers >= 354.54.6 && 40
+  -    { 41, "SupportsPTP" }, // srcvers >= 366 && 41
+  +    { 41, "SupportsPTP" }, // srcvers >= 366 && 41 // [AirPlayEngine vendored change 2026-11-17] our gate: airplay_srcvers_allows_ptp (>= 354.54.6, as macOS 27)
+       { 42, "SupportsScreenMultiCodec" },
+       { 43, "SupportsSystemPairing" },
   @@ -1338,4 +1342,7 @@ session_free(struct airplay_session *session)
        ptpd_slave_remove(session->ptpd_slave_id);
 

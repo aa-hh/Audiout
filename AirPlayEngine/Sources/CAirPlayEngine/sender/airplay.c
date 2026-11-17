@@ -434,7 +434,7 @@ static const struct features_type_map features_map[] =
     { 35, "SupportsTLS_PSK" },
     { 38, "SupportsUnifiedMediaControl" },
     { 40, "SupportsBufferedAudio" }, // srcvers >= 354.54.6 && 40
-    { 41, "SupportsPTP" }, // srcvers >= 366 && 41
+    { 41, "SupportsPTP" }, // srcvers >= 366 && 41 // [AirPlayEngine vendored change 2026-11-17] our gate: airplay_srcvers_allows_ptp (>= 354.54.6, as macOS 27)
     { 42, "SupportsScreenMultiCodec" },
     { 43, "SupportsSystemPairing" },
     { 44, "IsAPValeriaScreenSender" },

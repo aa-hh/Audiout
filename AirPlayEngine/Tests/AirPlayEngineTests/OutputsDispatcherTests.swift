@@ -474,10 +474,18 @@ extension SerializedEngineState {
         /// The defect this turns red: the AirPlay 1 listing arriving first kept the
         /// speaker on AirPlay 1 for the whole run (the merge rule was dropped).
         @Test func airPlay2ListingReplacesEarlierAirPlay1() {
-            addListing(id: 0xD0A1, type: OUTPUT_TYPE_RAOP)
+            let first = addListing(id: 0xD0A1, type: OUTPUT_TYPE_RAOP)
+            // What the host wrote onto the AirPlay 1 entry must survive the swap
+            // (a per-app bind sets stream_id before device_start).
+            first.pointee.stream_id = 7
+            first.pointee.volume = 42
+            first.pointee.auth_key = strdup("pairing-key")
             let kept = addListing(id: 0xD0A1, type: OUTPUT_TYPE_AIRPLAY)
             #expect(kept.pointee.type == OUTPUT_TYPE_AIRPLAY)
             #expect(outputs_device_get(0xD0A1)?.pointee.type == OUTPUT_TYPE_AIRPLAY)
+            #expect(kept.pointee.stream_id == 7)
+            #expect(kept.pointee.volume == 42)
+            #expect(kept.pointee.auth_key.map { String(cString: $0) } == "pairing-key")
         }
 
         /// The defect this turns red: a later AirPlay 1 listing overrode AirPlay 2.

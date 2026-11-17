@@ -67,6 +67,7 @@ enum evrtsp_cmd_type {
   EVRTSP_REQ_POST,
   EVRTSP_REQ_GET,
   EVRTSP_REQ_SETPEERS,
+  EVRTSP_REQ_SETPEERSX,
 };
 
 enum evrtsp_request_kind { EVRTSP_REQUEST, EVRTSP_RESPONSE };

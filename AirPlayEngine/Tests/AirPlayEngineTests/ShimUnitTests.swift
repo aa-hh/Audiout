@@ -109,7 +109,7 @@ extension SerializedEngineState {
         let library = cfg_getsec(cfg, "library")
         let shared  = cfg_getsec(cfg, "airplay_shared")
 
-        #expect(String(cString: cfg_getstr(general, "user_agent")) == "AirPlayEngine/0.1.0")
+        #expect(String(cString: cfg_getstr(general, "user_agent")) == "AirPlay/980.71.1")
         #expect(String(cString: cfg_getstr(library, "name")) == "My Music on %h")
 
         // bind_address defaults to NULL (bind to any).
@@ -189,7 +189,7 @@ extension SerializedEngineState {
 
         // A known key must NOT count as a miss.
         let before = conffile_unknown_key_count
-        #expect(String(cString: cfg_getstr(general, "user_agent")) == "AirPlayEngine/0.1.0")
+        #expect(String(cString: cfg_getstr(general, "user_agent")) == "AirPlay/980.71.1")
         #expect(conffile_unknown_key_count == before, "a served key must not register a miss")
 
         // Unknown str key -> counted, logged, returns NULL (safe default).

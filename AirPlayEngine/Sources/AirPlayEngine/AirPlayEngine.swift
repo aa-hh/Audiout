@@ -84,7 +84,7 @@ public struct EngineConfig: Sendable {
 
     public init(
         clientName: String = "AirPlayEngine",
-        userAgent: String = "AirPlayEngine/0.1.0",
+        userAgent: String = "AirPlay/980.71.1",
         bindAddress: String? = nil,
         enableIPv6: Bool = true,
         timingPort: Int = 0,

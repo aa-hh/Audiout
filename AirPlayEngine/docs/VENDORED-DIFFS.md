@@ -915,6 +915,41 @@ the "Total vendored diffs to date" count at the top of this file.
 
 ---
 
+## Entry 11 — `sender/airplay.c`, `evrtsp/evrtsp.h`, `evrtsp/rtsp.c`: SETPEERSX, Apple's timing peer record, and the srcvers gate for PTP (HomePod OS 27, 2026-11-17)
+
+- **Files**: `AirPlayEngine/Sources/CAirPlayEngine/sender/airplay.c`,
+  `evrtsp/evrtsp.h`, `evrtsp/rtsp.c`
+- **License**: GPL-2.0-or-later (`AirPlayEngine/COPYING`)
+- **Landed in**: branch `claude/homepod-user-agent` (2026-11-17)
+- **Rationale**: a standalone HomePod on HomePod OS 27 (verified on a
+  HomePod mini 2, `AudioAccessory11,1`, OS 27.0) ignores our PTP clock when
+  it only receives the legacy `SETPEERS`: packet captures showed it never sent
+  a Delay_Req to us, and it stayed silent. macOS 27 (static read of AirPlay
+  980.71.1) sends `SETPEERSX /peer-list-changed-x` to receivers with features
+  bit 52 (`SupportsSetPeersExtendedMessage`): a binary-plist array of peer
+  records, the sender's first. With that, the HomePod followed our clock and
+  played. macOS also gates PTP on `srcvers >= 354.54.6` as well as features bit
+  41. A new RTSP method needs the request enum and method-name table in
+  `evrtsp`, and the request sequence lives in `airplay.c`, so neither fits in
+  a shim.
+- **Exact hunks** (summary; `git diff main -- <file>` is authoritative):
+  - `evrtsp.h`: `EVRTSP_REQ_SETPEERSX` appended to `enum evrtsp_cmd_type`.
+  - `rtsp.c`: `case EVRTSP_REQ_SETPEERSX: method = "SETPEERSX";`.
+  - `airplay.c`: `supports_setpeersx` on `airplay_extra` (set from features bit
+    52) and `airplay_session`; `peer_timing_info` on the session (copy of the
+    receiver's `timingPeerInfo` from the SETUP (session) reply, freed in
+    `session_free`); `timing_peer_info_make()` builds our record once
+    (`SupportsClockPortMatchingOverride` stays false) and is used by
+    `payload_make_setup_session_ptp`; new `payload_make_setpeersx` +
+    `response_handler_setpeersx` and a `SETPEERSX` row after `SETPEERS` in
+    `airplay_seq_request` (second dimension 7 -> 8); `payload_make_setpeers`
+    skips when SETPEERSX applies; `srcvers_ptp_ok` added to the `use_ptp`
+    condition in `airplay_device_cb`.
+- **In-file marker**: `[AirPlayEngine vendored change 2026-11-17]` above
+  `timing_peer_info_make`.
+
+---
+
 ## Not a vendored diff — `libairptp/module.modulemap`
 
 `libairptp/module.modulemap` (added in commit `9c082f06`) sits inside a
@@ -927,13 +962,13 @@ file is modified by it, so it needs no entry above.
 
 ---
 
-**Total vendored files touched: 11** — `sender/airplay.c`,
-`sender/airplay_events.c`, `sender/airplay_events.h`, `sender/raop.c`,
+**Total vendored files touched: 13** — `sender/airplay.c`,
+`evrtsp/evrtsp.h`, `evrtsp/rtsp.c`, `sender/airplay_events.c`, `sender/airplay_events.h`, `sender/raop.c`,
 `pair_ap/pair_fruit.c`, `pair_ap/pair_homekit.c`,
 `libairptp/src/ptp_msg_handle.c`, `libairptp/airptp.h`,
 `libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
 `libairptp/src/daemon.c`. Several carry more than one distinct diff:
-`airplay.c` (Entries 2, 4, 7), `raop.c` (Entries 3a, 3b, 4, 8, 9),
+`airplay.c` (Entries 2, 4, 7, 11), `raop.c` (Entries 3a, 3b, 4, 8, 9),
 `airplay_events.c` (Entries 7, 8), `ptp_msg_handle.c` (Entries 1, 6), and the
 four libairptp files (Entries 5, 10). (Note: the sibling `stream_id`
 additions to `shims/outputs.h` and `shims/engine_bridge.h`, and T3's

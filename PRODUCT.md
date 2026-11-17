@@ -40,7 +40,7 @@ Design tension to protect, not resolve by accident: mixer-grade capability with 
 
 ## Capabilities and Constraints
 
-- AirPlay 2 multi-room sync is the shipping path (vendored OwnTone sender). AirPlay 1 (RAOP) and Bluetooth are supported, and both may take a single app's audio; Cast may not, having no per-app delivery path.
+- AirPlay 2 multi-room sync is the shipping path (vendored OwnTone sender). AirPlay 1 (RAOP) and Bluetooth are supported, and both may take a single app's audio; a Cast receiver may too, as a direct destination only, since a saved per-app group still excludes Cast.
 - **Bluetooth output sync is a shipping capability** (owner's call, 2026-08-12): Bluetooth speakers join a synced group like any AirPlay device, and future work may assume it. Roadmap 004; the code lives on `claude/foreman-roadmap-004-bt` awaiting merge, with the phone-side wiring landing separately. Audiout Remote measures a Bluetooth speaker's delay with the iPhone's microphone: two test sweeps play from the Mac at the same moment, and the gap between their arrivals becomes that speaker's offset, in seconds. AirPlay and Chromecast speakers are not measured this way; without an iPhone, the Mac's Align by ear finds the offset from paired clicks.
 - Volume model: sent level = Main × Group × Device (Main acts as ceiling).
 - License: GPL-2.0-or-later (forced by the vendored GPL sender). AirPlayEngine is a separate package as a licensing boundary — no app concepts inside it. This licence is what makes paid enforcement unavailable — see Business Model.

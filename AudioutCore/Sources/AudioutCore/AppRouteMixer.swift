@@ -149,7 +149,11 @@ public final class AppRouteMixer: @unchecked Sendable {
     public var onDestinationSetsChanged: (@Sendable ([DestinationSet]) -> Void)?
 
     /// Fired for each finished mixed buffer, tagged with its `streamID`. Called
-    /// on the delivering tap's thread, holding no lock of the mixer's.
+    /// on the delivering tap's thread. For a single-contributor stream it holds
+    /// no lock of the mixer's. For a shared (multi-contributor) stream it runs
+    /// UNDER `timelineLock`, so one stream's emissions reach the handler in
+    /// timeline order even when two taps deliver at once; the handler must
+    /// therefore stay bounded and must never re-enter the mixer.
     public var onMixedBuffer: (@Sendable (MixedBuffer) -> Void)?
 
     /// Fired once per handled buffer, while metering is active, with the PRE-
@@ -247,9 +251,17 @@ public final class AppRouteMixer: @unchecked Sendable {
     private var _snapshot: DeliverySnapshot = .empty
 
     /// Guards ONLY `timelines`. Every holder does bounded in-memory work — a
-    /// timeline add, a drain, or a removal — never a converter call, never a
-    /// Core Audio call, never a wait on `queue`. That is what makes it the kind
-    /// of lock the delivery thread may take with `lock()` rather than `try()`.
+    /// timeline add, a drain, a removal, or a shared stream's ``onMixedBuffer``
+    /// calls — never a converter call, never a Core Audio call, never a wait on
+    /// `queue`. That is what makes it the kind of lock the delivery thread may
+    /// take with `lock()` rather than `try()`.
+    ///
+    /// Running a shared stream's handler under this lock cannot stall a tap
+    /// thread that would not already have waited here: the other contributor
+    /// already takes this lock to add its share of the mix, and the handler's
+    /// work is bounded — the engine write is a fire-and-forget enqueue,
+    /// `CastFeedRing.push` is 64 `try()`s plus a memcpy, and the Bluetooth
+    /// fan-out is the same call that ran on this thread before.
     private let timelineLock = NSLock()
 
     /// streamID → its running mix timeline. Guarded by `timelineLock`.
@@ -503,9 +515,11 @@ public final class AppRouteMixer: @unchecked Sendable {
         if let level { onAppLevel?(bundleID, level) }
     }
 
-    /// Mix one app's already-converted buffer into ONE stream at `gain`, and
-    /// return whatever that stream is now ready to emit. Takes `timelineLock`
-    /// around the `timelines` touches — and nothing else; `contributorCount`
+    /// Mix one app's already-converted buffer into ONE stream at `gain`. A
+    /// single-contributor stream's buffer is returned for the caller to emit; a
+    /// shared stream's ready prefix is emitted here, under `timelineLock`, and
+    /// nothing is returned. Takes `timelineLock` around the `timelines` touches
+    /// and a shared stream's emissions — and nothing else; `contributorCount`
     /// comes from the caller's published snapshot, not from `currentSets`.
     private func mixUnderTimelineLock(
         pcm: Data, gain: Int, streamID: Int, pts: timespec, contributorCount: Int
@@ -552,10 +566,15 @@ public final class AppRouteMixer: @unchecked Sendable {
             return t
         }()
         timeline.add(firstFrame: Self.frameIndex(of: pts), stereo: scaled)
-        return timeline.drainReady(
+        // Emitted while the lock is still held: released first, a second tap
+        // could drain the next range and deliver it before this one, and the
+        // stream's one consumer would see its pts run backwards.
+        let ready = timeline.drainReady(
             streamID: streamID,
             holdFrames: Self.holdFrames,
             maxPendingFrames: Self.maxPendingFrames)
+        for emission in ready { onMixedBuffer?(emission) }
+        return []
     }
 
     /// Emit every stream's still-pending mixed audio immediately (end-of-run,
@@ -603,12 +622,71 @@ public final class AppRouteMixer: @unchecked Sendable {
         return out
     }
 
-    /// Clamp one summed `Int32` sample to the Int16 range (hard limiter — the
-    /// only defence against multiple loud apps wrapping into noise).
+    /// Clamp one summed `Int32` sample to the Int16 range: the final safety
+    /// after ``limit(_:state:)``, so nothing can ever wrap into noise.
     static func clip(_ sample: Int32) -> Int16 {
         if sample > 32767 { return 32767 }
         if sample < -32768 { return -32768 }
         return Int16(sample)
+    }
+
+    // razor: a peak limiter with no lookahead, so it adds no latency and the
+    // room delay accounting is untouched. Instant attack: the frame that would
+    // go over full scale sets the gain that lands it exactly on full scale.
+    // Stereo-linked. A frame needing that much reduction or more re-arms a
+    // 20 ms hold (one period of 50 Hz, so the gain does not ride a bass
+    // waveform); once no frame has for 20 ms, the gain releases toward 1 with
+    // a 100 ms time constant, capped at what each frame needs, so a spike
+    // followed by a less loud passage recovers to that passage's gain. The threshold is full scale itself, so a sum that never exceeds
+    // it passes bit-identical. Cost: an onset's first rise past full scale is
+    // pinned at full scale for under a quarter period, where a hard clip pins
+    // every cycle. Upgrade path, if onsets audibly crunch: a lookahead delay of
+    // a few ms here, added to the per-app latency the room delay accounts for.
+    static let limiterHoldFrames = 882
+    static let limiterReleaseCoefficient = 1 - exp(-1.0 / (0.1 * Double(outputSampleRate)))
+
+    /// Gain state one mixed stream carries between emissions.
+    struct LimiterState {
+        var gain: Double = 1
+        var holdRemaining = 0
+    }
+
+    /// Scale interleaved-stereo summed samples in place so no frame exceeds
+    /// full scale (see the razor note above). Allocation-free and lock-free;
+    /// leaves every sample untouched while `state.gain` is 1.
+    static func limit(_ samples: UnsafeMutableBufferPointer<Int32>, state: inout LimiterState) {
+        var gain = state.gain
+        var hold = state.holdRemaining
+        var i = 0
+        while i + 1 < samples.count {
+            let left = samples[i], right = samples[i + 1]
+            let peak = max(left.magnitude, right.magnitude)
+            let needed = peak > 32767 ? 32767 / Double(peak) : 1
+            if needed <= gain, peak > 32767 {
+                // This frame needs at least the current reduction: take it and
+                // hold. `<=`, not `<`: a steady tone's peaks need exactly the
+                // current gain, and must keep it rather than ride it.
+                gain = needed
+                hold = limiterHoldFrames
+            } else if hold > 0 {
+                hold -= 1
+            } else if gain < 1 {
+                gain += (1 - gain) * limiterReleaseCoefficient
+                // Within one LSB of unity at full scale: snap, so recovered
+                // audio is bit-identical again. Double, not Float: near 1 a
+                // Float step rounds away and the gain stalls short of this.
+                if gain >= 1 - 1.0 / 32768 { gain = 1 }
+                // Never release past what this frame needs.
+                gain = min(gain, needed)
+            }
+            if gain < 1 {
+                samples[i] = Int32((Double(left) * gain).rounded())
+                samples[i + 1] = Int32((Double(right) * gain).rounded())
+            }
+            i += 2
+        }
+        state.gain = gain
+        state.holdRemaining = hold
     }
 
     /// Pack `[Int32]` accumulated samples into interleaved S16LE `Data`, clipping
@@ -664,6 +742,8 @@ private final class MixTimeline {
     /// pre-`startFrame` contribution must be dropped, never re-inserted — see
     /// ``add(firstFrame:stereo:)``.
     private var hasEmitted = false
+    /// This stream's limiter gain, carried across emissions and drained runs.
+    private var limiter = AppRouteMixer.LimiterState()
 
     private var frameCount: Int { acc.count / 2 }
     private var endFrame: Int64 { startFrame + Int64(frameCount) }
@@ -745,6 +825,10 @@ private final class MixTimeline {
     /// Pop `frames` from the head: clip → pack → advance `startFrame`.
     private func emit(streamID: Int, frames: Int) -> AppRouteMixer.MixedBuffer {
         let sampleCount = frames * 2
+        acc.withUnsafeMutableBufferPointer { all in
+            AppRouteMixer.limit(UnsafeMutableBufferPointer(rebasing: all[0..<sampleCount]),
+                                state: &limiter)
+        }
         let pcm = AppRouteMixer.packClipped(acc[0..<sampleCount])
         let pts = AppRouteMixer.timestamp(ofFrame: startFrame)
         let emitted = AppRouteMixer.MixedBuffer(

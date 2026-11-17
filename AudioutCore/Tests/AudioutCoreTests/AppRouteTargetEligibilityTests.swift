@@ -51,14 +51,24 @@ import Testing
         #expect(device.canBePerAppRouteTarget() == true)
     }
 
-    @Test func castStaysExcluded() {
-        // `supportsAirPlay2: true` here is deliberately unrealistic (Cast
-        // rows always carry `false` in production) — it isolates that the
-        // refusal comes from the `isCast` branch itself, not from an
-        // incidental AP2 check. Cast is the one kind with no per-app
-        // delivery path, so a route to one would be silently demoted.
+    // Red if `canBePerAppRouteTarget()` refuses `isCast` again.
+    @Test func castQualifiesAsADeviceTarget() {
         let cast = Device(id: "cast-1", name: "Chromecast", kind: .cast,
-                           supportsAirPlay2: true)
-        #expect(cast.canBePerAppRouteTarget() == false)
+                           supportsAirPlay2: false)
+        #expect(cast.canBePerAppRouteTarget() == true)
+    }
+
+    // Red if `canBePerAppGroupMember()` stops refusing `isCast`.
+    @Test func castIsRefusedAsAGroupMember() {
+        let cast = Device(id: "cast-2", name: "Chromecast", kind: .cast,
+                           supportsAirPlay2: false)
+        #expect(cast.canBePerAppGroupMember() == false)
+    }
+
+    // Red if `canBePerAppGroupMember()` refuses more than Cast.
+    @Test func bluetoothQualifiesAsAGroupMember() {
+        let device = Device(id: "bt-2", name: "Bluetooth Speaker", kind: .bluetooth,
+                             supportsAirPlay2: false)
+        #expect(device.canBePerAppGroupMember() == true)
     }
 }

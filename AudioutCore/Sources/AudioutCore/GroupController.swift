@@ -153,6 +153,8 @@ public final class GroupController {
     /// pointed at one of these speakers — a speaker carries one role at a time
     /// (whole-system mix OR one app's redirect), and selecting it into Main Out
     /// is the senior action that wins it (`AppRoutingController.clearRoutes(toDevices:)`).
+    /// Cast receivers are left out: the backend arbitrates those itself, so their
+    /// routes stay saved (`notifyMainOutMembersChanged(_:)`).
     /// Injected-closure idiom, same as `NativeBackend.onRoutingAction` — keeps
     /// this controller ignorant of `AppRoutingController`. Fires on every apply
     /// (even an unchanged set); the consumer no-ops when nothing conflicts.
@@ -767,7 +769,7 @@ public final class GroupController {
             backend.setOutputSet(routableOutputIDs)
             // A speaker just selected into Main Out wins that speaker; any per-app
             // redirect still pointed at it yields (one role per speaker).
-            onMainOutMembersChanged?(routableOutputIDs)
+            notifyMainOutMembersChanged(routableOutputIDs)
         case .group(let id):
             activateGroup(id: id)
         }
@@ -868,7 +870,7 @@ public final class GroupController {
         if mainOut == .group(id: group.id), previousMembers != Set(group.memberIDs) {
             let airplayMembers = routableOutputs(in: group.memberIDs)
             backend.setOutputSet(airplayMembers)
-            onMainOutMembersChanged?(airplayMembers)
+            notifyMainOutMembersChanged(airplayMembers)
         }
         onStateDidChange?()
         return group
@@ -1012,7 +1014,7 @@ public final class GroupController {
         backend.setOutputSet(airplayMembers)
         // Activating a group wins every speaker it contains; per-app redirects
         // still pointed at any of them yield (one role per speaker).
-        onMainOutMembersChanged?(airplayMembers)
+        notifyMainOutMembersChanged(airplayMembers)
         for memberID in group.memberIDs {
             // …and the Mac is skipped here too: its "volume" is the Mac's SYSTEM
             // output level (`NativeBackend.setVolume`'s local branch writes Core
@@ -1132,6 +1134,14 @@ public final class GroupController {
     /// DISCOVERY-filtered (`device($0)` is nil for an undiscovered id, so it drops
     /// out) because you cannot open a route to a device that isn't there.
     private var routableOutputIDs: Set<String> { routableOutputs(in: mainOutMemberIDs) }
+
+    /// Fire ``onMainOutMembersChanged`` without Cast receivers. The backend holds a
+    /// Cast receiver for both roles at once (whole system wins it, and its route
+    /// takes it back on deselect with the session kept), so selecting one must
+    /// leave the app's saved route to it alone.
+    private func notifyMainOutMembersChanged(_ ids: Set<String>) {
+        onMainOutMembersChanged?(ids.filter { device($0)?.isCast != true })
+    }
 
     /// True exactly when the current Main Out target has no non-local MEMBER —
     /// nothing selected but the Mac, an empty selection, or a Mac-only group. In

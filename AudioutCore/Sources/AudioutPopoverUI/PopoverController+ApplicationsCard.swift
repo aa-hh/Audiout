@@ -135,12 +135,21 @@ extension PopoverController {
             // offered at all is decided by `availableAirPlayDestinations`
             // (`Device.canBePerAppRouteTarget()`). The reverse conflict —
             // selecting a speaker that already has a redirect — is resolved by
-            // `AppRoutingController.clearRoutes(toDevices:)` (selection wins), so
-            // by the time this renders, no kept route targets a Main Out member.
+            // `AppRoutingController.clearRoutes(toDevices:)` (selection wins).
             // Deliberately NOT filtered inside `availableAirPlayDestinations`:
             // that set also drives R5 disappearance tracking, where a Main Out
             // member must still count as present.
-            if groupController?.isMainOutMember(device.id) == true { continue }
+            // A Cast receiver is the exception: its route survives selection
+            // (the backend lets whole system win it), so the row's own kept
+            // route stays listed, saying where its audio is going meanwhile.
+            if groupController?.isMainOutMember(device.id) == true {
+                if device.isCast, current == .device(id: device.id) {
+                    entries.append(.init(id: device.id, title: device.name, isLocal: false,
+                                         symbolName: device.symbolName,
+                                         subtitle: Self.mainOutputDestinationSubtitle))
+                }
+                continue
+            }
             // R3 stopgap: a device already carrying a DIFFERENT app's redirect
             // gets an honest heads-up rather than a silent quality regression —
             // two independently-captured streams mixed onto one speaker warble
@@ -243,13 +252,14 @@ extension PopoverController {
     }
 
     /// The members of `group` that could carry this app's own stream right now:
-    /// discovered, reachable, and eligible per
-    /// `Device.canBePerAppRouteTarget()` (`available` is already
-    /// filtered to that), and not already claimed by the main output (one role
+    /// discovered, reachable (`available` is already filtered to the device
+    /// rule, `Device.canBePerAppRouteTarget()`), eligible as a group member per
+    /// `Device.canBePerAppGroupMember()` (the device rule minus Cast, applied
+    /// here), and not already claimed by the main output (one role
     /// per speaker — the main mix is the senior claim, and the app plays on
     /// whatever is left).
     private func usableGroupMemberIDs(_ group: Group, available: [Device]) -> [String] {
-        let availableIDs = Set(available.map(\.id))
+        let availableIDs = Set(available.filter { $0.canBePerAppGroupMember() }.map(\.id))
         return group.memberIDs.filter {
             availableIDs.contains($0) && groupController?.isMainOutMember($0) != true
         }
@@ -299,6 +309,8 @@ extension PopoverController {
     /// selection points — and the redirect resumes on its own once the device is
     /// back, with nothing for the user to re-pick.
     static let offlineDestinationSubtitle = "Offline, playing with system audio"
+    /// A kept route whose receiver is also a main output: whole system wins it.
+    static let mainOutputDestinationSubtitle = "Main output, playing with system audio"
 
     /// The secondary line on an AirPlay device entry that already carries a
     /// DIFFERENT app's redirect (R3 stopgap). The real fix — resampling
@@ -323,9 +335,10 @@ extension PopoverController {
     ///
     /// Readers: `appDestinations(devices:keeping:bundleID:)`,
     /// `usableGroupMemberIDs(_:available:)`, `appRow(_:didSelectDestination:for:)`'s
-    /// group-analytics count, and `update(devices:)`'s R5 tracking. Widening the
-    /// shared predicate therefore also widens which group members an app can
-    /// play on, via `usableGroupMemberIDs`.
+    /// group-analytics count, and `update(devices:)`'s R5 tracking. The group
+    /// member rule, `Device.canBePerAppGroupMember()`, is applied inside
+    /// `usableGroupMemberIDs`, so a Cast receiver is listed here as a device
+    /// but never counts as a usable group member.
     func availableAirPlayDestinations(devices: [Device]) -> [Device] {
         devices.filter { $0.isAvailable && $0.canBePerAppRouteTarget() }
     }

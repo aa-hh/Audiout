@@ -326,7 +326,60 @@ import Testing
                        "two mixed apps must emit exactly one real-time's worth of frames, not more")
     }
 
-    @Test func clippingEngagesAtBoundaryWithoutWrapping() {
+    /// Turns red if the multi-contributor emission leaves `timelineLock` before
+    /// `onMixedBuffer` runs, because a second tap could then deliver the next
+    /// range of a shared stream ahead of the first and its one consumer would
+    /// see the pts run backwards.
+    @Test func aSharedStreamReachesItsHandlerInTimelineOrderAcrossTwoTaps() {
+        let m = mixer()
+        let sink = Sink()
+        let entered = DispatchSemaphore(value: 0)
+        let go = DispatchSemaphore(value: 0)
+        let calls = Counter()
+        m.onMixedBuffer = { buffer in
+            calls.bump()
+            if calls.value == 1 {
+                entered.signal()
+                go.wait()
+            }
+            sink.append(buffer)
+        }
+        m.updateRoutes([route("a", to: "dev1"), route("b", to: "dev1")])
+        m.handleStateChange(bundleID: "a", state: capturing())
+        m.handleStateChange(bundleID: "b", state: capturing())
+
+        // "a" fills 44 100..<44 600 and drains its first 59 frames; "b" then
+        // continues the timeline from 44 600 while "a" is still in the handler.
+        let bufferA = s16BufferAtFrame(value: 100, count: 500, atFrame: 44_100)
+        let bufferB = s16BufferAtFrame(value: 10, count: 500, atFrame: 44_600)
+        let doneA = DispatchSemaphore(value: 0)
+        let doneB = DispatchSemaphore(value: 0)
+        // Own threads, not the shared dispatch pool: in a parallel run the
+        // pool can stay starved for longer than the 10 s waits below.
+        Thread {
+            m.handleBuffer(bundleID: "a", buffer: bufferA)
+            doneA.signal()
+        }.start()
+        #expect(entered.wait(timeout: .now() + 10) == .success, "the first emission never reached the handler") // real-time-ok: hang ceiling
+        Thread {
+            m.handleBuffer(bundleID: "b", buffer: bufferB)
+            doneB.signal()
+        }.start()
+        // 200 ms is a hang-stop, not a speed claim: it gives "b" the time to
+        // overtake "a" if the lock lets it.
+        Thread.sleep(forTimeInterval: 0.2) // real-time-ok: an overtake that the lock prevents shows only as nothing happening, so "b" must be given real time to try
+        go.signal()
+        #expect(doneA.wait(timeout: .now() + 10) == .success) // real-time-ok: hang ceiling
+        #expect(doneB.wait(timeout: .now() + 10) == .success) // real-time-ok: hang ceiling
+
+        let starts = sink.all.map { AppRouteMixer.frameIndex(of: $0.pts) }
+        #expect(zip(starts, starts.dropFirst()).allSatisfy { $0 < $1 },
+                Comment(rawValue: "emissions out of timeline order: \(starts)"))
+        let left = pairs(sink.combined).map(\.0)
+        #expect(left == Array(repeating: 100, count: 500) + Array(repeating: 10, count: 59))
+    }
+
+    @Test func overflowIsLimitedOnBothChannelsWithoutWrapping() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -341,7 +394,98 @@ import Testing
 
         let all = pairs(sink.combined)
         #expect(all[0].0 == 32767, "positive overflow clamps to Int16.max")
-        #expect(all[0].1 == -32768, "negative overflow clamps to Int16.min")
+        #expect(all[0].1 == -32767, "the linked limiter gain lands the other channel on full scale too")
+    }
+
+    /// Two apps playing the same sine at `amplitude`, mixed in 10 ms chunks
+    /// (one hold window, so each chunk is summed before any of it is emitted),
+    /// followed by `quietChunks` chunks at `quietAmplitude`. Returns the mixed
+    /// left channel and the exact per-frame sum the mixer was given.
+    private func mixTwoSines(amplitude: Double, loudChunks: Int,
+                             quietAmplitude: Double = 0, quietChunks: Int = 0) -> (out: [Int16], sum: [Int32]) {
+        let m = mixer()
+        let sink = Sink()
+        m.onMixedBuffer = { sink.append($0) }
+        m.updateRoutes([route("a", to: "dev1"), route("b", to: "dev1")])
+        m.handleStateChange(bundleID: "a", state: capturing())
+        m.handleStateChange(bundleID: "b", state: capturing())
+        let chunk = 441, start: Int64 = 44_100
+        var sum: [Int32] = []
+        for c in 0..<(loudChunks + quietChunks) {
+            let a = c < loudChunks ? amplitude : quietAmplitude
+            let frames: [(Int16, Int16)] = (0..<chunk).map { k in
+                let v = Int16((sin(2 * Double.pi * Double(c * chunk + k) / 100) * a * 32767).rounded())
+                return (v, v)
+            }
+            sum += frames.map { 2 * Int32($0.0) }
+            let base = s16Buffer(frames: frames, atSecond: 0)
+            for app in ["a", "b"] {
+                m.handleBuffer(bundleID: app, buffer: CapturedBuffer(
+                    channelData: base.channelData, frameCount: chunk,
+                    pts: AppRouteMixer.timestamp(ofFrame: start + Int64(c * chunk))))
+            }
+        }
+        m.flush()
+        return (pairs(sink.combined).map(\.0), sum)
+    }
+
+    /// Two apps near full scale sum to 1.8x full scale. After the first cycle
+    /// (the onset, which a no-lookahead limiter must catch on the way up) the
+    /// output is the sum at one steady gain: no flat tops at full scale and
+    /// the waveform's shape intact. Turns red if `emit` stops running
+    /// `AppRouteMixer.limit` before `packClipped`, which hard-clips every cycle.
+    @Test func twoLoudAppsAreLimitedNotClipped() {
+        let (out, sum) = mixTwoSines(amplitude: 0.9, loudChunks: 20)
+        #expect(out.count == sum.count)
+        #expect(out.allSatisfy { $0 != Int16.min }, "peak stays at or under full scale")
+        let afterOnset = 100..<out.count
+        // A peak may land exactly on full scale; two in a row is a clipped flat top.
+        let pinned = afterOnset.dropFirst().filter {
+            abs(Int32(out[$0])) >= 32767 && abs(Int32(out[$0 - 1])) >= 32767
+        }.count
+        #expect(pinned == 0, "got \(pinned) consecutive samples pinned at full scale after the onset")
+        let ratios = afterOnset.filter { abs(sum[$0]) > 4000 }.map { Double(out[$0]) / Double(sum[$0]) }
+        let spread = (ratios.max() ?? 0) - (ratios.min() ?? 0)
+        #expect(spread < 0.01, "one steady gain keeps the shape; spread \(spread)")
+    }
+
+    /// One cycle at 2x full scale, then 5 s at 1.2x: the gain recovers to the
+    /// 0.83 the quieter passage needs instead of staying at the spike's 0.5,
+    /// and no frame leaves the limiter over full scale. Turns red if `limit`
+    /// re-arms its hold on every frame over full scale, even one the current
+    /// gain already brings under it.
+    @Test func theLimiterRecoversToWhatALessLoudPassageNeeds() {
+        func sine(_ amplitude: Double, frames: Int) -> [Int32] {
+            (0..<frames).flatMap { k -> [Int32] in
+                let v = Int32((sin(2 * Double.pi * Double(k) / 100) * amplitude * 32767).rounded())
+                return [v, v]
+            }
+        }
+        var samples = sine(2.0, frames: 100) + sine(1.2, frames: 5 * 44_100)
+        var state = AppRouteMixer.LimiterState()
+        samples.withUnsafeMutableBufferPointer { AppRouteMixer.limit($0, state: &state) }
+        #expect(samples.allSatisfy { $0.magnitude <= 32767 }, "no frame leaves over full scale")
+        #expect(abs(state.gain - 1 / 1.2) < 0.01, "gain \(state.gain)")
+        let lastCyclePeak = samples.suffix(200).map(\.magnitude).max() ?? 0
+        #expect(lastCyclePeak >= 32_000, "the passage plays at full scale again, peak \(lastCyclePeak)")
+    }
+
+    /// Two quiet apps never reach full scale, so the limiter must leave their
+    /// sum bit-identical. Turns red if `limit` scales frames while its gain is 1
+    /// or engages below full scale.
+    @Test func aSumUnderFullScalePassesBitIdentical() {
+        let (out, sum) = mixTwoSines(amplitude: 0.45, loudChunks: 20)
+        #expect(out.map(Int32.init) == sum)
+    }
+
+    /// After a loud section the gain releases back to unity, so the quiet music
+    /// that follows comes out exactly as summed. Turns red if the release (or
+    /// its snap to 1) is removed and the stream stays turned down for good.
+    @Test func theLimiterReleasesAfterTheLoudSection() {
+        let (out, sum) = mixTwoSines(amplitude: 0.9, loudChunks: 20,
+                                     quietAmplitude: 0.25, quietChunks: 120)
+        let tail = (out.count - 441)..<out.count
+        #expect(tail.allSatisfy { Int32(out[$0]) == sum[$0] }, "the quiet tail is back at unity gain")
     }
 
     @Test func staticClipHelperBoundaries() {

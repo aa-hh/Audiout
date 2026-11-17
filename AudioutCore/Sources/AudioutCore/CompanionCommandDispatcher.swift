@@ -671,7 +671,9 @@ public final class CompanionCommandDispatcher {
             // One-role-per-speaker, server side: the popover's redirect picker
             // skips Main Out members (PopoverController.appDestinations), and
             // AppRoutingController.clearRoutes(toDevices:) resolves the reverse
-            // direction. A remote client is the third way to build the overlap —
+            // direction (except for a Cast receiver, whose route is kept: whole
+            // system wins it and the backend hands it back on deselect). A
+            // remote client is the third way to build the overlap —
             // post-008 the arbiter would silently demote the route, so refuse
             // honestly instead. The phone's own picker filters too (AppsView);
             // this guard is the trust boundary for any client.

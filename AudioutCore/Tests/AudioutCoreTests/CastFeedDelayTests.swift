@@ -65,6 +65,24 @@ import Testing
             peakDBFS: dbfs(amplitude: 1000), writes: 1))
     }
 
+    // MARK: - One producer per ring
+
+    /// Turns red if `CastFeedRing.push(_:from:)` stops checking the producer
+    /// against the ring's source, because the whole-system capture would then
+    /// keep writing into a ring one app owns.
+    @Test func aRingOwnedByAnAppRefusesTheWholeSystemProducer() {
+        let ring = CastFeedRing()
+        ring.setSource(.perApp)
+        let block = tone(frames: 882)
+
+        ring.push(block)
+        #expect(ring.stats.writes == 0, "a whole-system block landed in an app's ring")
+        #expect(ring.render(frames: 882) == Data(count: 882 * 4))
+
+        ring.push(block, from: .perApp)
+        #expect(ring.stats.writes == 1)
+    }
+
     // MARK: - Delaying by inserting zeros in FRONT of the ring
 
     /// The mechanism, and the reason it is free: the zeros go in ahead of the
@@ -188,7 +206,7 @@ import Testing
         // which is all this needs, because the feed belongs to the session.
         manager.setDevices([CastDeviceRecord(
             id: "dev1", friendlyName: "Fake", model: nil,
-            endpoint: .hostPort(host: "127.0.0.1", port: 1))])
+            endpoint: .hostPort(host: "127.0.0.1", port: 1))], sources: [:])
 
         manager.setCastRoomDelayMs(2000, forDeviceID: "dev1")
         manager.setCastUserOffsetMs(-500, forDeviceID: "dev1")

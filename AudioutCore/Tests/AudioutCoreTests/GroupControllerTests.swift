@@ -199,6 +199,29 @@ import Testing
                 "group activation fires with exactly the group's AirPlay members")
     }
 
+    /// A Cast receiver selected into Main Out, alone or through a group, is left
+    /// out of the hook, so an app's saved route to it survives and takes the
+    /// receiver back on deselect. Turns red if `notifyMainOutMembersChanged`
+    /// stops filtering Cast ids, which clears that route on selection.
+    @Test func onMainOutMembersChangedLeavesCastReceiversOut() async throws {
+        let tv = Device(id: "tv", name: "Living Room TV", kind: .cast, supportsAirPlay2: false)
+        let (controller, _) = try await makeController(fleet: Array<Device>.demoFleet + [tv])
+        controller.setMainOut(.selectedDevices)
+        var fired: [Set<String>] = []
+        controller.onMainOutMembersChanged = { fired.append($0) }
+
+        _ = controller.setDeviceSelected("tv", true)
+        _ = controller.setDeviceSelected("office", true)
+        try controller.saveGroup(Group(id: "g1", name: "Mixed",
+                                        memberIDs: ["tv", "office"], memberVolumes: [:]))
+        controller.activateGroup(id: "g1")
+        await SuiteWait.until("the hook to fire for selection and activation") {
+            fired.contains { $0.contains("office") } && fired.count >= 3
+        }
+        #expect(fired.allSatisfy { !$0.contains("tv") }, "got \(fired)")
+        #expect(fired.last == ["office"])
+    }
+
     /// Poll `backend` until `id`'s connection state satisfies `predicate`
     /// (mirrors `PopoverControllerTests.waitForConnectionState`).
     private func waitForConnectionState(

@@ -379,7 +379,7 @@ import Testing
         #expect(left == Array(repeating: 100, count: 500) + Array(repeating: 10, count: 59))
     }
 
-    @Test func clippingEngagesAtBoundaryWithoutWrapping() {
+    @Test func overflowIsLimitedOnBothChannelsWithoutWrapping() {
         let m = mixer()
         let sink = Sink()
         m.onMixedBuffer = { sink.append($0) }
@@ -447,6 +447,27 @@ import Testing
         let ratios = afterOnset.filter { abs(sum[$0]) > 4000 }.map { Double(out[$0]) / Double(sum[$0]) }
         let spread = (ratios.max() ?? 0) - (ratios.min() ?? 0)
         #expect(spread < 0.01, "one steady gain keeps the shape; spread \(spread)")
+    }
+
+    /// One cycle at 2x full scale, then 5 s at 1.2x: the gain recovers to the
+    /// 0.83 the quieter passage needs instead of staying at the spike's 0.5,
+    /// and no frame leaves the limiter over full scale. Turns red if `limit`
+    /// re-arms its hold on every frame over full scale, even one the current
+    /// gain already brings under it.
+    @Test func theLimiterRecoversToWhatALessLoudPassageNeeds() {
+        func sine(_ amplitude: Double, frames: Int) -> [Int32] {
+            (0..<frames).flatMap { k -> [Int32] in
+                let v = Int32((sin(2 * Double.pi * Double(k) / 100) * amplitude * 32767).rounded())
+                return [v, v]
+            }
+        }
+        var samples = sine(2.0, frames: 100) + sine(1.2, frames: 5 * 44_100)
+        var state = AppRouteMixer.LimiterState()
+        samples.withUnsafeMutableBufferPointer { AppRouteMixer.limit($0, state: &state) }
+        #expect(samples.allSatisfy { $0.magnitude <= 32767 }, "no frame leaves over full scale")
+        #expect(abs(state.gain - 1 / 1.2) < 0.01, "gain \(state.gain)")
+        let lastCyclePeak = samples.suffix(200).map(\.magnitude).max() ?? 0
+        #expect(lastCyclePeak >= 32_000, "the passage plays at full scale again, peak \(lastCyclePeak)")
     }
 
     /// Two quiet apps never reach full scale, so the limiter must leave their

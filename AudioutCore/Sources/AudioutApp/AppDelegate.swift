@@ -1149,7 +1149,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // selected, or a group activated), any per-app redirect still pointed at
         // one of those speakers yields back to "follows main output" — selecting
         // the speaker is the senior action (a receiver holds ONE AirPlay session;
-        // the two roles can't share it). `clearRoutes` no-ops when nothing
+        // the two roles can't share it). Cast receivers never arrive here:
+        // whole system wins them in the backend, which hands them back to the
+        // saved route on deselect. `clearRoutes` no-ops when nothing
         // conflicts, so this is cheap on every selection change; its change edge
         // fires `onRoutesDidChange` → `pushAppRoutesToBackend()`, tearing down the
         // now-stale per-app tap. The popover's picker refuses the mirror-image

@@ -633,9 +633,11 @@ public final class AppRouteMixer: @unchecked Sendable {
     // razor: a peak limiter with no lookahead, so it adds no latency and the
     // room delay accounting is untouched. Instant attack: the frame that would
     // go over full scale sets the gain that lands it exactly on full scale.
-    // Stereo-linked. The gain then holds 20 ms (one period of 50 Hz, so it does
-    // not ride a bass waveform) and releases toward 1 with a 100 ms time
-    // constant. The threshold is full scale itself, so a sum that never exceeds
+    // Stereo-linked. A frame needing that much reduction or more re-arms a
+    // 20 ms hold (one period of 50 Hz, so the gain does not ride a bass
+    // waveform); once no frame has for 20 ms, the gain releases toward 1 with
+    // a 100 ms time constant, capped at what each frame needs, so a spike
+    // followed by a less loud passage recovers to that passage's gain. The threshold is full scale itself, so a sum that never exceeds
     // it passes bit-identical. Cost: an onset's first rise past full scale is
     // pinned at full scale for under a quarter period, where a hard clip pins
     // every cycle. Upgrade path, if onsets audibly crunch: a lookahead delay of
@@ -659,9 +661,12 @@ public final class AppRouteMixer: @unchecked Sendable {
         while i + 1 < samples.count {
             let left = samples[i], right = samples[i + 1]
             let peak = max(left.magnitude, right.magnitude)
-            if peak > 32767 {
-                let needed = 32767 / Double(peak)
-                if needed < gain { gain = needed }
+            let needed = peak > 32767 ? 32767 / Double(peak) : 1
+            if needed <= gain, peak > 32767 {
+                // This frame needs at least the current reduction: take it and
+                // hold. `<=`, not `<`: a steady tone's peaks need exactly the
+                // current gain, and must keep it rather than ride it.
+                gain = needed
                 hold = limiterHoldFrames
             } else if hold > 0 {
                 hold -= 1
@@ -671,6 +676,8 @@ public final class AppRouteMixer: @unchecked Sendable {
                 // audio is bit-identical again. Double, not Float: near 1 a
                 // Float step rounds away and the gain stalls short of this.
                 if gain >= 1 - 1.0 / 32768 { gain = 1 }
+                // Never release past what this frame needs.
+                gain = min(gain, needed)
             }
             if gain < 1 {
                 samples[i] = Int32((Double(left) * gain).rounded())

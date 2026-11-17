@@ -299,7 +299,9 @@ public final class AppRoutingController {
     /// that contains it — is the SENIOR action and wins the speaker, so any
     /// per-app redirect still pointed at it yields back to "follows main output"
     /// (where the app rejoins the mix and so still plays on that speaker, now as
-    /// part of the main output rather than a private stream). The coordinating
+    /// part of the main output rather than a private stream). Cast receivers
+    /// are excluded upstream: whole system wins them in the backend, which hands
+    /// them back to the saved route on deselect. The coordinating
     /// layer calls this whenever Main Out membership changes
     /// (`GroupController.onMainOutMembersChanged`).
     ///

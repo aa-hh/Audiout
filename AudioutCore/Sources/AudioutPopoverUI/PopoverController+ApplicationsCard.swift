@@ -143,7 +143,7 @@ extension PopoverController {
             // (the backend lets whole system win it), so the row's own kept
             // route stays listed, saying where its audio is going meanwhile.
             if groupController?.isMainOutMember(device.id) == true {
-                if current == .device(id: device.id) {
+                if device.isCast, current == .device(id: device.id) {
                     entries.append(.init(id: device.id, title: device.name, isLocal: false,
                                          symbolName: device.symbolName,
                                          subtitle: Self.mainOutputDestinationSubtitle))

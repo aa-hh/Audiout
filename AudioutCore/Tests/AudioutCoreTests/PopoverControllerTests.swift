@@ -29,11 +29,12 @@ import AudioutProtocol
 
     private func makePopover(
         appRouting: AppRoutingController? = nil,
-        runningAppsProvider: (() -> [RunningAppInfo])? = nil
+        runningAppsProvider: (() -> [RunningAppInfo])? = nil,
+        fleet: [Device] = .demoFleet
     ) async throws -> (PopoverController, GroupController, MockBackend) {
-        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+        let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
-        try await waitForFleet(backend, count: 7)
+        try await waitForFleet(backend, count: fleet.count)
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
@@ -2366,26 +2367,28 @@ import AudioutProtocol
                 "the offline entry is injected only into the row that actually targets it")
     }
 
-    /// A route kept while its receiver is a main output (the Cast case: whole
-    /// system wins it and the route waits) still selects that receiver, saying
-    /// so. Turns red if `appDestinations` drops a main-output member without
+    /// A route kept to a Cast receiver that is also a main output (whole system
+    /// wins it and the route waits) still selects that receiver, saying so.
+    /// Turns red if `appDestinations` drops a main-output Cast receiver without
     /// keeping the row's own current target, which paints "Follows main output".
     @Test func aKeptRouteToAMainOutputMemberStaysSelected() async throws {
+        let tv = Device(id: "cast-tv", name: "TV", kind: .cast, supportsAirPlay2: false)
         let appRouting = tempAppRoutingController()
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
-                  destination: .device(id: "office"))
-        let (popover, controller, backend) = try await makePopover(appRouting: appRouting,
-                                                                    runningAppsProvider: routedApps)
+                  destination: .device(id: "cast-tv"))
+        let (popover, controller, backend) = try await makePopover(
+            appRouting: appRouting, runningAppsProvider: routedApps,
+            fleet: Array<Device>.demoFleet + [tv])
         controller.setMainOut(.selectedDevices)
-        _ = controller.setDeviceSelected("office", true)
-        try #require(controller.isMainOutMember("office"))
+        _ = controller.setDeviceSelected("cast-tv", true)
+        try #require(controller.isMainOutMember("cast-tv"))
         popover.update(devices: backend.devices)
 
-        #expect(popover.test_appRowSelectedDestinationID(for: "com.example.music") == "office")
-        let officeItem = try #require(
+        #expect(popover.test_appRowSelectedDestinationID(for: "com.example.music") == "cast-tv")
+        let tvItem = try #require(
             popover.test_appRow(for: "com.example.music")?
-                .test_destinationPopUpMenuItem(forDestinationID: "office"))
-        #expect(officeItem.toolTip == PopoverController.mainOutputDestinationSubtitle)
+                .test_destinationPopUpMenuItem(forDestinationID: "cast-tv"))
+        #expect(tvItem.toolTip == PopoverController.mainOutputDestinationSubtitle)
     }
 
     /// R3 stopgap: a device that already carries a DIFFERENT app's redirect must

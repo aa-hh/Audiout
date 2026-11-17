@@ -67,10 +67,16 @@ player_device_remove(void *device)
     return -1;
 
   dev = outputs_device_get(remove->id);
-  // [AirPlayEngine vendored change 2026-11-17] The other protocol's listing of a
-  // dual AirPlay 1/2 speaker going away must not clear the kept entry's addresses.
+  // The other protocol's listing of a dual AirPlay 1/2 speaker going away must
+  // not clear the kept entry's addresses; it only drops a held listing of that
+  // protocol (shims/outputs.c outputs_device_add).
   if (dev && dev->type != remove->type)
     {
+      if (dev->held_upgrade && dev->held_upgrade->type == remove->type)
+        {
+          outputs_device_free(dev->held_upgrade);
+          dev->held_upgrade = NULL;
+        }
       outputs_device_free(remove);
       return 0;
     }

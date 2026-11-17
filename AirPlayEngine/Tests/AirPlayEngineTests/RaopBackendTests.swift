@@ -61,6 +61,22 @@ import CAirPlayEngine
         #expect(output_raop.device_quality_set == nil, "raop must not set device_quality_set")
     }
 
+    // MARK: - PTP gate on the receiver's srcvers
+
+    /// The defect this turns red: PTP offered to a receiver older than the
+    /// 354.54.6 macOS 27 requires, or refused to one with no srcvers at all.
+    @Test func srcversGateMatchesMacOS() {
+        let cases: [(String?, Bool)] = [
+            (nil, true), ("abc", true), ("354.54.5", false), ("354.54.6", true),
+            ("354.55", true), ("353.99.9", false), ("366.0", true), ("980.77.2", true),
+        ]
+        for (srcvers, expected) in cases {
+            let got = srcvers.map { $0.withCString { airplay_srcvers_allows_ptp($0) } }
+                ?? airplay_srcvers_allows_ptp(nil)
+            #expect(got == expected, "srcvers \(srcvers ?? "nil")")
+        }
+    }
+
     // MARK: - Two-backend dispatch by device->type (T4, brief §6.1/§6.2)
 
     // The shared registry hosts AP1 and AP2 devices side by side; every

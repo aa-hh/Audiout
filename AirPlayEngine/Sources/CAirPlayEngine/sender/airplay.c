@@ -205,7 +205,7 @@ struct airplay_extra
   uint16_t wanted_metadata;
   bool supports_auth_setup;
   bool supports_encryption;
-  bool supports_setpeersx;
+  bool supports_setpeersx; // [AirPlayEngine vendored change 2026-11-17] features bit 52
   bool use_ptp;
 };
 
@@ -269,6 +269,7 @@ struct airplay_session
   bool req_has_auth;
   bool supports_auth_setup;
   bool supports_encryption;
+  // [AirPlayEngine vendored change 2026-11-17] SETPEERSX state
   bool supports_setpeersx;
   plist_t peer_timing_info; // the receiver's timingPeerInfo from SETUP (session), for SETPEERSX
 
@@ -1340,7 +1341,7 @@ session_free(struct airplay_session *session)
   if (session->ptpd_slave_id > 0)
     ptpd_slave_remove(session->ptpd_slave_id);
 
-  if (session->peer_timing_info)
+  if (session->peer_timing_info) // [AirPlayEngine vendored change 2026-11-17]
     plist_free(session->peer_timing_info);
 
   chacha_close(session->packet_cipher_hd);
@@ -1714,7 +1715,7 @@ session_make(struct output_device *device, int callback_id)
   session->supports_auth_setup = extra->supports_auth_setup;
   session->wanted_metadata = extra->wanted_metadata;
   session->supports_encryption = extra->supports_encryption;
-  session->supports_setpeersx = extra->supports_setpeersx;
+  session->supports_setpeersx = extra->supports_setpeersx; // [AirPlayEngine vendored change 2026-11-17]
 
   session->next_seq = AIRPLAY_SEQ_CONTINUE;
   session->timing_svc = &airplay_timing_svc;
@@ -2812,7 +2813,23 @@ timing_peer_info_make(struct airplay_session *session)
   return info;
 }
 
-// SETPEERSX (features bit 52): a binary plist array of peer records, ours first.
+// [AirPlayEngine vendored change 2026-11-17] SETPEERSX (features bit 52): a binary plist array of peer
+// records, ours first.
+// [AirPlayEngine vendored change 2026-11-17] macOS 27 uses PTP only when srcvers >= 354.54.6 and
+// features bit 41 (endpoint_getPreferredNetworkClockType). A receiver without a
+// parsable srcvers keeps the old rule (features bit 41 alone). Not static: the
+// engine tests call it through engine_bridge.h.
+bool
+airplay_srcvers_allows_ptp(const char *srcvers)
+{
+  int sv[3] = { 0, 0, 0 };
+
+  if (!srcvers || sscanf(srcvers, "%d.%d.%d", &sv[0], &sv[1], &sv[2]) < 1)
+    return true;
+
+  return sv[0] > 354 || (sv[0] == 354 && (sv[1] > 54 || (sv[1] == 54 && sv[2] >= 6)));
+}
+
 static int
 payload_make_setpeersx(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
@@ -2857,6 +2874,7 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
   size_t len;
   int ret;
 
+  // [AirPlayEngine vendored change 2026-11-17] SETPEERSX replaces SETPEERS when the receiver supports it
   if (!session->master_session->use_ptp || session->supports_setpeersx)
     return 1; // Skip to next request
 
@@ -2922,7 +2940,7 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
 
   device_id_colon_make(device_id_colon, sizeof(device_id_colon), airplay_device_id);
 
-  timingpeerinfo = timing_peer_info_make(session);
+  timingpeerinfo = timing_peer_info_make(session); // [AirPlayEngine vendored change 2026-11-17]
 
   timingpeerlist = plist_new_array();
   plist_array_append_item(timingpeerlist, plist_copy(timingpeerinfo));
@@ -3414,6 +3432,7 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
 
   if (session->master_session->use_ptp)
     {
+      // [AirPlayEngine vendored change 2026-11-17] keep the receiver's record for SETPEERSX
       item = plist_dict_get_item(response, "timingPeerInfo");
       if (item && !session->peer_timing_info)
 	session->peer_timing_info = plist_copy(item);
@@ -3837,6 +3856,7 @@ static struct airplay_seq_request airplay_seq_request[][8] =
     { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (session)", EVRTSP_REQ_SETUP, payload_make_setup_session, response_handler_setup_session, "application/x-apple-binary-plist", NULL, true },
     { AIRPLAY_SEQ_START_PLAYBACK, "RECORD", EVRTSP_REQ_RECORD, payload_make_record, response_handler_record, NULL, NULL, false },
     { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERS", EVRTSP_REQ_SETPEERS, payload_make_setpeers, NULL, "/peer-list-changed", NULL, false },
+    // [AirPlayEngine vendored change 2026-11-17] SETPEERSX row (array second dimension raised 7 -> 8)
     { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERSX", EVRTSP_REQ_SETPEERSX, payload_make_setpeersx, response_handler_setpeersx, "application/x-apple-binary-plist", "/peer-list-changed-x", true },
     { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (stream)", EVRTSP_REQ_SETUP, payload_make_setup_stream, response_handler_setup_stream, "application/x-apple-binary-plist", NULL, false },
     // Some devices (e.g. Sonos Symfonisk) don't register the volume if it isn't last
@@ -4250,14 +4270,9 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
     extra->wanted_metadata |= AIRPLAY_MD_WANTS_TEXT;
   if (keyval_get(&features_kv, "Authentication_8"))
     extra->supports_auth_setup = 1;
-  if (keyval_get(&features_kv, "SupportsSetPeersExtendedMessage"))
+  if (keyval_get(&features_kv, "SupportsSetPeersExtendedMessage")) // [AirPlayEngine vendored change 2026-11-17]
     extra->supports_setpeersx = 1;
-  // macOS 27 uses PTP only when srcvers >= 354.54.6 and features bit 41
-  // (endpoint_getPreferredNetworkClockType); a receiver without srcvers keeps the old rule.
-  const char *srcvers = keyval_get(txt, "srcvers");
-  int sv[3] = { 0, 0, 0 };
-  bool srcvers_ptp_ok = !srcvers || sscanf(srcvers, "%d.%d.%d", &sv[0], &sv[1], &sv[2]) < 1
-    || sv[0] > 354 || (sv[0] == 354 && (sv[1] > 54 || (sv[1] == 54 && sv[2] >= 6)));
+  bool srcvers_ptp_ok = airplay_srcvers_allows_ptp(keyval_get(txt, "srcvers")); // [AirPlayEngine vendored change 2026-11-17]
   if (keyval_get(&features_kv, "SupportsPTP") && srcvers_ptp_ok && !(devcfg && cfg_getbool(devcfg, "ptp_disable")) && !airplay_ptp_is_disabled)
     extra->use_ptp = 1;
 

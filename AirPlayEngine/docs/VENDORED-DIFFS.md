@@ -29,9 +29,11 @@ had gone unrecorded: the speaker-input `device_id` threading and inbound
 volume parse (`83dc9483`), four verified memory leaks (`a10defd3`), the
 pair-verify double-free (`5c1f5969`), and the overridable PTP shared-memory
 name (`b961398e`). The stream-cap raise the 2026-09-17 review listed as
-missing is not missing: it is Entry 2, item 8.
-**Total vendored files touched: 11** (`sender/airplay.c`,
-`sender/airplay_events.c`, `sender/airplay_events.h`, `sender/raop.c`,
+missing is not missing: it is Entry 2, item 8. Entry 11 (2026-11-17) is the
+HomePod OS 27 change: SETPEERSX, the shared timing peer record and the
+srcvers gate for PTP.
+**Total vendored files touched: 13** (`sender/airplay.c`,
+`evrtsp/evrtsp.h`, `evrtsp/rtsp.c`, `sender/airplay_events.c`, `sender/airplay_events.h`, `sender/raop.c`,
 `pair_ap/pair_fruit.c`, `pair_ap/pair_homekit.c`,
 `libairptp/src/ptp_msg_handle.c`, `libairptp/airptp.h`,
 `libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
@@ -943,10 +945,11 @@ the "Total vendored diffs to date" count at the top of this file.
     `payload_make_setup_session_ptp`; new `payload_make_setpeersx` +
     `response_handler_setpeersx` and a `SETPEERSX` row after `SETPEERS` in
     `airplay_seq_request` (second dimension 7 -> 8); `payload_make_setpeers`
-    skips when SETPEERSX applies; `srcvers_ptp_ok` added to the `use_ptp`
+    skips when SETPEERSX applies; new non-static `airplay_srcvers_allows_ptp()`
+    (declared in `shims/engine_bridge.h` for the tests) added to the `use_ptp`
     condition in `airplay_device_cb`.
-- **In-file marker**: `[AirPlayEngine vendored change 2026-11-17]` above
-  `timing_peer_info_make`.
+- **In-file marker**: `[AirPlayEngine vendored change 2026-11-17]` on every
+  hunk in all three files.
 
 ---
 

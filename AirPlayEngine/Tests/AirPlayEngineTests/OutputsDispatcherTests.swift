@@ -495,6 +495,38 @@ extension SerializedEngineState {
             let kept = addListing(id: 0xD0A3, type: OUTPUT_TYPE_AIRPLAY)
             #expect(kept == playing)
             #expect(kept.pointee.type == OUTPUT_TYPE_RAOP)
+            #expect(kept.pointee.held_upgrade?.pointee.type == OUTPUT_TYPE_AIRPLAY)
+            // Still playing: nothing is swapped yet.
+            #expect(outputs_device_apply_held_upgrade(0xD0A3) == playing)
+            playing.pointee.session = nil
+        }
+
+        /// The defect this turns red: a speaker whose AirPlay 2 listing arrived
+        /// mid-session stayed on AirPlay 1 for good, since discovery never feeds
+        /// an unchanged listing again.
+        @Test func heldAirPlay2ListingAppliesAfterSession() {
+            let playing = addListing(id: 0xD0A5, type: OUTPUT_TYPE_RAOP)
+            playing.pointee.session = UnsafeMutableRawPointer(bitPattern: 0x1)
+            addListing(id: 0xD0A5, type: OUTPUT_TYPE_AIRPLAY)
+            playing.pointee.session = nil
+            let after = outputs_device_apply_held_upgrade(0xD0A5)
+            #expect(after?.pointee.type == OUTPUT_TYPE_AIRPLAY)
+            #expect(after?.pointee.held_upgrade == nil)
+        }
+
+        /// The defect this turns red: a held AirPlay 2 listing whose speaker then
+        /// stopped advertising AirPlay 2 was still swapped in at the next start.
+        @Test func heldListingDroppedWhenItsProtocolGoes() {
+            let playing = addListing(id: 0xD0A6, type: OUTPUT_TYPE_RAOP)
+            playing.pointee.session = UnsafeMutableRawPointer(bitPattern: 0x1)
+            addListing(id: 0xD0A6, type: OUTPUT_TYPE_AIRPLAY)
+            let gone = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
+            gone.initialize(to: output_device())
+            gone.pointee.id = 0xD0A6
+            gone.pointee.type = OUTPUT_TYPE_AIRPLAY
+            gone.pointee.v4_port = 1
+            #expect(player_device_remove(gone) == 0)
+            #expect(playing.pointee.held_upgrade == nil)
             playing.pointee.session = nil
         }
 

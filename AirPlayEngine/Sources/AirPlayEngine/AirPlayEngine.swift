@@ -910,6 +910,13 @@ public actor AirPlayEngine {
         // the C device's own `state` on the engine thread closes that race: a
         // failed/stopped session correctly falls through and re-issues
         // device_start to re-establish the RTSP SETUP.
+        // An AirPlay 2 listing that arrived while this speaker played over
+        // AirPlay 1 was held by the registry (shims/outputs.c); swap it in now,
+        // before a fresh start, so the speaker moves to AirPlay 2.
+        if let t = engineThreadHolder.current {
+            try? await t.run { _ = outputs_device_apply_held_upgrade(id.rawValue) }
+        }
+
         let live = await liveBinding(id)
         let liveState = live?.state ?? knownOutputs[id] ?? .stopped
         switch liveState {

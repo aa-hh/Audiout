@@ -894,6 +894,11 @@ public actor AirPlayEngine {
         if serialize { await acquireOp(id) }
         defer { if serialize { releaseOp(id) } }
 
+        // An AirPlay 2 listing that arrived while this speaker played over
+        // AirPlay 1 was held by the registry (shims/outputs.c); swap it in now,
+        // before a fresh start, so the speaker moves to AirPlay 2.
+        await applyHeldUpgrade(id: id)
+
         // Idempotency guard (first-light hardening #5): an output already in a
         // live session is a no-op success — don't re-issue device_start, which
         // would arm a second RTSP SETUP against a receiver that's already
@@ -910,13 +915,6 @@ public actor AirPlayEngine {
         // the C device's own `state` on the engine thread closes that race: a
         // failed/stopped session correctly falls through and re-issues
         // device_start to re-establish the RTSP SETUP.
-        // An AirPlay 2 listing that arrived while this speaker played over
-        // AirPlay 1 was held by the registry (shims/outputs.c); swap it in now,
-        // before a fresh start, so the speaker moves to AirPlay 2.
-        if let t = engineThreadHolder.current {
-            try? await t.run { _ = outputs_device_apply_held_upgrade(id.rawValue) }
-        }
-
         let live = await liveBinding(id)
         let liveState = live?.state ?? knownOutputs[id] ?? .stopped
         switch liveState {
@@ -1165,6 +1163,15 @@ public actor AirPlayEngine {
     /// Mirrors `applyVolumeOnDevice`'s dispatch: engine thread in production,
     /// inline in headless test mode. MUST run before `device_start` is issued —
     /// see `addOutput(_:streamId:)`.
+    /// Swap in a preferred-protocol listing the registry held while `id` was
+    /// playing (shims/outputs.c `outputs_device_apply_held_upgrade`). No-op
+    /// when nothing is held or a session is live.
+    private func applyHeldUpgrade(id: OutputID) async {
+        let apply: () -> Void = { _ = outputs_device_apply_held_upgrade(id.rawValue) }
+        if issueOverride != nil { apply() }
+        else if let t = engineThreadHolder.current { try? await t.run(apply) }
+    }
+
     private func applyStreamIdOnDevice(id: OutputID, streamId: UInt32) async {
         let apply: () -> Void = {
             guard let device = outputs_device_get(id.rawValue) else { return }

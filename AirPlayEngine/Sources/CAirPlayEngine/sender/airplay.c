@@ -2813,8 +2813,6 @@ timing_peer_info_make(struct airplay_session *session)
   return info;
 }
 
-// [AirPlayEngine vendored change 2026-11-17] SETPEERSX (features bit 52): a binary plist array of peer
-// records, ours first.
 // [AirPlayEngine vendored change 2026-11-17] macOS 27 uses PTP only when srcvers >= 354.54.6 and
 // features bit 41 (endpoint_getPreferredNetworkClockType). A receiver without a
 // parsable srcvers keeps the old rule (features bit 41 alone). Not static: the
@@ -2830,6 +2828,8 @@ airplay_srcvers_allows_ptp(const char *srcvers)
   return sv[0] > 354 || (sv[0] == 354 && (sv[1] > 54 || (sv[1] == 54 && sv[2] >= 6)));
 }
 
+// [AirPlayEngine vendored change 2026-11-17] SETPEERSX (features bit 52): a binary plist array of peer
+// records, ours first.
 static int
 payload_make_setpeersx(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
@@ -2853,10 +2853,12 @@ payload_make_setpeersx(struct evrtsp_request *req, struct airplay_session *sessi
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data); // evbuffer_add copies
 
   return 0;
 }
 
+// [AirPlayEngine vendored change 2026-11-17]
 static enum airplay_seq_type
 response_handler_setpeersx(struct evrtsp_request *req, struct airplay_session *session)
 {
@@ -3842,6 +3844,7 @@ static struct airplay_seq_definition airplay_seq_definition[] =
 
 // The size of the second array dimension MUST at least be the size of largest
 // sequence + 1, because then we can count on a zero terminator when iterating
+// [AirPlayEngine vendored change 2026-11-17] second dimension 7 -> 8 for the SETPEERSX row
 static struct airplay_seq_request airplay_seq_request[][8] =
 {
   {

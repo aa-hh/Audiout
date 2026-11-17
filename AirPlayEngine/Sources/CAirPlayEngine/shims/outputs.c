@@ -196,6 +196,14 @@ outputs_device_apply_held_upgrade(uint64_t id)
 
   held = device->held_upgrade;
   device->held_upgrade = NULL;
+
+  // The host wrote these onto the entry being replaced (AirPlayEngine.swift
+  // feedDescriptor sets auth_key; volume comes from the session), and an
+  // unchanged listing is not fed again, so carry them across.
+  if (!held->auth_key && device->auth_key)
+    held->auth_key = strdup(device->auth_key);
+  held->volume = device->volume;
+
   return outputs_device_add(held, false);
 }
 

@@ -725,6 +725,13 @@ public actor AirPlayEngine {
             }
         }
 
+        // The sender never reaches the registry for an AirPlay 2 listing whose
+        // entry is a playing AirPlay 1 device (airplay.c finds devices by type),
+        // so a listing held for it is dropped here when it stops advertising.
+        if !appearing, descriptor.kind == .airplay, let id = descriptor.parsedID {
+            outputs_device_drop_held_upgrade(id.rawValue)
+        }
+
         descriptor.name.withCString { name in
             descriptor.hostname.withCString { host in
                 descriptor.address.withCString { addr in
@@ -1159,10 +1166,6 @@ public actor AirPlayEngine {
         else if let t = engineThreadHolder.current { try? await t.run(apply) }
     }
 
-    /// Set the C device's `stream_id` field (T2, per-app multi-stream routing).
-    /// Mirrors `applyVolumeOnDevice`'s dispatch: engine thread in production,
-    /// inline in headless test mode. MUST run before `device_start` is issued —
-    /// see `addOutput(_:streamId:)`.
     /// Swap in a preferred-protocol listing the registry held while `id` was
     /// playing (shims/outputs.c `outputs_device_apply_held_upgrade`). No-op
     /// when nothing is held or a session is live.
@@ -1172,6 +1175,10 @@ public actor AirPlayEngine {
         else if let t = engineThreadHolder.current { try? await t.run(apply) }
     }
 
+    /// Set the C device's `stream_id` field (T2, per-app multi-stream routing).
+    /// Mirrors `applyVolumeOnDevice`'s dispatch: engine thread in production,
+    /// inline in headless test mode. MUST run before `device_start` is issued —
+    /// see `addOutput(_:streamId:)`.
     private func applyStreamIdOnDevice(id: OutputID, streamId: UInt32) async {
         let apply: () -> Void = {
             guard let device = outputs_device_get(id.rawValue) else { return }

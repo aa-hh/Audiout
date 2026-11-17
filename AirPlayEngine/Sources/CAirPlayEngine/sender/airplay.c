@@ -2862,10 +2862,16 @@ payload_make_setpeersx(struct evrtsp_request *req, struct airplay_session *sessi
 static enum airplay_seq_type
 response_handler_setpeersx(struct evrtsp_request *req, struct airplay_session *session)
 {
-  // razor: logs the reply only; macOS updates its record of the receiver from a
-  // dictionary reply. Upgrade path: parse it into session->peer_timing_info.
+  // razor: an OK reply is only logged; macOS updates its record of the receiver
+  // from a dictionary reply. Upgrade path: parse it into session->peer_timing_info.
   DPRINTF(E_LOG, L_AIRPLAY, "SETPEERSX reply from '%s': %d, %zu bytes\n",
     session->devname, req->response_code, evbuffer_get_length(req->input_buffer));
+
+  // A receiver that advertises bit 52 but refuses SETPEERSX gets the legacy
+  // SETPEERS, the next row, instead of no peer list at all.
+  if (req->response_code != RTSP_OK)
+    session->supports_setpeersx = false;
+
   return AIRPLAY_SEQ_CONTINUE;
 }
 
@@ -3858,9 +3864,10 @@ static struct airplay_seq_request airplay_seq_request[][8] =
     // and a WWW-Authenticate header, and then we may need re-run with password auth
     { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (session)", EVRTSP_REQ_SETUP, payload_make_setup_session, response_handler_setup_session, "application/x-apple-binary-plist", NULL, true },
     { AIRPLAY_SEQ_START_PLAYBACK, "RECORD", EVRTSP_REQ_RECORD, payload_make_record, response_handler_record, NULL, NULL, false },
-    { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERS", EVRTSP_REQ_SETPEERS, payload_make_setpeers, NULL, "/peer-list-changed", NULL, false },
-    // [AirPlayEngine vendored change 2026-11-17] SETPEERSX row (array second dimension raised 7 -> 8)
+    // [AirPlayEngine vendored change 2026-11-17] SETPEERSX row (array second dimension raised 7 -> 8),
+    // before SETPEERS so a rejected SETPEERSX falls back to it
     { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERSX", EVRTSP_REQ_SETPEERSX, payload_make_setpeersx, response_handler_setpeersx, "application/x-apple-binary-plist", "/peer-list-changed-x", true },
+    { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERS", EVRTSP_REQ_SETPEERS, payload_make_setpeers, NULL, "/peer-list-changed", NULL, false },
     { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (stream)", EVRTSP_REQ_SETUP, payload_make_setup_stream, response_handler_setup_stream, "application/x-apple-binary-plist", NULL, false },
     // Some devices (e.g. Sonos Symfonisk) don't register the volume if it isn't last
     { AIRPLAY_SEQ_START_PLAYBACK, "SET_PARAMETER (volume)", EVRTSP_REQ_SET_PARAMETER, payload_make_set_volume, response_handler_volume_start, "text/parameters", NULL, true },

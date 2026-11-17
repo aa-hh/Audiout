@@ -208,6 +208,18 @@ outputs_device_apply_held_upgrade(uint64_t id)
 }
 
 void
+outputs_device_drop_held_upgrade(uint64_t id)
+{
+  struct output_device *device = outputs_device_get(id);
+
+  if (!device || !device->held_upgrade)
+    return;
+
+  outputs_device_free(device->held_upgrade);
+  device->held_upgrade = NULL;
+}
+
+void
 outputs_device_remove(struct output_device *remove)
 {
   struct output_device **pp;

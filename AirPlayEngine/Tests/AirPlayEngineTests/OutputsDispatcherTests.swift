@@ -520,14 +520,10 @@ extension SerializedEngineState {
             let playing = addListing(id: 0xD0A6, type: OUTPUT_TYPE_RAOP)
             playing.pointee.session = UnsafeMutableRawPointer(bitPattern: 0x1)
             addListing(id: 0xD0A6, type: OUTPUT_TYPE_AIRPLAY)
-            let gone = UnsafeMutablePointer<output_device>.allocate(capacity: 1)
-            gone.initialize(to: output_device())
-            gone.pointee.id = 0xD0A6
-            gone.pointee.type = OUTPUT_TYPE_AIRPLAY
-            gone.pointee.v4_port = 1
-            #expect(player_device_remove(gone) == 0)
+            outputs_device_drop_held_upgrade(0xD0A6)
             #expect(playing.pointee.held_upgrade == nil)
             playing.pointee.session = nil
+            #expect(outputs_device_apply_held_upgrade(0xD0A6)?.pointee.type == OUTPUT_TYPE_RAOP)
         }
 
         /// The defect this turns red: the AirPlay 1 listing going away cleared the

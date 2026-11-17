@@ -399,6 +399,11 @@ outputs_device_free(struct output_device *device);
 struct output_device *
 outputs_device_apply_held_upgrade(uint64_t id);
 
+/* Forget a held listing for device `id` (its protocol stopped advertising).
+ * Engine thread. */
+void
+outputs_device_drop_held_upgrade(uint64_t id);
+
 /* --- Two-backend per-device dispatch (raop-seam-brief §6.2).
  *
  * The shared registry hosts AP1 (output_raop) and AP2 (output_airplay) devices;

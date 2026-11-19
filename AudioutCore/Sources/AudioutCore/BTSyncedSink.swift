@@ -543,7 +543,9 @@ final class BTDeviceSink: @unchecked Sendable {
     /// next anchor uses THIS delay instead of asking the provider, so adding or
     /// removing a speaker cannot shift an alignment the user has already made
     /// by ear (spec Part 3a). Every other rebuild cause clears it — those ARE
-    /// new timeline contexts and must re-derive.
+    /// new timeline contexts and must re-derive. A trim or latency change that
+    /// arrives while it is pending is added to it by ``applyTrimDelta(ms:)``,
+    /// and it is floored at zero when the anchor consumes it.
     private var pendingCarriedDelayNanos: Int64?
     /// A consumed carry waiting to be logged. `enqueue` runs on the capture
     /// tap's real-time thread, where `Telemetry.log`'s dictionary and
@@ -1161,7 +1163,8 @@ final class BTDeviceSink: @unchecked Sendable {
             if !anchored {
                 anchored = true
                 anchorPtsNanos = SyncTiming.monotonicNanos(pts)
-                carriedDelayNanos = pendingCarriedDelayNanos
+                // Zero floor, matching the provider's in `SyncTiming.totalDelayNanos`.
+                carriedDelayNanos = pendingCarriedDelayNanos.map { max(0, $0) }
                 pendingCarriedDelayNanos = nil
                 // Only a real carry overwrites the pending line. A plain
                 // anchor must not clobber a stashed record whose emit block
@@ -1261,8 +1264,10 @@ final class BTDeviceSink: @unchecked Sendable {
     ///
     /// Three cases, chosen by how far the session has got:
     ///
-    ///  - **Not anchored** — nothing captured yet. The anchor has not sampled
-    ///    the delay, so it will pick the new trim up by itself; do nothing.
+    ///  - **Not anchored** — nothing captured yet. With no carry pending, the
+    ///    anchor samples the provider, which already holds the new value; do
+    ///    nothing. With a `config_change` carry pending, the anchor will use the
+    ///    carry instead of the provider, so the delta is added to the carry.
     ///  - **Anchored, gate still closed** — silence so far, nothing emitted to
     ///    be continuous with, so move the gate rather than the audio. Cheaper
     ///    and exact.
@@ -1295,6 +1300,7 @@ final class BTDeviceSink: @unchecked Sendable {
                          Swift.max(0, delayLine.forwardShiftRoomFrames() - marginFrames))
             : requestedFrames
         let appliedMs = Double(frames) / renderSampleRate * 1_000
+        let requestedNanos = Int64((Double(requestedFrames) / renderSampleRate * 1_000 * 1_000_000).rounded())
         stateLock.lock()
         let isAnchored = anchored, hasReleased = released
         if isAnchored, !hasReleased {
@@ -1316,6 +1322,11 @@ final class BTDeviceSink: @unchecked Sendable {
             steadyRoomFramesPtr.pointee = Swift.max(0, steadyRoomFramesPtr.pointee &+ frames)
             OSMemoryBarrier()                   // release: publish before the render thread's read
             if frames != requestedFrames { trimClampedSinceAnchor = true }
+        } else if let carried = pendingCarriedDelayNanos {
+            // The next anchor uses the carry instead of asking the provider, so
+            // the change must be added here. Kept an unfloored running sum: a
+            // move below zero and back returns to the same value.
+            pendingCarriedDelayNanos = carried &+ requestedNanos
         }
         stateLock.unlock()
         guard isAnchored, hasReleased else { return }

@@ -827,6 +827,41 @@ import AVFoundation
                 "a genuinely new reference timeline must re-derive from the provider")
     }
 
+    /// Drive one session to release at a 500 ms delay, rebuild once with
+    /// `config_change`, apply `change` while the carry is pending, then
+    /// re-anchor and report the delay the new session actually gates on.
+    private static func delayAfterPausedChange(_ change: (BTSyncedSink) -> Void) throws -> Int64 {
+        let manager = BTSyncedSink(
+            renderSampleRate: sampleRate, channelCount: 1,
+            presentationDelayMs: { 500 })
+        manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+
+        enqueueRamp(into: manager, atSec: anchorSec)
+        _ = try #require(firstNonSilence(of: sink, startNanos: anchorNanos),
+                         "the first session must reach its release gate")
+
+        sink.requestRebuild(cause: "config_change")
+        sink.test_waitForPendingRebuild()
+        change(manager)
+
+        enqueueRamp(into: manager, atSec: anchorSec + 1_000)
+        return sink.test_anchoredDelayNanos
+    }
+
+    /// Turns red if applyTrimDelta stops adding the delta to a pending carried delay: the session then anchors on the stale 500 ms carry.
+    @Test func trimAfterConfigChangeRebuildReachesTheCarriedAnchor() throws {
+        #expect(try Self.delayAfterPausedChange { $0.setTrimMs(50, forDeviceUID: "dev-a") } == 550_000_000,
+                "a trim made while a lineup change's carry is pending must reach the next anchor")
+    }
+
+    /// Turns red if enqueue stops flooring a consumed carry at zero, or if setOffsetMs stops reaching a pending carry: the anchor reads -100 ms or 500 ms.
+    @Test func latencyChangeAfterConfigChangeRebuildFloorsTheCarriedAnchorAtZero() throws {
+        #expect(try Self.delayAfterPausedChange { $0.setOffsetMs(600, forDeviceUID: "dev-a") } == 0,
+                "a latency larger than the carried delay must floor the anchor at zero, as the provider does")
+    }
+
     // MARK: - Per-app claim: fan-out exclusion and the UID-scoped feed
 
     /// A UID claimed for per-app routing must not double-receive the

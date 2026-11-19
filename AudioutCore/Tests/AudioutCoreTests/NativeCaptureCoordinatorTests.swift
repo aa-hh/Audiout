@@ -695,6 +695,36 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
+    // A device change that lands during the FIRST create (start(), not a rebuild)
+    // is coalesced the same way, and start()'s commit must replay it exactly once:
+    // one extra create, one session reset, and no stale flag left for the next
+    // unrelated rebuild to replay.
+    // Turns red if start()'s commit stops taking the coalesced rebuild flag and replaying it.
+    @Test func deviceChangeDuringInitialStartIsReplayedOnce() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+        let lock = NSLock()
+        var deviceRateRebuilds = 0
+        coordinator.onDeviceRateRebuild = { lock.withLock { deviceRateRebuilds += 1 } }
+
+        tap.onCreateAndStart = { [weak tap] in
+            guard let tap, tap.creates == 1 else { return }
+            tap.fireDeviceChange()
+        }
+
+        coordinator.start()
+        #expect(tap.creates == 2, "the device change coalesced during start() must be replayed as one rebuild")
+        #expect(coordinator.state == .capturing(tap.format))
+        #expect(lock.withLock { deviceRateRebuilds } == 1)
+
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.test.excluded"])
+        #expect(tap.creates == 3, "an exclusion rebuild after start() must not replay a stale pending flag")
+        #expect(coordinator.state == .capturing(tap.format))
+        #expect(lock.withLock { deviceRateRebuilds } == 1)
+
+        coordinator.stop()
+    }
+
     // MARK: - T1: nominal-sample-rate renegotiation drives a tap rebuild (Part A1).
     //
     // The tapped output device's nominal-sample-rate renegotiation (44.1<->48kHz —

@@ -10652,6 +10652,47 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "steps must accumulate from the current level, up then back down")
     }
 
+    /// A relative step moves the stored volume by ±2 and pushes once per step at any
+    /// master gain above 0, because a relative verb is never our own echo.
+    /// Turns red if applyDacpVolumeStep routes its target back through setSpeakerVolume's wire-percent echo guard, which drops a 2-point step once Main × Group is 0.25 or lower.
+    @Test func dacpVolumeStepsStillLandAtLowMasterGain() async {
+        for main in [25, 20, 10] {
+            let (backend, engine, discovery) = makeBackend()
+            backend.start(); defer { backend.stop() }
+            await waitUntilStarted(engine)
+
+            let device = ap2Device()
+            _ = await collect(from: backend) { events in
+                events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+            } after: { discovery.fire(.appeared(device)) }
+            await awaitFed(backend, device)
+            let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+            let storedVolume = { backend.devices.first { $0.id == device.id }?.volume }
+            let deviceCalls = { engine.volumeCalls.filter { $0.0 == device.outputID } }
+            #expect(storedVolume() == 50, "main \(main): a new device starts at stored volume 50")
+
+            backend.setMasterGain(mainOut: main, group: 100, mirrorToSystemVolume: false)
+            let gained = 0.5 * Double(main) / 100
+            await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - gained) < 0.0001 } }
+            await awaitConvergesSettled(backend)
+            let callsBefore = deviceCalls().count
+
+            for step in 1...5 {
+                backend.applyDacpVolumeStep(remoteHost: device.descriptor.address, activeRemote: token, direction: 1)
+                // Settling each step keeps `pushVolume` from coalescing two pushes into one.
+                await awaitConvergesSettled(backend)
+                #expect(storedVolume() == 50 + step * NativeBackend.speakerVolumeStep,
+                        "main \(main): step \(step) must land in the stored volume")
+            }
+
+            #expect(storedVolume() == 60, "main \(main): five up-steps must end at stored volume 60")
+            #expect(deviceCalls().count == callsBefore + 5, "main \(main): each step must push exactly once")
+            let last = deviceCalls().last?.1 ?? -1
+            #expect(abs(last - 0.60 * Double(main) / 100) < 0.0001,
+                    "main \(main): the last push must carry stored 60 through the master gain")
+        }
+    }
+
     /// A DACP report only counts when it comes from the speaker's own address:
     /// the listener is open to the whole LAN and the token is 32 bits of a MAC.
     /// Turns red if `applyDacpVolume` / `applyDacpVolumeStep` stop comparing the

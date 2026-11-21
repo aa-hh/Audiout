@@ -5709,6 +5709,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return
         }
         guard wirePct != effectiveVolume(of: id) else { return }
+        storeAndPushSpeakerVolume(id: id, outputID: outputID, stored: stored)
+    }
+
+    /// Stores a speaker-requested level in the stored domain and writes it back to
+    /// the engine. Shared by the absolute and the relative (step) paths.
+    private func storeAndPushSpeakerVolume(id: String, outputID: OutputID, stored: Int) {   // on stateQueue
         applyLocal(id) { $0.volume = stored }
         // Per-device (AP1 curve or AP2 linear) rather than the AP2-only static map —
         // a pre-existing inconsistency, since every other push here is per-device.
@@ -5734,11 +5740,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 ? (self.stashedVolume[id] ?? self.known[id]?.volume ?? 0)
                 : (self.known[id]?.volume ?? 0)
             let target = (current + direction.signum() * Self.speakerVolumeStep).clampedToVolume
-            // Step in the STORED domain (so consecutive presses move the user's own
-            // level by a fixed amount, as before) but hand `setSpeakerVolume` a WIRE
-            // level, which is its contract — it inverts the gain back out.
-            self.setSpeakerVolume(id: id, outputID: match.value,
-                                  level: Double(target) * self.masterGainFraction / 100.0)
+            // A relative step is never our own echo, so it bypasses `setSpeakerVolume`'s
+            // wire-domain same-value guard, which at low master gain rounds a 2-point
+            // step onto the current wire percent and drops it.
+            guard self.masterGainFraction > 0 else { return }
+            if self.muted.contains(id) {
+                self.stashedVolume[id] = target
+                return
+            }
+            guard target != self.known[id]?.volume else { return }
+            self.storeAndPushSpeakerVolume(id: id, outputID: match.value, stored: target)
         }
     }
 

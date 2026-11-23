@@ -1896,18 +1896,36 @@ final class BTSyncedSink: @unchecked Sendable {
     /// (`reference − latency + trim`), so a change is a move of the read
     /// position, never a new session. The wizard pushes one of these per trial
     /// — a rebuild each time would drop the speaker into silence for the whole
-    /// delay and there would be nothing left to judge. The delay delta is the
-    /// NEGATIVE of the latency delta, which is the whole sign convention in one
-    /// line.
+    /// delay and there would be nothing left to judge. The move is the change
+    /// in the clamped delay (`max(0, reference − latency + trim)`), so a change
+    /// made while the delay sits on the zero clamp moves the read position only
+    /// by what the formula moved; a larger latency still means a shorter delay.
     func setOffsetMs(_ ms: Int, forDeviceUID uid: String) {
-        let change = tableLock.withLock { () -> (sink: BTDeviceSink, deltaMs: Double)? in
+        let change = tableLock.withLock { () -> (
+            sink: BTDeviceSink, previous: Int, new: Int,
+            composition: BTGroupComposition, btOnlyBufferMs: Int, trimMs: Double
+        )? in
             let previous = offsetMsByUID[uid] ?? 0
             guard previous != ms else { return nil }
             offsetMsByUID[uid] = ms
             guard let sink = sinksByUID[uid] else { return nil }
-            return (sink, Double(ms - previous))
+            return (sink, previous, ms, composition, btOnlyBufferMs, trimMsByUID[uid] ?? 0)
         }
-        if let change { change.sink.applyTrimDelta(ms: -change.deltaMs) }
+        guard let change else { return }
+        let presentationMs = presentationDelayMs()
+        let before = BTReferenceTimeline.delayNanos(
+            composition: change.composition,
+            presentationDelayMs: presentationMs,
+            btOnlyBufferMs: change.btOnlyBufferMs,
+            deviceOffsetMs: change.previous,
+            trimMs: change.trimMs)
+        let after = BTReferenceTimeline.delayNanos(
+            composition: change.composition,
+            presentationDelayMs: presentationMs,
+            btOnlyBufferMs: change.btOnlyBufferMs,
+            deviceOffsetMs: change.new,
+            trimMs: change.trimMs)
+        change.sink.applyTrimDelta(ms: Double(after - before) / 1_000_000)
     }
 
     /// The measured latency currently in force for a device (0 when unknown).
@@ -1928,15 +1946,37 @@ final class BTSyncedSink: @unchecked Sendable {
     /// Sub-quantum float dust in `ms` cannot leak through: the delta is
     /// converted to whole frames, and anything below half a frame rounds to a
     /// no-op shift.
+    ///
+    /// The move is the change in the clamped delay
+    /// (`max(0, reference − latency + trim)`), so a trim changed while the
+    /// delay sits on the zero clamp moves the read position only by what the
+    /// formula moved.
     func setTrimMs(_ ms: Double, forDeviceUID uid: String) {
-        let change = tableLock.withLock { () -> (sink: BTDeviceSink, deltaMs: Double)? in
+        let change = tableLock.withLock { () -> (
+            sink: BTDeviceSink, previous: Double, new: Double,
+            composition: BTGroupComposition, btOnlyBufferMs: Int, offsetMs: Int
+        )? in
             let previous = trimMsByUID[uid] ?? 0
             guard previous != ms else { return nil }
             trimMsByUID[uid] = ms
             guard let sink = sinksByUID[uid] else { return nil }
-            return (sink, ms - previous)
+            return (sink, previous, ms, composition, btOnlyBufferMs, offsetMsByUID[uid] ?? 0)
         }
-        if let change { change.sink.applyTrimDelta(ms: change.deltaMs) }
+        guard let change else { return }
+        let presentationMs = presentationDelayMs()
+        let before = BTReferenceTimeline.delayNanos(
+            composition: change.composition,
+            presentationDelayMs: presentationMs,
+            btOnlyBufferMs: change.btOnlyBufferMs,
+            deviceOffsetMs: change.offsetMs,
+            trimMs: change.previous)
+        let after = BTReferenceTimeline.delayNanos(
+            composition: change.composition,
+            presentationDelayMs: presentationMs,
+            btOnlyBufferMs: change.btOnlyBufferMs,
+            deviceOffsetMs: change.offsetMs,
+            trimMs: change.new)
+        change.sink.applyTrimDelta(ms: Double(after - before) / 1_000_000)
     }
 
     /// Called on a COMMITTED trim: re-anchor this device if a live seek since

@@ -847,7 +847,7 @@ extension NativeBackend {
                 }
                 if updated != existing {
                     let availabilityMoved = updated.isAvailable != existing.isAvailable
-                    if availabilityMoved, expectedSelected.contains(id) {
+                    if availabilityMoved, expectedSelected.contains(id) || btPerAppClaimedUIDs.contains(id) {
                         desiredAvailabilityMoved = true
                     }
                     commitKnownDevice(id, updated)
@@ -876,8 +876,11 @@ extension NativeBackend {
                             // BT-LIFECYCLE: the endpoint existing is not yet
                             // audio — a selected row breathes until its sink
                             // renders, exactly like a fresh select.
+                            // A speaker a per-app route still claims breathes the same way, as in `finishBTReconnect`.
                             if expectedSelected.contains(id) {
                                 beginBTConnectingLocked(id)
+                            } else if btPerAppClaimedUIDs.contains(id) {
+                                beginBTConnectingLocked(id, perApp: true)
                             } else {
                                 setConnectionState(.off, for: id)
                             }
@@ -937,6 +940,7 @@ extension NativeBackend {
         // The reapply (Wave 4) is the other half: a selected id that just
         // (re)appeared resolves a live device and re-enters the sink set
         // without waiting for a selection change — and a vanished one drops.
+        // An id a per-app route claims moves the flag too, for the reapply: the watchdog reconcile reads the selection alone.
         if desiredAvailabilityMoved {
             reconcileSilenceWatchdog()
             reapplyBTSinkLocked()

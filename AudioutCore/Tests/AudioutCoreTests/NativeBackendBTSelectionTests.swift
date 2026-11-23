@@ -1882,6 +1882,40 @@ import CoreAudio
         #expect(device(backend, btMove.id)?.isSelected == false)
     }
 
+    /// Turns red if `applyBTSnapshots` writes `.off` for a returning Bluetooth speaker a per-app route still claims, or stops re-running the sink decision on that speaker's availability edge.
+    @Test func perAppClaimedBTSpeakerReturningBeforeTheRouteReplayRestartsItsHoldAndSink() {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
+        waitFor { sink.perAppClaimedUIDCalls.last == [self.btMove.id] }
+        sink.renderingUIDs = [btMove.id]
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+
+        drainQueues(backend)
+        let setsBefore = sink.deviceSets.count
+
+        // Hold the route replay so both edges land while the claim still stands.
+        let gate = DispatchSemaphore(value: 0)
+        backend.captureControlQueue.async { gate.wait() }
+        bt.fire([BTDeviceSnapshot(id: btMove.id, name: btMove.name, isConnected: false)])
+        bt.fire([btMove])
+        backend.stateQueue.sync {}
+
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting,
+                "a still-claimed speaker's return starts its per-app hold")
+        gate.signal()
+        drainQueues(backend)
+
+        #expect(sink.deviceSets.count > setsBefore)
+        #expect(sink.deviceSets.last?.map(\.uid) == [btMove.id],
+                "the sink decision re-ran with the speaker armed")
+    }
+
     /// The mirror case: with no whole-system BT ever selected, clearing the
     /// app's only route drops its uid from both the device set and the claim
     /// set, and disables the manager entirely.

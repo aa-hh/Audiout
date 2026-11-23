@@ -921,6 +921,60 @@ import AVFoundation
         }
         #expect(beforeSeek != nil, "the seek never ran")
     }
+
+    /// (e) A backward delta larger than the audio played since the anchor
+    /// re-anchors instead of replaying what sits behind the session start: the
+    /// previous session's audio here, zeros on a first session.
+    // Turns red if InterleavedFloatRing.seekRoomSamples stops capping its backward room at the samples consumed since the last reset(), or if reset() stops zeroing that count.
+    @Test func aBackwardOffsetDeltaPastTheAudioPlayedSinceTheAnchor_reanchors() {
+        let sink = Self.rampSink()
+        Self.enqueueRamp(into: sink)
+        _ = Self.probeRampCycles(sink, cycles: 20)
+        sink.lifecycleHooks.resetSessionState(0)
+
+        Self.enqueueRamp(into: sink)
+        let reference = Self.rampSink()
+        Self.enqueueRamp(into: reference)
+
+        var order: [String] = []
+        sink.lifecycleHooks = SyncedLocalSink.LifecycleHooks(
+            stopEngine: { order.append("stop") },
+            remeasureLatency: { order.append("remeasure"); return 0 },
+            resetSessionState: { _ in order.append("reset") },
+            restartEngine: { order.append("restart") })
+
+        let sinkProbes = Self.probeRampCycles(sink, cycles: 20) { cycle, sink in
+            if cycle == 10 { sink.applyUserOffsetDelta(ms: 100) }
+        }
+        let referenceProbes = Self.probeRampCycles(reference, cycles: 20)
+
+        #expect(order == ["stop", "remeasure", "reset", "restart"])
+        #expect(sinkProbes == referenceProbes)
+    }
+
+    /// (f) Backward deltas that each fit the advisory room but together pass the
+    /// audio played since the anchor stop at the session start: the consumer
+    /// clamps their sum, so the seeked run lags by the samples consumed so far.
+    // Turns red if InterleavedFloatRing.applyPendingShift stops clamping a backward shift to the samples consumed since the last reset().
+    @Test func backwardOffsetDeltasSummingPastTheAudioPlayedSinceTheAnchor_stopAtTheSessionStart() {
+        let seeked = Self.rampSink(), reference = Self.rampSink()
+        Self.enqueueRamp(into: seeked)
+        Self.enqueueRamp(into: reference)
+
+        let seekedProbes = Self.probeRampCycles(seeked, cycles: 20) { cycle, sink in
+            if cycle == 10 {
+                sink.applyUserOffsetDelta(ms: 15)
+                sink.applyUserOffsetDelta(ms: 15)
+            }
+        }
+        let referenceProbes = Self.probeRampCycles(reference, cycles: 20)
+
+        for cycle in 12..<20 {
+            #expect(referenceProbes[cycle] - seekedProbes[cycle] > 900
+                        && referenceProbes[cycle] - seekedProbes[cycle] < 1000,
+                    "cycle \(cycle): \(referenceProbes[cycle]) vs \(seekedProbes[cycle])")
+        }
+    }
     #endif
 
     // MARK: Ring-overflow drop counting

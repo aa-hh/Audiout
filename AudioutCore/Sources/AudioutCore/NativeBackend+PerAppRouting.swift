@@ -1275,6 +1275,16 @@ extension NativeBackend {
             ])
             return false
         }
+        // The enqueue preflight ran before the PTP wait, and a whole-system claim
+        // can land during it. Stepping aside returns `false` with no engine op, so
+        // the completion's ownership guard takes the `superseded` exit.
+        if case .perApp = scope {
+            let mayFire = stateQueue.sync { () -> Bool in
+                guard let id = self.outputIDs.first(where: { $0.value == outputID })?.key else { return true }
+                return self.stillOwnsRebind(deviceID: id, scope: scope)
+            }
+            guard mayFire else { return false }
+        }
 
         try? await engine.removeOutput(outputID)
         do {

@@ -13268,6 +13268,62 @@ extension SerializedSharedState {
                 "no remove may follow the re-engaged bind — the stale unbind must never fire")
     }
 
+    /// Turns red if performRebindRecovery's per-app arm stops re-checking stillOwnsRebind after the PTP wait and before removeOutput.
+    /// The recovery's preflight passes while the route still owns the device, then
+    /// the recovery parks inside `ensurePTPTakeover`; a whole-system selection lands
+    /// during that wait. The recovery must step aside with no per-app re-add, and
+    /// the completion must log `rebind` `superseded`.
+    @Test func perAppRecoveryStepsAsideWhenWholeSystemClaimsDuringThePTPWait() async {
+        let activator = ArmableHoldingPTPActivator()
+        let tap = RebindTriggerTap()
+        let resolver = singleProcessResolver(["com.foo.player": 4242])
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator, processResolver: resolver,
+            injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
+        await pollUntil { tap.isArmed }
+        #expect(tap.isArmed, "precondition: the per-app tap must have its device-change hook installed")
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        activator.arm()
+        tap.fireDeviceChange()
+
+        await pollUntil {
+            telemetryLines(box, evt: "rebind_recover_starting")
+                .contains { $0["output"] as? String == "\(device.outputID)" }
+        }
+        await pollUntil { activator.holding }
+        #expect(activator.holding,
+                "precondition: the per-app recovery must be parked inside the PTP wait")
+
+        let baseline = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
+
+        backend.setOutputSet([device.id])
+        activator.release()
+
+        await pollUntil {
+            telemetryLines(box, evt: "rebind", device: device.id)
+                .contains { $0["outcome"] as? String == "superseded" }
+        }
+        await awaitBindsSettled(backend)
+        await awaitConvergesSettled(backend)
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+
+        #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.count == baseline,
+                "the recovery must issue no per-app re-add on a device whole-system claimed during the PTP wait")
+        #expect(onAWholeSystemStream(engine, device.outputID))
+    }
+
     /// Turns red if the failed bind stops reporting `airplay:connect_failed` at error level with the device id in its local line.
     /// The failed-bind fallback above must ALSO leave a Telemetry trail — a
     /// silently-swallowed engine failure is invisible to any post-hoc diagnosis.

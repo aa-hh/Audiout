@@ -70,6 +70,10 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// are tens of ppm; nobody has measured the Streamer's, so the default is
     /// a clock that does not drift at all.
     private let clockDriftPPM: Double
+    /// How many LOADs, counted from the first, the receiver swallows whole: no
+    /// reply, no media session, no fetch. The sender's LOAD stays outstanding,
+    /// so a test can tear the session down while that request is in flight.
+    private let unansweredLoads: Int
     /// What the play clock reads.
     private let uptimeClock: CastUptimeClock
     /// What runs the fetch delay, the stalls and the one PING.
@@ -85,6 +89,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
     private var _events: [String] = []
     private var _mediaStatusRequestCount = 0
     private var _receivedBodyBytes = 0
+    private var _loadCount = 0
 
     /// Everything fetched from the stream (from the first content byte up to
     /// wherever `fetchBytes` was reached, interior chunk framing included), and
@@ -143,7 +148,8 @@ public final class FakeCastReceiver: @unchecked Sendable {
         startupRebufferAfter: TimeInterval = 2,
         clockDriftPPM: Double = 0,
         uptimeClock: @escaping CastUptimeClock = castDispatchUptimeClock,
-        delayClock: @escaping CastDelayClock = castDispatchDelayClock
+        delayClock: @escaping CastDelayClock = castDispatchDelayClock,
+        unansweredLoads: Int = 0
     ) {
         self.fetchBytes = fetchBytes
         self.controlType = controlType
@@ -154,6 +160,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
         self.clockDriftPPM = clockDriftPPM
         self.uptimeClock = uptimeClock
         self.delayClock = delayClock
+        self.unansweredLoads = unansweredLoads
     }
 
     /// Injects a rebuffer: the receiver re-enters BUFFERING for `duration` and
@@ -183,6 +190,10 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// How many media-namespace `GET_STATUS` requests arrived — the sender's
     /// status poll, counted so a test can wait for polls instead of seconds.
     public var mediaStatusRequestCount: Int { stateLock.withLock { _mediaStatusRequestCount } }
+
+    /// How many LOADs arrived, swallowed ones included — what a test waits on
+    /// to know a LOAD is outstanding.
+    public var loadCount: Int { stateLock.withLock { _loadCount } }
 
     /// Body bytes the current fetch has read, chunk framing and WAV header
     /// included. Zero again after a STOP or a new LOAD.
@@ -473,6 +484,11 @@ public final class FakeCastReceiver: @unchecked Sendable {
     ) {
         switch type {
         case "LOAD":
+            let arrived = stateLock.withLock { () -> Int in
+                _loadCount += 1
+                return _loadCount
+            }
+            guard arrived > unansweredLoads else { return }
             mediaSessionCounter += 1
             currentMediaSessionID = mediaSessionCounter
             playerState = "BUFFERING"

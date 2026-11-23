@@ -473,6 +473,10 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     /// a dead player — so a re-select waits for its predecessor's last hop.
     /// Queue-confined.
     private var teardownsInFlight: [String: Int] = [:]
+    /// Source of every session's generation, shared across sessions so a
+    /// re-selected device's new session can never repeat a value an earlier
+    /// attempt captured. Queue-confined.
+    private var nextGeneration = 0
 
     init(
         serverBindsLoopbackOnly: Bool = false,
@@ -514,8 +518,9 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         var server: CastLiveAudioServer?
         var application: CastApplication?
         var mediaSessionID: Int?
-        /// Bumped by every teardown; a completion carrying an older value is a
-        /// late callback of an attempt nobody is waiting for any more.
+        /// Drawn from the manager's `nextGeneration` at every recipe start and
+        /// every teardown; a completion carrying a different value is a late
+        /// callback of an attempt nobody is waiting for any more.
         var generation = 0
         var state: CastSessionState = .idle
         var controlReady = false
@@ -650,7 +655,8 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     // MARK: - The recipe (on queue)
 
     private func startRecipe(_ session: Session) {
-        session.generation += 1
+        nextGeneration += 1
+        session.generation = nextGeneration
         let generation = session.generation
         let id = session.record.id
         setState(session, .connecting)
@@ -1037,7 +1043,8 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         session.levelPending = nil
         session.controlReady = false
         session.wasPlaying = false
-        session.generation += 1
+        nextGeneration += 1
+        session.generation = nextGeneration
         if session.reportedLagSeconds != nil {
             session.reportedLagSeconds = nil
             onVolumeLagChange?(id, nil)

@@ -1,0 +1,4 @@
+current [(80, False, False), (80, False, True)]
+FAIL: headphone level reported as gesture (defaultDeviceChanged:false): [(80, False, False)]
+fixed [(80, False, True)]
+PASS []

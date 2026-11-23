@@ -1,0 +1,5 @@
+FAIL gain=0.25 after 5x volumeup: volume=50 (expected 60), pushes=[]
+FAIL gain=0.10 after 5x volumeup: volume=50 (expected 60), pushes=[]
+PASS gain=1.00 after 5x volumeup: volume=60 (expected 60), pushes=[52, 54, 56, 58, 60]
+PASS echo of own write still dropped
+exit 1

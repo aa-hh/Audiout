@@ -1,0 +1,2 @@
+state ('capturing', 48000) tap device A default B pending True
+FAIL: device change during initial start lost; tap pinned to stale device

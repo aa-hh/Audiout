@@ -1,0 +1,2 @@
+engine log: [('rebind', 7, 0)] | bound: {7: 0} | added: {'D'}
+PASS

@@ -1,0 +1,3 @@
+before deselect: room 7000 B applied 1200
+after deselect:  room 5800 B settled 5800 B applied 0
+PASS

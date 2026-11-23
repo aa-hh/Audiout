@@ -1,0 +1,2 @@
+engineRunning=True A.playing=False A.queued=1000 B.playing=True
+FAIL: A stopped while receive() queued 1000 buffers into it

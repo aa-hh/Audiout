@@ -1,0 +1,1 @@
+PASS: self receiver results=['dropped', 'dropped'], expected both dropped

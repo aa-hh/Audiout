@@ -1,0 +1,2 @@
+log: [('resolve', 'v4_1'), ('remove',), ('resolve', 'v4_2')]
+FAIL: onResolve after onRemove: [('resolve', 'v4_2')]

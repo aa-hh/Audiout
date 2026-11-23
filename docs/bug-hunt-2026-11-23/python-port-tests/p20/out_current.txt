@@ -1,0 +1,4 @@
+drop       converging slot still held after everything settled: True
+move       converging slot still held after everything settled: True
+recapture  converging slot still held after everything settled: True
+FAIL: slot leaked, device wedged

@@ -1,0 +1,4 @@
+drop       converging slot still held after everything settled: False
+move       converging slot still held after everything settled: False
+recapture  converging slot still held after everything settled: False
+PASS

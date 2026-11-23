@@ -1,0 +1,8 @@
+states: ['connecting', 'playing', 'connecting', ('failed', 'connect', 'connectionFailed: refused (rebooting)')] connects: 2
+Traceback (most recent call last):
+  File "/tmp/hunt/p42/port.py", line 70, in <module>
+    test_drop_then_first_reconnect_connect_fails()
+  File "/tmp/hunt/p42/port.py", line 67, in test_drop_then_first_reconnect_connect_fails
+    assert se.state=="playing", f"run ended after one failed reconnect: {se.state} (connects={rx.connects})"
+           ^^^^^^^^^^^^^^^^^^^
+AssertionError: run ended after one failed reconnect: ('failed', 'connect', 'connectionFailed: refused (rebooting)') (connects=2)

@@ -1,0 +1,6 @@
+anchor pts=50000000 chunk-at-ring-sample-0=6 pts=60000000 error=10.00 ms
+Traceback (most recent call last):
+  File "/tmp/hunt/p44/test_reanchor_race.py", line 42, in <module>
+    assert err_ns == 0, f"FAIL: session anchored {err_ns/1e6:.2f} ms off (anchor chunk discarded by reset)"
+           ^^^^^^^^^^^
+AssertionError: FAIL: session anchored 10.00 ms off (anchor chunk discarded by reset)

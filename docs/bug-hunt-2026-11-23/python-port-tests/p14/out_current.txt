@@ -1,0 +1,6 @@
+after unmute volume = 0 wire = 0.0
+Traceback (most recent call last):
+  File "/tmp/hunt/p14/port.py", line 46, in <module>
+    assert b.known['d']==70, f"FAIL: unmute restored {b.known['d']} instead of 70"
+           ^^^^^^^^^^^^^^^^
+AssertionError: FAIL: unmute restored 0 instead of 70

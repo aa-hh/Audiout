@@ -1,0 +1,3 @@
+teardown calls=2 max concurrent=2 slots=[]
+FAIL: same tap torn down by two concurrent stop() calls
+rc=1

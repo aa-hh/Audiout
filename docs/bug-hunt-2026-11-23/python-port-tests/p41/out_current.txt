@@ -1,0 +1,7 @@
+A log: ['LAUNCH-path connect ch1 (tif=0)', 'STOP', 'LAUNCH-path connect ch2 (tif=2)', 'LAUNCH-path connect ch3 (tif=0)']
+A open channels: ['ch2', 'ch3'] session holds: ch3
+FAIL A: leaked channel(s) ['ch2']
+FAIL A: recipe started while STOP in flight: ['LAUNCH-path connect ch2 (tif=2)']
+B log: ['LAUNCH-path connect ch4 (tif=0)', 'STOP', 'LAUNCH-path connect ch5 (tif=2)']
+FAIL B: recipe started while STOP in flight: ['LAUNCH-path connect ch5 (tif=2)']
+FAILED

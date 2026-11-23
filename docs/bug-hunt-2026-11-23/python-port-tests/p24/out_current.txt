@@ -1,0 +1,6 @@
+current: max |playout - (pts+delay)| = 11.610 ms over 21388 frames
+Traceback (most recent call last):
+  File "/tmp/hunt/p24/port.py", line 52, in <module>
+    assert late < 0.1, f"FAIL: device plays late by {late:.3f} ms (one buffer)"
+           ^^^^^^^^^^
+AssertionError: FAIL: device plays late by 11.610 ms (one buffer)

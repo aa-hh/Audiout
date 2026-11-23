@@ -1,0 +1,6 @@
+P state: off kicked P: True
+Traceback (most recent call last):
+  File "/tmp/hunt/p40/port.py", line 34, in <module>
+    assert b.state["P"]=="connected", "FAIL: per-app-connected P reset to .off by unrelated setOutputSet([A])"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: FAIL: per-app-connected P reset to .off by unrelated setOutputSet([A])

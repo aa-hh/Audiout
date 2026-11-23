@@ -1,0 +1,3 @@
+anchorPts=3 first released frame from pts=4
+FAIL: first frame released belongs to a later pts than the anchor -> device plays early by one buffer
+rc=1

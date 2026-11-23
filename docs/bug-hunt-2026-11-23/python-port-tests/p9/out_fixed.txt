@@ -1,0 +1,3 @@
+new session is a new object: True  old gen 2  new gen 3
+new session state: connecting
+PASS

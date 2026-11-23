@@ -1,0 +1,4 @@
+prefer=v4: probes started=[('start', 'v4'), ('start', 'any')], onResolve count=2, IPv6-only logs=0
+prefer=v6: probes started=[('start', 'v4'), ('start', 'any')], onResolve count=1, IPv6-only logs=1
+FAIL: successful IPv4 probe's .cancelled started the unconstrained fallback
+exit 1

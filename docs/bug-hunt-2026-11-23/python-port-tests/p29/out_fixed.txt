@@ -1,0 +1,3 @@
+throw: one real device change -> 1 tap rebuild(s) (expected 1) -> PASS
+empty: one real device change -> 1 tap rebuild(s) (expected 1) -> PASS
+0

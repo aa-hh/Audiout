@@ -1,0 +1,6 @@
+browsers created=4 still running after stop=2
+Traceback (most recent call last):
+  File "/tmp/hunt/p36b/port.py", line 62, in <module>
+    assert not leaked, "FAIL: NWBrowsers leaked past stop()"
+           ^^^^^^^^^^
+AssertionError: FAIL: NWBrowsers leaked past stop()

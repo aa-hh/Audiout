@@ -1,0 +1,7 @@
+new session is a new object: True  old gen 2  new gen 2
+new session state: failed(cancelled)
+Traceback (most recent call last):
+  File "/tmp/hunt/p9/port.py", line 82, in <module>
+    assert new.state=="connecting", "FAIL: late completion of the deselected attempt acted on the re-selected session -> "+new.state
+           ^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: FAIL: late completion of the deselected attempt acted on the re-selected session -> failed(cancelled)

@@ -1,0 +1,3 @@
+FAIL: after start + mid-create device change, tap stuck on ('capturing', 44100) (device now 48000)
+FAIL: unrelated exclusion rebuild caused 2 spurious AirPlay reset(s) via stale pending replay
+

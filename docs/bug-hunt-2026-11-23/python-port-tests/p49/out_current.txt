@@ -1,0 +1,6 @@
+readback 2 fired [(2, False, False)]
+Traceback (most recent call last):
+  File "/tmp/hunt/p49/port.py", line 30, in <module>
+    assert o.fired == [], "own write echo reported as external gesture: %r" % o.fired
+           ^^^^^^^^^^^^^
+AssertionError: own write echo reported as external gesture: [(2, False, False)]

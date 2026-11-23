@@ -1,0 +1,2 @@
+max concurrent setVolume for output 1: 1 log: [(1, 0.5), (1, 0.7)]
+PASS

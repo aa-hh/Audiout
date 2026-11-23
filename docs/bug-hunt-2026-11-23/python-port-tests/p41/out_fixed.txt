@@ -1,0 +1,4 @@
+A log: ['LAUNCH-path connect ch1 (tif=0)', 'STOP', 'LAUNCH-path connect ch2 (tif=0)']
+A open channels: ['ch2'] session holds: ch2
+B log: ['LAUNCH-path connect ch3 (tif=0)', 'STOP', 'LAUNCH-path connect ch4 (tif=0)']
+PASS

@@ -1,0 +1,3 @@
+anchorPts=3 first released frame from pts=3
+PASS
+rc=0

@@ -1,0 +1,2 @@
+states: ['connecting', 'playing', 'connecting', 'playing'] connects: 3
+PASS

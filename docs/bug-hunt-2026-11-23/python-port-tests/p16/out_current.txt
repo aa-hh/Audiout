@@ -1,0 +1,6 @@
+fix=False silence injected: no-rebuild=0.0ms  rebuild-during-pause=1500.0ms
+Traceback (most recent call last):
+  File "/tmp/hunt/p16/port.py", line 46, in <module>
+    assert rb==base, f"FAIL: rebuild during pause injected {(rb-base)/1e6:.1f} ms of extra silence (later blocks play that late)"
+           ^^^^^^^^
+AssertionError: FAIL: rebuild during pause injected 1500.0 ms of extra silence (later blocks play that late)

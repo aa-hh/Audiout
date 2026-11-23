@@ -1,0 +1,6 @@
+shift before measurement: -150 demo legs (before, after): [0, -150]
+Traceback (most recent call last):
+  File "/tmp/hunt/p19/port.py", line 33, in <module>
+    assert legs[0] == before_actual, f"demo 'before' leg {legs[0]} != what played before {before_actual}"
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: demo 'before' leg 0 != what played before -150

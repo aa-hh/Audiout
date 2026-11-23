@@ -1,0 +1,2 @@
+P state: connected kicked P: False
+PASS

@@ -1,0 +1,4 @@
+leveled: dead=['com.app.paused'] retryScheduled=False -> FAIL
+currentDevice: dead=['com.app.paused'] retryScheduled=False -> FAIL
+device(control): dead=['com.app.paused'] retryScheduled=True -> PASS
+exit 1

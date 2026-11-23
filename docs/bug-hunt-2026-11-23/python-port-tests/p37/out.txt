@@ -1,0 +1,10 @@
+isAP2= False descriptor.kind= airplay
+Traceback (most recent call last):
+  File "/tmp/hunt/p37/port.py", line 58, in <module>
+    assert d["descriptor"]["kind"]=="raop", "AP1-only device routed with kind .airplay (to AP2 backend)"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: AP1-only device routed with kind .airplay (to AP2 backend)
+exit 1
+isAP2= False descriptor.kind= raop
+PASS
+exit 0

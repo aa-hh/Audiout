@@ -1,0 +1,6 @@
+second attempt state: failed(timeout)
+Traceback (most recent call last):
+  File "/tmp/hunt/p43/test_rearm.py", line 38, in <module>
+    assert m.s.state=="playing", "FAIL: second attempt timed out at t=123 (GET at 115 did not re-arm)"
+           ^^^^^^^^^^^^^^^^^^^^
+AssertionError: FAIL: second attempt timed out at t=123 (GET at 115 did not re-arm)

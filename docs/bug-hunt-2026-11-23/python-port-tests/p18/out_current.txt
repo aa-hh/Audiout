@@ -1,0 +1,4 @@
+before: True [('A', 215.0), ('B', 200.0)]
+after reset: True [('A', 215.0), ('B', 200.0)] expected baselines: [('B', 200.0)] expected running: False
+FAIL: tracker still running with stale baseline for reset speaker A
+exit 1

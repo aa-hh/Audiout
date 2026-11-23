@@ -1,0 +1,6 @@
+local-mac name after discovery: MacBook Pro Speakers
+Traceback (most recent call last):
+  File "/tmp/hunt/p10/port.py", line 43, in <module>
+    assert got=="External Headphones", f"FAIL: expected 'External Headphones', got {got!r}"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: FAIL: expected 'External Headphones', got 'MacBook Pro Speakers'

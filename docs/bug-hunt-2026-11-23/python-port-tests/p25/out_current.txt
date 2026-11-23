@@ -1,0 +1,6 @@
+lateness at end: 53.3 ms (bound 20.0 ms)
+Traceback (most recent call last):
+  File "/tmp/hunt/p25/test_lockout.py", line 63, in <module>
+    assert abs(late_ms) < THRESH_MS, "FAIL: lateness from lock-turned-away cycles persists unmeasured"
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: FAIL: lateness from lock-turned-away cycles persists unmeasured

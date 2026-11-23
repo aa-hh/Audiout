@@ -1,0 +1,6 @@
+known: {'aa:bb:cc:dd:ee:ff': {'airplay'}, 'AA:BB:CC:DD:EE:FF': {'raop'}}
+Traceback (most recent call last):
+  File "/tmp/hunt/p35/test_identity.py", line 27, in <module>
+    assert len(known) == 1, f"FAIL: one device split into {len(known)} known entries"
+           ^^^^^^^^^^^^^^^
+AssertionError: FAIL: one device split into 2 known entries

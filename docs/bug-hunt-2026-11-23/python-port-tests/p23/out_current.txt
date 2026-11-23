@@ -1,0 +1,17 @@
+engine log: [('remove', 7), ('add', 7, 1), ('add', 7, 0)] | bound: {7: 1} | added: {'D'}
+Traceback (most recent call last):
+  File "/tmp/hunt/p23/test_rebind.py", line 60, in <module>
+    asyncio.run(main())
+  File "/usr/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/tmp/hunt/p23/test_rebind.py", line 58, in main
+    assert not perapp_ops, f"FAIL: per-app recovery fired {perapp_ops} on a whole-system-claimed device (claimed at fire={b.claim_at_fire})"
+           ^^^^^^^^^^^^^^
+AssertionError: FAIL: per-app recovery fired [('remove', 7), ('add', 7, 1)] on a whole-system-claimed device (claimed at fire=True)

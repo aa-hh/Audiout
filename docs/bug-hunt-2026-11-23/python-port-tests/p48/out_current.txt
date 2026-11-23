@@ -1,0 +1,3 @@
+A: ready  B: ('needsApproval', 'notRegistered')
+FAIL: device B got ('needsApproval', 'notRegistered') mid-cycle (helper is approved; cycle succeeded)
+1

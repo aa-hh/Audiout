@@ -1,0 +1,4 @@
+current active prompt: PHONE-A withdrawn: [] -> FAIL
+rc=1
+fix active prompt: None withdrawn: ['PHONE-A'] -> PASS
+rc=0

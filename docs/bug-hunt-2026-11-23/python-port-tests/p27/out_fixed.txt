@@ -1,0 +1,3 @@
+PASS per-app reset 700->0, ref 500: ring=500.0ms formula=500.0ms
+PASS claim 600->700->500, ref 500: ring=0.0ms formula=0.0ms
+exit=0

@@ -1,0 +1,17 @@
+max concurrent setVolume for output 1: 2 log: [(1, 0.5), (1, 0.7)]
+Traceback (most recent call last):
+  File "/tmp/hunt/p13/test_startbuffer_volume.py", line 58, in <module>
+    asyncio.run(main())
+  File "/usr/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/tmp/hunt/p13/test_startbuffer_volume.py", line 56, in main
+    assert eng.max_conc<=1, "FAIL: two setVolume calls in flight for one output"
+           ^^^^^^^^^^^^^^^
+AssertionError: FAIL: two setVolume calls in flight for one output

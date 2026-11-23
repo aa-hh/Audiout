@@ -1,0 +1,7 @@
+before deselect: room 7000 B applied 1200
+after deselect:  room 5800 B settled 5800 B applied 1200
+Traceback (most recent call last):
+  File "/tmp/hunt/p8/test_stale_delay.py", line 10, in <module>
+    assert b.com.sessions['B'].applied==0, f"FAIL: B keeps stale feed delay {b.com.sessions['B'].applied} ms (expected 0)"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: FAIL: B keeps stale feed delay 1200 ms (expected 0)

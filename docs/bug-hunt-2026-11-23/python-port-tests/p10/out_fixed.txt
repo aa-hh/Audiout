@@ -1,0 +1,2 @@
+local-mac name after discovery: External Headphones
+PASS

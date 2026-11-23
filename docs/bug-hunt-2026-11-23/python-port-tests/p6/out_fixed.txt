@@ -1,0 +1,4 @@
+prefer=v4: probes started=[('start', 'v4')], onResolve count=1, IPv6-only logs=0
+prefer=v6: probes started=[('start', 'v4')], onResolve count=1, IPv6-only logs=0
+PASS
+exit 0

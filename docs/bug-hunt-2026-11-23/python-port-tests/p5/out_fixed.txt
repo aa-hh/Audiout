@@ -1,0 +1,2 @@
+state ('capturing', 48000) tap device B default B pending False
+PASS

@@ -1,0 +1,2 @@
+state: off reapplies: []
+FAIL: per-app speaker back up but state=off, sink never rebuilt

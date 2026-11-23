@@ -1,0 +1,6 @@
+fix=False action=shift stale_samples_replayed=200
+Traceback (most recent call last):
+  File "/tmp/hunt/p45/ring_port.py", line 75, in <module>
+    assert stale == 0, "replayed previous-session audio from behind the session anchor"
+           ^^^^^^^^^^
+AssertionError: replayed previous-session audio from behind the session anchor

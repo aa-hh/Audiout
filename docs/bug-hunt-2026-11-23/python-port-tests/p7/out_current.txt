@@ -1,0 +1,1 @@
+FAIL: self receiver results=['surfaced', 'surfaced'], expected both dropped

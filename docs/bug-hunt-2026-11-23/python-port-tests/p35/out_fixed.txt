@@ -1,0 +1,2 @@
+known: {'AA:BB:CC:DD:EE:FF': {'airplay', 'raop'}}
+PASS

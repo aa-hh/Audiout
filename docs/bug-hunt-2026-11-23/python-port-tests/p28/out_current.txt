@@ -1,0 +1,6 @@
+applied -20 next frames [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]
+Traceback (most recent call last):
+  File "/tmp/hunt/p28/port.py", line 45, in <module>
+    assert not stale, f"FAIL: {len(stale)} frames from session 1 replayed after trim: {stale}"
+           ^^^^^^^^^
+AssertionError: FAIL: 16 frames from session 1 replayed after trim: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]

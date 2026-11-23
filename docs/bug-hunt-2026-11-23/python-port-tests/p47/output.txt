@@ -1,0 +1,4 @@
+slip after contended cycle: 512.0 frames; recovery to <1 frame: 53.3 s
+FAIL: dropout: 512/512 zero samples in released cycle; content slip 512.0 frames
+slip after contended cycle: -0.0 frames; recovery to <1 frame: 0.0 s
+PASS

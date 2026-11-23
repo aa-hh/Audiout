@@ -1,0 +1,6 @@
+decision=keepStored correctedMs=0 delay before=150.0 after=0 sinkTrim=0
+Traceback (most recent call last):
+  File "/tmp/hunt/p4/test_keep_trim.py", line 10, in <module>
+    assert after == before, f"FAIL: re-check that agreed moved the speaker {before} -> {after}"
+           ^^^^^^^^^^^^^^^
+AssertionError: FAIL: re-check that agreed moved the speaker 150.0 -> 0

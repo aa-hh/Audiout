@@ -1,0 +1,2 @@
+attached: {'A': 300, 'B': 300} added: ['A', 'B']
+PASS

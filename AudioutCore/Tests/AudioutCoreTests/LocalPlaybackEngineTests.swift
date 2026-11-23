@@ -53,6 +53,24 @@ private let tapFormat = TapFormat(
                 "backend shutdown cannot leave a later local graph suppressed")
     }
 
+    // Turns red if startEngineOnGraphQueue stops reconnecting and replaying the players already in nodes when it brings the engine back up.
+    @Test func engineRestartReplaysPlayersLeftStoppedByAFailedRecovery() throws {
+        let engine = LocalPlaybackEngine(offlineRenderingForTests: true)
+        defer { engine.stop() }
+        let other = "com.example.otherapp"
+        try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
+        #expect(engine.test_isPlaying(bundleID: bundleID) == true)
+        engine.test_simulateFailedRecovery()
+        #expect(engine.test_isPlaying(bundleID: bundleID) == false)
+        try engine.addApp(bundleID: other, tapFormat: tapFormat, volume: 1.0)
+        #expect(engine.test_isPlaying(bundleID: bundleID) == true)
+        #expect(engine.test_isPlaying(bundleID: other) == true)
+        engine.test_simulateFailedRecovery()
+        try engine.start()
+        #expect(engine.test_isPlaying(bundleID: bundleID) == true)
+        #expect(engine.test_isPlaying(bundleID: other) == true)
+    }
+
     // MARK: - Follow-real-output-with-guard (R13)
     //
     // These drive the decision through an injected fake ``LocalOutputResolving``

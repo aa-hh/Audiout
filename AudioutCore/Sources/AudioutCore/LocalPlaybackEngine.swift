@@ -287,6 +287,8 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// Test seam: if set, `startEngineOnGraphQueue()` calls this instead of
     /// `engine.start()`. Lets tests force a start failure without mocking Core
     /// Audio (L5 orphan-node regression). Production code never sets it.
+    /// It applies only when no players are registered; a start with players
+    /// goes through `reestablishGraphOnGraphQueue(_:)`, which calls `engine.start()`.
     public var test_startOverride: (() throws -> Void)?
 
     /// Subscription handle on the process-wide ``DefaultOutputDeviceMonitor``
@@ -399,6 +401,10 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// fire an async `AVAudioEngineConfigurationChange` that stops the engine
     /// right back, so trusting a bare "start() didn't throw" would leave a stale
     /// `true` and let `play()` hit a stopped engine (an uncatchable abort).
+    /// With players already registered (a failed recovery leaves them in `nodes`,
+    /// stopped), it brings the engine up through `reestablishGraphOnGraphQueue(_:)`
+    /// instead, which reconnects, starts and replays them, and throws
+    /// `LocalPlaybackError.engineNotRunning` if that leaves the engine down.
     private func startEngineOnGraphQueue() throws {
         guard !(stateLock.withLock { engineRunning }) else { return }
         if offlineRenderingForTests {
@@ -408,6 +414,18 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             enableOfflineRenderingIfNeeded()
         } else {
             configureOutput()
+        }
+        let existing: [String: AppNode] = stateLock.withLock { nodes }
+        if !existing.isEmpty {
+            // Starting the bare engine would leave these players stopped, and
+            // `receive` would queue into them; `engineRunning` is false here, as
+            // `reestablishGraphOnGraphQueue` assumes.
+            Telemetry.log(.localPlayback, "start_replaying_existing", ["playerCount": "\(existing.count)"])
+            reestablishGraphOnGraphQueue(existing)
+            guard stateLock.withLock({ engineRunning }) else {
+                throw LocalPlaybackError.engineNotRunning
+            }
+            return
         }
         // Touch the main mixer so it (and its main-mixer→output connection) is
         // instantiated before start; starting with no player inputs is silent
@@ -480,9 +498,10 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     }
 
     /// Reconnect every player to the mixer, restart the engine, and re-`play()`
-    /// each player — the shared recovery both the config-change handler and a
-    /// device repoint use. MUST run on `graphQueue`. Assumes the caller has already
-    /// set `engineRunning = false` (or that the engine is currently stopped).
+    /// each player — the shared recovery the config-change handler, a device
+    /// repoint and the engine start path use. MUST run on `graphQueue`. Assumes
+    /// the caller has already set `engineRunning = false` (or that the engine is
+    /// currently stopped).
     private func reestablishGraphOnGraphQueue(_ snapshot: [String: AppNode]) {
         guard !snapshot.isEmpty else {
             stateLock.withLock { engineRunning = false }
@@ -1218,6 +1237,23 @@ extension LocalPlaybackEngine {
     /// real notification can't be injected hermetically).
     func test_simulateConfigurationChange() {
         graphQueue.sync { handleConfigurationChangeOnGraphQueue() }
+    }
+    /// The state a failed `reestablishGraphOnGraphQueue` leaves: engine stopped,
+    /// players stopped, `nodes` kept.
+    func test_simulateFailedRecovery() {
+        graphQueue.sync {
+            let players = stateLock.withLock { nodes.values.map(\.player) }
+            engine.stop()
+            for player in players { player.stop() }
+            stateLock.withLock { engineRunning = false }
+        }
+    }
+    /// Whether the registered player for `bundleID` is playing; `nil` if unregistered.
+    func test_isPlaying(bundleID: String) -> Bool? {
+        graphQueue.sync {
+            let player = stateLock.withLock { nodes[bundleID]?.player }
+            return player?.isPlaying
+        }
     }
 }
 

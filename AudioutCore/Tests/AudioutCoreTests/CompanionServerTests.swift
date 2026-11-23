@@ -1031,6 +1031,38 @@ import AudioutProtocol
                 "abandonment never fired once the last awaiting connection for the phone died")
     }
 
+    /// Turns red if stopLocked empties awaiting without calling
+    /// noteApprovalAbandoned for the phones it drops, or reports one phone
+    /// once per connection.
+    @Test func stoppingReportsEachAwaitingPhoneAbandonedOnce() async throws {
+        let hub = try await makeHub()
+        defer { hub.cancel() }
+        let server = makeServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+        server.onApprovalRequest = { _, _, _, decide in decide(.pending) }
+        let abandoned = LockedBox<[String]>([])
+        server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
+
+        let (clientA, logA) = try await connectClient(via: hub, to: server)
+        defer { clientA.cancel() }
+        try await sendAuthenticatedHello(over: clientA, log: logA)
+        let (clientB, logB) = try await connectClient(via: hub, to: server)
+        defer { clientB.cancel() }
+        try await sendAuthenticatedHello(over: clientB, log: logB)
+
+        try #require(await waitUntil { server.test_awaitingCount() == 2 },
+                     "both connections never reached the awaiting pool")
+
+        server.stop(reason: CompanionGoodbyeReason.disabled)
+
+        #expect(await waitUntil { abandoned.value == [Self.testClientID] },
+                "stopping never reported the awaiting phone abandoned")
+        #expect(server.test_awaitingCount() == 0)
+        #expect(abandoned.value == [Self.testClientID],
+                "a phone was reported abandoned more than once")
+    }
+
     /// Turns red if the server stops checking `clientKey`'s length before
     /// trusting it: 63 bytes can be no raw P-256 point, so the refusal is
     /// `invalidClientKey` whatever CryptoKit would make of the bytes.

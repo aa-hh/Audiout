@@ -141,8 +141,9 @@ public final class CompanionServer: @unchecked Sendable {
                                               _ decide: @escaping @Sendable (ApprovalDecision) -> Void) -> Void)?
 
     /// Fires when the last awaiting connection carrying this phone
-    /// `clientID` went away unanswered — dropped, or the approval deadline
-    /// reaped it. Never fires for an answered request (approved or denied).
+    /// `clientID` went away unanswered — dropped, the approval deadline
+    /// reaped it, or the server stopped or restarted. Never fires for an
+    /// answered request (approved or denied).
     /// The wiring uses this to withdraw the prompt still on screen.
     public var onApprovalAbandoned: (@Sendable (_ clientID: String) -> Void)?
 
@@ -485,7 +486,8 @@ public final class CompanionServer: @unchecked Sendable {
         // Awaiting-approval clients get the same best-effort goodbye as
         // promoted ones (the phone is showing "check your Mac" and should
         // learn the close was deliberate) but no disconnect signal — they
-        // were never counted.
+        // were never counted. Each awaiting phone identity is reported
+        // abandoned once, so the wiring withdraws its prompt.
         let droppedAwaiting = awaiting
         awaiting.removeAll()
         for (_, client) in droppedAwaiting {
@@ -497,6 +499,12 @@ public final class CompanionServer: @unchecked Sendable {
                 }
             }
             queue.asyncAfter(deadline: .now() + 0.25) { connection.cancel() }
+        }
+        var reportedPhones = Set<String>()
+        for (_, client) in droppedAwaiting {
+            guard let phoneClientID = client.phoneClientID,
+                  reportedPhones.insert(phoneClientID).inserted else { continue }
+            noteApprovalAbandoned(client)
         }
         let dropped = clients
         clients.removeAll()

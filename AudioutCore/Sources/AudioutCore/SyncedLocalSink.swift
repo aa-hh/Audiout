@@ -247,8 +247,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
     public func start() throws {
         try graphQueue.sync {
             guard !started else { return }
-            let delay = measureTotalDelayNanos()
-            stateLock.withLock { cachedTotalDelayNanos = delay }
+            cacheMeasuredDelay()
 
             engine.attach(sourceNode)
 
@@ -292,6 +291,14 @@ public final class SyncedLocalSink: @unchecked Sendable {
             // fractional resolution) — widened only at this call, matching
             // `totalDelayNanos`'s now-`Double` parameter (BT-SYNC-DRAWER T1).
             userOffsetMs: Double(userOffsetMs()))
+    }
+
+    /// The measure-and-cache step of `start()`. Internal rather than private so a
+    /// test can put a sink in the started-but-unanchored state without starting
+    /// the engine.
+    func cacheMeasuredDelay() {
+        let delay = measureTotalDelayNanos()
+        stateLock.withLock { cachedTotalDelayNanos = delay }
     }
 
     /// Just the engine-level teardown half of `stop()` — no session-state reset.
@@ -434,8 +441,10 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// silences the Mac for a whole reference delay. The Bluetooth twin is
     /// ``BTDeviceSink/applyTrimDelta(ms:)`` and the three cases match it:
     ///
-    ///  - **Not anchored** — nothing captured yet, and the anchor samples
-    ///    `userOffsetMs` itself, so there is nothing to do here.
+    ///  - **Not anchored** — nothing captured yet. With no cached delay there is
+    ///    nothing to do: `start()` or the anchor measures with the live offset.
+    ///    With a delay cached by `start()`, the cache is re-measured so the
+    ///    anchor does not use the old offset.
     ///  - **Anchored, gate still closed** — only silence so far, so there is
     ///    nothing to stay continuous with: move the gate instead of the audio,
     ///    re-measuring the delay (which re-reads the live offset) and re-deriving
@@ -464,12 +473,13 @@ public final class SyncedLocalSink: @unchecked Sendable {
     public func applyUserOffsetDelta(ms deltaMs: Double) {
         stateLock.lock()
         let isAnchored = anchored, hasReleased = released
+        let hasCachedDelay = cachedTotalDelayNanos != nil
         stateLock.unlock()
-        guard isAnchored else { return }
+        guard isAnchored || hasCachedDelay else { return }
 
         if !hasReleased {
             switch movePreReleaseGate() {
-            case .moved, .sessionGone: return
+            case .moved, .sessionGone, .awaitingAnchor: return
             case .released: break
             }
         }
@@ -499,9 +509,14 @@ public final class SyncedLocalSink: @unchecked Sendable {
         /// audio to stay continuous with, so the caller seeks instead.
         case released
         /// A rebuild cleared the session under the measurement. The ring has
-        /// been reset and the NEXT anchor samples the live offset itself, so a
-        /// shift parked now would land the same delta a second time.
+        /// been reset and the rebuild cleared the cached delay; its own
+        /// re-measure reads the live offset, so a shift parked now would land
+        /// the same delta a second time.
         case sessionGone
+        /// The sink is started but nothing has anchored yet. The cached delay the
+        /// anchor will use was replaced with the fresh measurement, so the delta
+        /// is fully applied.
+        case awaitingAnchor
     }
 
     /// The pre-release half of ``applyUserOffsetDelta(ms:)``: re-derive the
@@ -514,7 +529,11 @@ public final class SyncedLocalSink: @unchecked Sendable {
         // `try()`s every cycle (a missed `try()` is a silent render cycle).
         let delay = measureTotalDelayNanos()
         return stateLock.withLock {
-            guard anchored else { return .sessionGone }
+            guard anchored else {
+                guard cachedTotalDelayNanos != nil else { return .sessionGone }
+                cachedTotalDelayNanos = delay
+                return .awaitingAnchor
+            }
             guard !released else { return .released }
             // The anchor pts, recovered from the two values it produced rather
             // than stored a third time: `target == anchorPts + cachedDelay`.

@@ -855,6 +855,39 @@ import AVFoundation
                 "released at \(released - Self.rampAnchorNanos) ns after the pts, wanted 110 ms")
     }
 
+    /// An offset change between `start()` and the first audio lands on that
+    /// audio: 100 ms delay + a 200 ms offset puts first sound 300 ms after the pts.
+    // Turns red if applyUserOffsetDelta returns without re-measuring the cached delay while the sink is started but not yet anchored.
+    @Test func offsetDeltaBeforeTheAnchor_movesTheFirstReleaseTarget() throws {
+        let offset = MutableIntBox()
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1, safetyMarginMs: 0,
+            presentationDelayMs: { 100 }, localOutputLatency: { nil },
+            userOffsetMs: { offset.value })
+        sink.cacheMeasuredDelay()
+        offset.value = 200
+        sink.applyUserOffsetDelta(ms: 200)
+        Self.enqueueRamp(into: sink)
+
+        let nsPerFrame = 1_000_000_000.0 / 48_000.0
+        var firstNonSilence: Int64?
+        var out = [Float](repeating: 0, count: 512)
+        for cycle in 0..<40 where firstNonSilence == nil {
+            let cycleStart = Self.rampAnchorNanos + Int64((Double(cycle * 512) * nsPerFrame).rounded())
+            out.withUnsafeMutableBufferPointer {
+                _ = sink.renderInterleaved(into: $0, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+            }
+            if let idx = out.firstIndex(where: { $0 != 0 }) {
+                firstNonSilence = cycleStart + Int64((Double(idx) * nsPerFrame).rounded())
+            }
+        }
+
+        let released = try #require(firstNonSilence, "audio was never released")
+        let expected = Self.rampAnchorNanos + 300_000_000
+        #expect(abs(released - expected) <= Int64(nsPerFrame.rounded()),
+                "released at \(released - Self.rampAnchorNanos) ns after the pts, wanted 300 ms")
+    }
+
     /// (c) A REBUILD racing the delta must land it exactly once. The
     /// pre-release path measures the delay OFF the lock, and a rebuild landing
     /// inside that measurement clears the session and resets the ring — after

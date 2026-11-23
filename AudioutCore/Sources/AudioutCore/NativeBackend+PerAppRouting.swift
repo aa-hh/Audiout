@@ -827,7 +827,9 @@ extension NativeBackend {
         let streams = Set(routeMixer.streamIDs(for: bundleID).map(UInt32.init))
         guard !streams.isEmpty else { return }
         stateQueue.sync {
-            for (deviceID, bound) in self.streamBindings where streams.contains(bound) {
+            // A device whose slot a whole-system recovery holds is skipped, since a per-app chain would bow out at its ownership check anyway and bumping the generation would strand that slot.
+            for (deviceID, bound) in self.streamBindings
+            where streams.contains(bound) && !self.rebindConverging.contains(deviceID) {
                 if let outputID = self.outputIDs[deviceID] {
                     // Fresh reset → bump the generation (supersedes + cancels any
                     // in-flight recovery for this device) and start attempt 1.
@@ -1778,8 +1780,11 @@ extension NativeBackend {
                         // entirely — otherwise a stale backed-off recovery attempt
                         // can fire later against a device that has already moved
                         // on to a different stream.
-                        self.rebindRecoveryGen.removeValue(forKey: deviceID)
-                        self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                        // A whole-system recovery holding this device's slot keeps its own generation and timer, because cancelling its backoff strands the slot.
+                        if !self.rebindConverging.contains(deviceID) {
+                            self.rebindRecoveryGen.removeValue(forKey: deviceID)
+                            self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                        }
                     }
                 } else {
                     ops.append(.bind(outputID, stream))
@@ -1793,8 +1798,11 @@ extension NativeBackend {
                 // rebind recovery for it. Bumping the gen also makes any in-flight
                 // recovery chain bow out on completion (its captured gen no longer
                 // matches), and the unbind op below tears the session down anyway.
-                self.rebindRecoveryGen.removeValue(forKey: deviceID)
-                self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                // Same reason as the stream-move branch above: a slot held by a whole-system recovery keeps its generation and timer.
+                if !self.rebindConverging.contains(deviceID) {
+                    self.rebindRecoveryGen.removeValue(forKey: deviceID)
+                    self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
+                }
             }
             for deviceID in previousDeviceIDs
             where self.outputIDs[deviceID] != nil && newBindings[deviceID] == nil {

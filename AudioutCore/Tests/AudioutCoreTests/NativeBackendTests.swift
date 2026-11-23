@@ -6919,6 +6919,122 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "the device must end up genuinely streaming again after wake")
     }
 
+    /// A whole-system rebind recovery waiting out its backoff owns the speaker's
+    /// `converging` slot, so a per-app topology change that drops the speaker or
+    /// moves it to another stream must leave that chain's generation and timer
+    /// alone: the retry fires, finishes, and releases the slot.
+    /// Turns red if handleDestinationSetsChanged clears the generation or cancels the backoff timer of a rebind recovery whose slot rebindConverging records.
+    @Test(arguments: [false, true])
+    func aPerAppTopologyChangeLeavesAWholeSystemRebindBackoffToFinish(movesToAnotherStream: Bool) async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let retries = ManualDelayClock()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 1,
+            delayClock: retries.clock,
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:9A", name: "Contested Rebind Speaker")
+        backend.captureCoordinator = capture
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.handleDestinationSetsChanged([
+            AppRouteMixer.DestinationSet(streamID: 2, bundleIDs: ["com.foo"], deviceIDs: [device.id])])
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
+        backend.setOutputSet([device.id])
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+        await awaitConvergesSettled(backend)
+        #expect(backend.stateQueue.sync { backend.added.contains(device.id) && backend.streamBindings[device.id] == 2 },
+                "setup failed: the speaker must be both selected for whole-system audio and bound to per-app stream 2")
+
+        engine.flushFailures = [device.outputID.rawValue]
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireDeviceRateRebuild()
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
+        let addsAfterFailedAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        if movesToAnotherStream {
+            backend.handleDestinationSetsChanged([
+                AppRouteMixer.DestinationSet(streamID: 3, bundleIDs: ["com.foo"], deviceIDs: [device.id])])
+        } else {
+            backend.handleDestinationSetsChanged([])
+        }
+        engine.addFailures = []
+        retries.fireAll()
+
+        await pollUntil { engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFailedAttempt }
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFailedAttempt,
+                "the whole-system retry must still fire after a per-app topology change")
+        await awaitBindsSettled(backend)
+        await awaitConvergesSettled(backend)
+        #expect(!backend.test_isConverging,
+                "the recovery must release its converging slot once its retry has run")
+        #expect(onAWholeSystemStream(engine, device.outputID),
+                "the speaker must end up back on its whole-system stream")
+    }
+
+    /// The recapture half of the same contest: a per-app tap rebuild resets the
+    /// AirPlay session of every speaker on the app's stream, and must skip a
+    /// speaker whose `converging` slot a whole-system rebind backoff holds, so
+    /// that retry still fires, finishes, and releases the slot.
+    /// Turns red if resetAirPlaySessionForRoutedApp clears the generation or cancels the backoff timer of a rebind recovery whose slot rebindConverging records.
+    @Test func aPerAppRecaptureLeavesAWholeSystemRebindBackoffToFinish() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let retries = ManualDelayClock()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 1,
+            delayClock: retries.clock,
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:9B", name: "Recaptured Rebind Speaker")
+        backend.captureCoordinator = capture
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.routeMixer.updateRoutes([
+            AppRouteMixer.RoutedApp(bundleID: "com.foo", deviceGains: [device.id: 100])])
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
+        backend.setOutputSet([device.id])
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+        await awaitConvergesSettled(backend)
+        let fooStreams = backend.routeMixer.streamIDs(for: "com.foo").map(UInt32.init)
+        #expect(fooStreams.count == 1 && backend.stateQueue.sync {
+            backend.added.contains(device.id) && backend.streamBindings[device.id] == fooStreams.first
+        }, "setup failed: the speaker must be both selected for whole-system audio and bound to com.foo's per-app stream")
+
+        engine.flushFailures = [device.outputID.rawValue]
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireDeviceRateRebuild()
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
+        let addsAfterFailedAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
+
+        backend.resetAirPlaySessionForRoutedApp(bundleID: "com.foo")
+        engine.addFailures = []
+        retries.fireAll()
+
+        await pollUntil { engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFailedAttempt }
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFailedAttempt,
+                "the whole-system retry must still fire after a per-app recapture")
+        await awaitBindsSettled(backend)
+        await awaitConvergesSettled(backend)
+        #expect(!backend.test_isConverging,
+                "the recovery must release its converging slot once its retry has run")
+        #expect(onAWholeSystemStream(engine, device.outputID),
+                "the speaker must end up back on its whole-system stream")
+    }
+
     /// The UI half of the same finding: sleep must also retract the "recovering"
     /// badge for a rebind it just abandoned. The chain that would have emitted
     /// `recovering: false` on success is cancelled by the sleep, so without an

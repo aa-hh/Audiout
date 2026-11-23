@@ -126,6 +126,11 @@ final class BTFrameRing {
     private let samples: UnsafeMutablePointer<Float>
     private let writeCounter: UnsafeMutablePointer<Int>   // producer-owned
     private let readCounter: UnsafeMutablePointer<Int>    // consumer-owned
+    /// The write counter at the last `reset()`, 0 for a new ring: the first
+    /// frame of the current session. A frame before it reads as silence,
+    /// because `reset()` leaves the previous session's samples in place.
+    /// Consumer-owned, written only by `init` and `reset()`.
+    private let sessionStartCounter: UnsafeMutablePointer<Int>
     /// Chunks the producer dropped for lack of space, monotonic since init. A
     /// producer-owned word like `writeCounter` — one writer, so no atomics —
     /// read by whoever is surfacing it (the gate opening).
@@ -142,9 +147,11 @@ final class BTFrameRing {
         self.samples.initialize(repeating: 0, count: sampleCount)
         self.writeCounter = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         self.readCounter = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        self.sessionStartCounter = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         self.dropCounter = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         writeCounter.initialize(to: 0)
         readCounter.initialize(to: 0)
+        sessionStartCounter.initialize(to: 0)
         dropCounter.initialize(to: 0)
     }
 
@@ -152,6 +159,7 @@ final class BTFrameRing {
         samples.deallocate()
         writeCounter.deallocate()
         readCounter.deallocate()
+        sessionStartCounter.deallocate()
         dropCounter.deallocate()
     }
 
@@ -196,12 +204,18 @@ final class BTFrameRing {
     }
 
     /// Consumer side: copies exactly one interleaved frame, or returns false on
-    /// empty. Shaped for `FractionalResampler.render`'s `pullFrame`.
+    /// empty. Shaped for `FractionalResampler.render`'s `pullFrame`. A frame
+    /// written before the last `reset()` comes out as silence; the read
+    /// pointer still advances past it.
     func readFrame(into dst: UnsafeMutablePointer<Float>) -> Bool {
         let r = readCounter.pointee
         OSMemoryBarrier()                       // acquire: see the producer's data
         guard writeCounter.pointee &- r > 0 else { return false }
-        dst.update(from: samples.advanced(by: (r & frameMask) * channelCount), count: channelCount)
+        if r &- sessionStartCounter.pointee < 0 {
+            dst.update(repeating: 0, count: channelCount)
+        } else {
+            dst.update(from: samples.advanced(by: (r & frameMask) * channelCount), count: channelCount)
+        }
         OSMemoryBarrier()                       // release: finish the copy before the counter
         readCounter.pointee = r &+ 1
         return true
@@ -212,7 +226,7 @@ final class BTFrameRing {
     /// Backward it reaches as far as the intact history behind the read pointer
     /// — `capacity − used`, which is real audio precisely because the producer
     /// drops a chunk rather than overwrite unread data. Forward it stops at the
-    /// write pointer.
+    /// write pointer. History from before the last `reset()` reads as silence.
     ///
     /// CONSUMER THREAD ONLY. `readCounter` has exactly one writer — the
     /// consumer — so moving it needs no lock and cannot race the producer,
@@ -235,10 +249,13 @@ final class BTFrameRing {
     }
 
     /// Drop everything buffered. Only while neither thread is active (engine
-    /// stopped / offline tests).
+    /// stopped / offline tests). Frames written before it read as silence
+    /// from then on.
     func reset() {
         OSMemoryBarrier()
-        readCounter.pointee = writeCounter.pointee
+        let w = writeCounter.pointee
+        readCounter.pointee = w
+        sessionStartCounter.pointee = w
         OSMemoryBarrier()
     }
 }

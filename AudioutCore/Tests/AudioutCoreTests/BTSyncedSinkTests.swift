@@ -404,6 +404,32 @@ import AVFoundation
         #expect(ring.seek(byFrames: -1) == 0)
     }
 
+    // Turns red if BTFrameRing hands out a sample written before the last reset: the backward shift then replays the old session's frames.
+    @Test func backwardShiftAcrossAReset_playsSilenceNotTheOldSession() {
+        let line = Self.makeDelayLine(crossfadeFrames: 8)
+        let sessionOne = [Float](repeating: 1, count: 40)
+        sessionOne.withUnsafeBufferPointer {
+            _ = line.write(interleavedFrames: $0.baseAddress!, frameCount: 40)
+        }
+        _ = Self.readMono(line, frames: 40)
+        line.reset()
+
+        let sessionTwo = [Float](repeating: 2, count: 16)
+        sessionTwo.withUnsafeBufferPointer {
+            _ = line.write(interleavedFrames: $0.baseAddress!, frameCount: 16)
+        }
+        _ = Self.readMono(line, frames: 4)
+        sessionTwo.withUnsafeBufferPointer {
+            _ = line.write(interleavedFrames: $0.baseAddress!, frameCount: 8)
+        }
+
+        #expect(line.shift(byFrames: -20) == -20)
+        _ = Self.readMono(line, frames: 8)
+        let values = Self.readMono(line, frames: 64)
+        #expect(!values.contains(1))
+        #expect(values.contains(2))
+    }
+
     @Test func shift_movesTheTimelineByExactlyTheRequestedFrames() {
         let crossfade = 8
         let line = Self.makeDelayLine(crossfadeFrames: crossfade)

@@ -305,6 +305,34 @@ import Testing
                 Comment(rawValue: "the relaunch raced the previous STOP: \(events)"))
     }
 
+    /// The first attempt's LOAD goes unanswered, and the device is deselected
+    /// and re-selected while it is outstanding: the old channel's close fails
+    /// that LOAD with `closed` only after the re-selected session's recipe has
+    /// started, so the failure reaches the manager carrying the first attempt's
+    /// generation. Turns red if `startRecipe` or `teardown` goes back to bumping a per-session generation instead of drawing from `nextGeneration`.
+    @Test func reselectDuringConnectIgnoresTheOldAttemptsCompletion() throws {
+        guard #available(macOS 15, *) else { return }
+        let fake = FakeCastReceiver(fetchBytes: 16_384, unansweredLoads: 1)
+        defer { fake.stop() }
+        let endpoint = try start(fake)
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+        manager.setDevices([record(endpoint)])
+        try #require(waitUntil(timeout: 10) { fake.loadCount >= 1 },
+                     Comment(rawValue: "the first attempt never sent LOAD, saw \(log.all)"))
+
+        manager.setDevices([])
+        manager.setDevices([record(endpoint)])
+
+        _ = waitUntil(timeout: 20) {
+            log.contains(.playing) || log.all.contains { if case .failed = $0 { return true } else { return false } }
+        }
+        #expect(!log.all.contains { if case .failed = $0 { return true } else { return false } },
+                Comment(rawValue: "the old attempt's completion failed the re-selected session, saw \(log.all)"))
+        #expect(log.last == .playing, Comment(rawValue: "the re-selected session never reached PLAYING, saw \(log.all)"))
+    }
+
     @Test func fixedReceiverAppliesGainInTheFeedNotSetVolume() throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake(controlType: "fixed")

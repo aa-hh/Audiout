@@ -1607,6 +1607,8 @@ extension NativeBackend: BTOutputControlling {
         // from `stateQueue` so `captureControlQueue` replays them in order.
         stateQueue.async {
             self.updateBTReferenceBufferLocked()
+            // A speaker with no measured latency has no drift baseline, so the tracker must drop it.
+            self.refreshDriftTrackingLocked()
             self.captureControlQueue.async { [weak self] in
                 self?.btSink?.setOffsetMs(0, forDeviceUID: id)
                 self?.btSink?.setTrimMs(0, forDeviceUID: id)

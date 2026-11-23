@@ -1921,6 +1921,40 @@ extension SerializedSharedState {
         #expect(sink.buffers.last == 740)
     }
 
+    /// DEFECT: resetting a speaker's alignment deleted its measured latency
+    /// but left the passive drift tracker with that speaker's old baseline, and
+    /// left it running when no pair of measured speakers remained.
+    /// Turns red if `resetBTAlignment(forDevice:source:)` no longer calls
+    /// `refreshDriftTrackingLocked()`.
+    @Test func aResetRebuildsTheDriftBaselines() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).saveLatencies(
+            [btMove.id: 640, btFlip.id: 640, btExtra.id: 640])
+        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        backend.start()
+        backend.attachPassiveDriftTracking(ring: ReferenceAudioRing())
+        bt.fire([btMove, btFlip, btExtra])
+        waitFor { self.device(backend, self.btMove.id) != nil
+            && self.device(backend, self.btFlip.id) != nil
+            && self.device(backend, self.btExtra.id) != nil }
+        backend.setOutputSet([btMove.id, btFlip.id, btExtra.id])
+        waitFor { sink.buffers.last == 740 }
+        let tracker = try #require(backend.driftTracker)
+        let all: Set<String> = [btMove.id, btFlip.id, btExtra.id]
+        waitFor { Set(tracker.baselines.map(\.deviceUID)) == all }
+        #expect(Set(tracker.baselines.map(\.deviceUID)) == all)
+
+        backend.resetBTAlignment(forDevice: btMove.id)
+        waitFor { sink.offsets.contains { $0.uid == self.btMove.id && $0.ms == 0 } }
+        #expect(Set(tracker.baselines.map(\.deviceUID)) == [btFlip.id, btExtra.id])
+
+        backend.resetBTAlignment(forDevice: btFlip.id)
+        waitFor { sink.offsets.contains { $0.uid == self.btFlip.id && $0.ms == 0 } }
+        #expect(tracker.baselines.isEmpty,
+                "one measured speaker and no anchor stops tracking")
+    }
+
     /// DEFECT (customer log, 1.2.0): deselecting one of two measured speakers
     /// moved the reference, and the move rebuilt EVERY sink the manager still
     /// held, the departing one included, before `setDevices` dropped it. So a

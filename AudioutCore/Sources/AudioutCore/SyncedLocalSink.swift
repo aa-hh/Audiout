@@ -157,6 +157,14 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// sample-accurate fades), upgrade to a lock-free atomic (bit-cast the `Float`
     /// into an `UnsafeAtomic<UInt32>`) instead of adding a second lock.
     private var gain: Float = 1.0
+    /// The previous locked render cycle's release state, target and gain, so a
+    /// released session keeps draining through a missed `stateLock.try()` instead of
+    /// dropping a cycle and slipping behind the reference. Written only with
+    /// `stateLock` held (the render thread's locked block and `clearSessionState`);
+    /// read without it only by the render thread, and only on a missed `try()`.
+    private var renderSnapshotReleased: Bool = false
+    private var renderSnapshotTarget: Int64 = 0
+    private var renderSnapshotGain: Float = 1.0
 
     public init(
         renderSampleRate: Double = 48_000,
@@ -230,6 +238,12 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// (chunks, samples). Never reset — see `clearSessionState()`'s flush.
     var ringOverflowDropsForTesting: (writes: Int, samples: Int) {
         (ring.droppedWrites, ring.droppedSamples)
+    }
+
+    /// Test seam: runs `body` with `stateLock` held, so a test can drive the render
+    /// core through a missed `try()`.
+    func withStateLockHeldForTesting(_ body: () -> Void) {
+        stateLock.withLock { body() }
     }
 
     /// Sets the `group × device` gain applied to this sink's output (see `gain`
@@ -331,6 +345,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
             targetReleaseNanos = 0
             cachedTotalDelayNanos = nil
             lastPhaseErrorNanos = 0
+            renderSnapshotReleased = false
             writesDelta = droppedWrites - lastReportedRingDroppedWrites
             samplesDelta = droppedSamples - lastReportedRingDroppedSamples
             lastReportedRingDroppedWrites = droppedWrites
@@ -772,9 +787,20 @@ public final class SyncedLocalSink: @unchecked Sendable {
                     }
                 }
             }
+            renderSnapshotReleased = shouldDrain
+            renderSnapshotTarget = target
+            renderSnapshotGain = gainSnapshot
             stateLock.unlock()
+        } else if renderSnapshotReleased {
+            // A released session drains on the last locked cycle's snapshot; its
+            // target is fixed after release, so this cycle stays on the reference.
+            silentFrames = 0
+            shouldDrain = true
+            target = renderSnapshotTarget
+            gainSnapshot = renderSnapshotGain
         } else {
-            // Couldn't snapshot the gate state; emit silence this cycle.
+            // Before release there is nothing to stay continuous with, so the
+            // cycle is silent.
             base.update(repeating: 0, count: total)
             return false
         }

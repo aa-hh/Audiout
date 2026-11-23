@@ -9334,6 +9334,27 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(backend.stateQueue.sync { backend.desiredOn[device.id] == nil })
     }
 
+    /// Turns red if `setOutputSet` reads a nil `desiredOn` as different from "not wanted" and treats a speaker the set leaves out as a membership edge, writing `.off` over its per-app `.connected`.
+    @Test func aSetOutputSetThatLeavesOutANeverDesiredPerAppSpeakerKeepsItsConnectionState() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:CB", name: "Left Out")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(backend.stateQueue.sync { backend.desiredOn[device.id] == nil })
+
+        backend.setOutputSet([])
+        #expect(connectionState(backend, device.id) == .connected,
+                "leaving out a never-desired speaker is no edge: its per-app row stays connected")
+        #expect(backend.stateQueue.sync { backend.desiredOn[device.id] } == false,
+                "the call still records the speaker as not wanted")
+        #expect(backend.stateQueue.sync { !backend.converging.contains(device.id) },
+                "no edge, so no converging slot is claimed")
+    }
+
     /// Turns red if a thrown per-app bind stops reporting `.failed(.unknown)`.
     @Test func perAppOnlyBindThatThrowsReportsFailed() async {
         let (backend, engine, discovery) = makeBackend(

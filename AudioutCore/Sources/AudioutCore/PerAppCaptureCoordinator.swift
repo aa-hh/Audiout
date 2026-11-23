@@ -344,16 +344,24 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// forget it entirely (the slot is removed, not just reset to `.idle`,
     /// so a coordinator that starts/stops many apps over its lifetime never
     /// accumulates unbounded dictionary entries). Idempotent: `stop(bundleID:)`
-    /// for a bundle ID that is idle or was never started is a no-op. Does
-    /// not affect any other bundle ID's tap.
+    /// for a bundle ID that is idle or was never started is a no-op, and so is
+    /// a `stop` for a bundle ID another `stop` is already tearing down: it
+    /// returns without waiting for that teardown, and only the claiming `stop`
+    /// tears the tap down. Does not affect any other bundle ID's tap.
     public func stop(bundleID: String) {
-        let toTearDown: ProcessAudioTap? = queue.sync {
-            guard let slot = slots[bundleID] else { return nil }
-            if case .idle = slot.state { return nil }
+        let claim: (owned: Bool, tap: ProcessAudioTap?) = queue.sync {
+            guard let slot = slots[bundleID] else { return (false, nil) }
+            switch slot.state {
+            case .idle: return (false, nil)
+            case .stopping: return (false, nil) // another `stop` owns this teardown
+            default: break
+            }
             let t = slot.tap
             transition(slot, bundleID: bundleID, to: .stopping)
-            return t
+            return (true, t)
         }
+        guard claim.owned else { return }
+        let toTearDown = claim.tap
         // Tear down OUTSIDE the state lock (teardown may block on Core Audio),
         // matching NativeCaptureCoordinator.stop()'s discipline.
         toTearDown?.teardown()

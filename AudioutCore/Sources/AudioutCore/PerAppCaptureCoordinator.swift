@@ -157,6 +157,14 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         var lastTappedProcessObjects: Set<AudioObjectID> = []
     }
 
+    /// Belongs to the tap of one `beginStart` call and is confined to `queue`.
+    /// It records a device change that arrives before that start commits, so
+    /// the change is replayed by that start and by nothing else.
+    private final class StartWindow: @unchecked Sendable {
+        var committed = false
+        var deviceChangeArrived = false
+    }
+
     private let queue = DispatchQueue(label: "PerAppCaptureCoordinator.state")
     private var slots: [String: Slot] = [:]
 
@@ -415,20 +423,29 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
         guard proceed else { return }
 
         let tap = makeTap()
+        let window = StartWindow()
         tap.onBuffer = { [weak self] buffer in self?.onBuffer?(bundleID, buffer) }
-        tap.onDefaultDeviceChanged = { [weak self] in self?.handleDeviceChange(bundleID: bundleID) }
+        tap.onDefaultDeviceChanged = { [weak self] in
+            self?.handleStartWindowDeviceChange(bundleID: bundleID, window: window)
+        }
 
         do {
             let format = try tap.createAndStart(processes: processes, bundleID: bundleID, muteBehavior: muteBehavior)
             try Self.validate(format)
-            queue.sync {
+            let replay: Bool = queue.sync {
                 guard let slot = slots[bundleID], case .creatingTap = slot.state else {
                     tap.teardown() // a stop() (or a second start()) raced in — don't leak this tap
-                    return
+                    return false
                 }
                 slot.tap = tap
                 slot.lastTappedProcessObjects = Set(processes.map(\.objectID)) // W1-T4 compare-before-rebuild baseline
                 transition(slot, bundleID: bundleID, to: .capturing(format))
+                window.committed = true
+                return window.deviceChangeArrived
+            }
+            if replay {
+                Telemetry.log(.capturePA, "device_change_replay", ["bundleID": bundleID])
+                handleDeviceChange(bundleID: bundleID, onlyIfCurrentTap: tap)
             }
         } catch {
             tap.teardown()
@@ -440,6 +457,20 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
                 transition(slot, bundleID: bundleID, to: .failed(mapped))
             }
         }
+    }
+
+    private func handleStartWindowDeviceChange(bundleID: String, window: StartWindow) {
+        let absorbed: Bool = queue.sync {
+            guard !window.committed else { return false }
+            window.deviceChangeArrived = true
+            return true
+        }
+        if absorbed {
+            Telemetry.log(.capturePA, "device_change_fired", ["bundleID": bundleID])
+            Telemetry.log(.capturePA, "device_change_coalesced", ["bundleID": bundleID, "pending": "true"])
+            return
+        }
+        handleDeviceChange(bundleID: bundleID)
     }
 
     /// Shared core of both places this coordinator resolves a bundle id to its
@@ -494,7 +525,9 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
     /// choreography here almost certainly needs the same fix there** — that
     /// "same fix, written twice" is exactly the cost the architecture review
     /// priced (2026-07-26, defect A).
-    private func handleDeviceChange(bundleID: String) {
+    ///
+    /// With `onlyIfCurrentTap`, the rebuild is claimed only while the slot still holds that exact tap, and a miss marks nothing.
+    private func handleDeviceChange(bundleID: String, onlyIfCurrentTap expectedTap: ProcessAudioTap? = nil) {
         Telemetry.log(.capturePA, "device_change_fired", ["bundleID": bundleID])
         // STABILITY(C6) (per-app port of NativeCaptureCoordinator's fix sketch,
         // dev/notes/stability-audit-2026-07-18.md §C6): if this notification
@@ -507,6 +540,7 @@ public final class PerAppCaptureCoordinator: @unchecked Sendable {
             proceed: Bool, old: ProcessAudioTap?, oldFormat: TapFormat?, previousDeviceID: AudioObjectID?
         ) = queue.sync {
             guard let slot = slots[bundleID] else { return (false, nil, nil, nil) }
+            if let expectedTap, slot.tap !== expectedTap { return (false, nil, nil, nil) }
             guard case .capturing(let oldFormat) = slot.state else {
                 if case .creatingTap = slot.state {
                     slot.rebuildCoalescer.markPending()

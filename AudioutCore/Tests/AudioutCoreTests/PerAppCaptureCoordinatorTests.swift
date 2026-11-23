@@ -780,6 +780,29 @@ extension SerializedSharedState {
         coordinator.stop(bundleID: "com.example.music")
     }
 
+    // Turns red if beginStart stops replaying a device change that arrived while its tap was being created, or replays it more than once.
+    @Test func deviceChangeDuringInitialStartIsReplayedOnceCapturing() {
+        let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 4242)
+        let coordinator = makeCoordinator(makeTap: { tap }, processResolver: resolver)
+
+        tap.onCreateAndStart = { [weak tap] in
+            guard let tap, tap.creates == 1 else { return }
+            tap.fireDeviceChange()
+        }
+
+        coordinator.start(bundleID: "com.example.music")
+
+        #expect(tap.creates == 2)
+        #expect(tap.teardowns == 1)
+        #expect(coordinator.state(for: "com.example.music") == .capturing(tap.format))
+
+        tap.fireDeviceChange()
+        #expect(tap.creates == 3)
+
+        coordinator.stop(bundleID: "com.example.music")
+    }
+
     // MARK: - T3 resume self-heal: a system process-list change re-drives dead-but-retryable
     // slots through start() to .capturing; a NON-retryable dead slot is left untouched.
 

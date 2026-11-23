@@ -10616,6 +10616,65 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "an echo of the current value must not push again (feedback loop)")
     }
 
+    /// Muting writes silence to the wire and the receiver reflects it back over
+    /// DACP as level 0. That reflection must not replace the level the speaker
+    /// returns to on unmute, while a real level reported or dragged while muted
+    /// still does, and so does a relative step down to 0, which is never an echo.
+    /// Turns red if a muted speaker stashes the echo of its own mute write, or if the echo filter swallows a relative step down to 0.
+    @Test func mutedSpeakerIgnoresTheEchoOfItsOwnMuteWrite() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        await awaitFed(backend, device)
+        let volumeOf: () -> Int? = { backend.devices.first { $0.id == device.id }?.volume }
+        let host = device.descriptor.address
+
+        // Phase A: the echo of the mute write leaves the pre-mute level alone.
+        backend.setVolume(70, for: device.id)
+        #expect(await waitForVolumePush(engine, device.outputID, 0.7),
+                "precondition: the 70 reached the engine")
+        backend.setMuted(true, for: device.id)
+        backend.applyDacpVolume(remoteHost: host, activeRemote: token, level: DACPServer.level(fromDb: -30))
+        backend.setMuted(false, for: device.id)
+        backend.stateQueue.sync {}   // the three calls above have run
+        #expect(volumeOf() == 70, "unmute restores the level from before the mute, not the echo's 0")
+        await pollUntil { backend.stateQueue.sync { !backend.volumeInFlight.contains(device.outputID) } }
+        let lastPush = engine.volumeCalls.last { $0.0 == device.outputID }?.1
+        #expect(abs((lastPush ?? -1) - 0.7) < 0.001, "the unmute pushes the restored level to the wire")
+
+        // Phase B: a slider drag while muted survives the echo.
+        backend.setMuted(true, for: device.id)
+        backend.setVolume(40, for: device.id)
+        backend.applyDacpVolume(remoteHost: host, activeRemote: token, level: 0)
+        backend.setMuted(false, for: device.id)
+        backend.stateQueue.sync {}
+        #expect(volumeOf() == 40, "a level dragged while muted is what unmute restores")
+
+        // Phase C: a real level reported while muted is still recorded for unmute.
+        backend.setMuted(true, for: device.id)
+        backend.applyDacpVolume(remoteHost: host, activeRemote: token, level: 0.55)
+        backend.setMuted(false, for: device.id)
+        backend.stateQueue.sync {}
+        #expect(volumeOf() == 55, "a knob turn on the muted speaker is recorded for unmute")
+
+        // Phase D: a relative step down to 0 while muted is recorded, not filtered.
+        backend.setVolume(2, for: device.id)
+        #expect(await waitForVolumePush(engine, device.outputID, 0.02),
+                "precondition: the 2 reached the engine")
+        backend.setMuted(true, for: device.id)
+        backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: -1)
+        backend.setMuted(false, for: device.id)
+        backend.stateQueue.sync {}
+        #expect(volumeOf() == 0, "a step down to 0 on the muted speaker is what unmute restores")
+    }
+
     /// Relative `volumeup`/`volumedown` verbs step from the level the app
     /// CURRENTLY holds, so consecutive presses accumulate instead of re-basing:
     /// 50 → 52 → 54 → 52 with the ±2-point step.

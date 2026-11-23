@@ -5633,6 +5633,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func applyRemoteVolume(outputID: OutputID, level: Double) {
         stateQueue.async {
             guard let id = self.outputIDs.first(where: { $0.value == outputID })?.key else { return }
+            // A mute writes silence and the receiver reports it back as level 0;
+            // that echo must not replace the level unmute restores.
+            if self.muted.contains(id), Int((level * 100).rounded()).clampedToVolume == 0 { return }
             self.setSpeakerVolume(id: id, outputID: outputID, level: level)
         }
     }
@@ -5650,6 +5653,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             guard let match = self.outputIDs.first(where: {
                 UInt32(truncatingIfNeeded: $0.value.rawValue) == activeRemote
             }), self.dacpReportIsFromSpeaker(id: match.key, remoteHost: remoteHost, verb: "volume") else { return }
+            // A mute writes silence and the receiver reports it back as level 0;
+            // that echo must not replace the level unmute restores. Only an
+            // absolute report can be an echo, so the step path never filters.
+            if self.muted.contains(match.key), Int((level * 100).rounded()).clampedToVolume == 0 { return }
             self.setSpeakerVolume(id: match.key, outputID: match.value, level: level)
         }
     }

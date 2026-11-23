@@ -48,6 +48,13 @@ extension SerializedSharedState {
         /// the caller's thread in this fake.
         var onCreateAndStart: (() -> Void)?
 
+        /// Test-only hook invoked from inside `teardown()` while this teardown
+        /// is in progress, off the coordinator's queue, so a test can make a
+        /// second `stop` arrive mid-teardown deterministically.
+        var onTeardown: (() -> Void)?
+        private var teardownsInProgress = 0
+        private var maxTeardownsInProgress = 0
+
         func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
             lock.lock(); createCount += 1; lastProcesses = processes; lastBundleID = bundleID; lock.unlock()
             onCreateAndStart?()
@@ -56,7 +63,13 @@ extension SerializedSharedState {
         }
 
         func teardown() {
-            lock.lock(); teardownCount += 1; lock.unlock()
+            lock.lock()
+            teardownCount += 1
+            teardownsInProgress += 1
+            maxTeardownsInProgress = max(maxTeardownsInProgress, teardownsInProgress)
+            lock.unlock()
+            onTeardown?()
+            lock.lock(); teardownsInProgress -= 1; lock.unlock()
         }
 
         /// What this fake reports as the device it's anchored to
@@ -72,6 +85,7 @@ extension SerializedSharedState {
         func fireDeviceChange() { onDefaultDeviceChanged?() }
 
         var teardowns: Int { lock.withLock { teardownCount } }
+        var maxConcurrentTeardowns: Int { lock.withLock { maxTeardownsInProgress } }
         var creates: Int { lock.withLock { createCount } }
     }
 
@@ -871,6 +885,45 @@ extension SerializedSharedState {
         coordinator.start(bundleID: "com.example.music") // already capturing -> no second tap
         #expect(tap.creates == 1)
         coordinator.stop(bundleID: "com.example.music")
+    }
+
+    // MARK: - A second stop while the first is tearing down does not tear the tap down again.
+
+    // Turns red if stop(bundleID:) claims a slot that is already .stopping and tears its tap down a second time.
+    @Test func secondStopDuringTeardownDoesNotTearTheTapDownAgain() {
+        let tap = FakeProcessTap()
+        let (resolver, _) = makeResolver(bundleID: "com.example.music", objectID: 1, pid: 1)
+        let coordinator = makeCoordinator(
+            makeTap: { tap },
+            processResolver: resolver,
+            muteBehavior: .mutedWhenTapped
+        )
+        let id = "com.example.music"
+        coordinator.start(bundleID: id)
+        waitFor { if case .capturing = coordinator.state(for: id) { return true }; return false }
+
+        var hookRan = false
+        var stateBefore: PerAppCaptureCoordinator.State?
+        var stateAfter: PerAppCaptureCoordinator.State?
+        tap.onTeardown = {
+            guard !hookRan else { return }
+            hookRan = true
+            stateBefore = coordinator.state(for: id)
+            coordinator.stop(bundleID: id)
+            stateAfter = coordinator.state(for: id)
+        }
+        coordinator.stop(bundleID: id)
+        tap.onTeardown = nil
+
+        #expect(hookRan)
+        #expect(stateBefore == .stopping)
+        #expect(stateAfter == .stopping)
+        #expect(tap.teardowns == 1)
+        #expect(tap.maxConcurrentTeardowns == 1)
+        #expect(coordinator.state(for: id) == .idle)
+
+        coordinator.stop(bundleID: id)
+        #expect(tap.teardowns == 1)
     }
 
     // MARK: - Coordinator deinit tears down any still-active taps (no leak backstop).

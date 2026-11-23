@@ -10652,6 +10652,38 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "steps must accumulate from the current level, up then back down")
     }
 
+    /// At low master gain (Main 50 x Group 50 = 0.25) a 2-point step rounds to the
+    /// same wire percent as the current level, yet each relative step must still
+    /// move the stored level and reach the speaker.
+    /// Turns red if `applyDacpVolumeStep` stops passing its stored target to `setSpeakerVolume`, or `setSpeakerVolume` goes back to judging a step by its rounded wire level.
+    @Test func dacpVolumeStepsStillMoveUnderLowMasterGain() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setMasterGain(mainOut: 50, group: 50, mirrorToSystemVolume: false)
+        #expect(await waitForVolumePush(engine, device.outputID, 0.125),
+                "precondition: stored 50 at gain 0.25 pushes 0.125")
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        await awaitFed(backend, device)
+        let host = device.descriptor.address
+        backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: 1)
+        backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: 1)
+
+        let expected = 50 + 2 * NativeBackend.speakerVolumeStep
+        await pollUntil { backend.devices.first { $0.id == device.id }?.volume == expected }
+        #expect(backend.devices.first { $0.id == device.id }?.volume == expected,
+                "each step must move the stored level at gain 0.25")
+        #expect(await waitForVolumePush(engine, device.outputID, 0.135),
+                "the stepped level must reach the speaker (54 x 0.25)")
+    }
+
     /// A DACP report only counts when it comes from the speaker's own address:
     /// the listener is open to the whole LAN and the token is 32 bits of a MAC.
     /// Turns red if `applyDacpVolume` / `applyDacpVolumeStep` stop comparing the

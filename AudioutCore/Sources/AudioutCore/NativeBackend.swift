@@ -5694,21 +5694,30 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///   stays the user's own setting for that device, exactly as it does on every
     ///   other path.
     ///
+    /// - a relative step passes `storedLevel`, which is stored as-is and compared
+    ///   against the stored level, because the wire-domain guard cannot distinguish
+    ///   a small step from an echo once the gain compresses several stored levels
+    ///   onto one wire percent.
+    ///
     /// A gain of 0 is ignored outright: every device is being sent silence, so a
     /// reported level says nothing about what the user wants, and the inverse is
     /// undefined there anyway.
-    private func setSpeakerVolume(id: String, outputID: OutputID, level: Double) {   // on stateQueue
+    private func setSpeakerVolume(id: String, outputID: OutputID, level: Double, storedLevel: Int? = nil) {   // on stateQueue
         let gain = masterGainFraction
         guard gain > 0 else { return }
         let wirePct = Int((level * 100).rounded()).clampedToVolume
-        let stored = Int((Double(wirePct) / gain).rounded()).clampedToVolume
+        let stored = storedLevel?.clampedToVolume ?? Int((Double(wirePct) / gain).rounded()).clampedToVolume
         if muted.contains(id) {
             // Don't un-mute from a knob turn; record the intended level so a later
             // unmute restores what the user dialed in on the speaker.
             stashedVolume[id] = stored
             return
         }
-        guard wirePct != effectiveVolume(of: id) else { return }
+        if storedLevel != nil {
+            guard stored != known[id]?.volume else { return }
+        } else {
+            guard wirePct != effectiveVolume(of: id) else { return }
+        }
         applyLocal(id) { $0.volume = stored }
         // Per-device (AP1 curve or AP2 linear) rather than the AP2-only static map —
         // a pre-existing inconsistency, since every other push here is per-device.
@@ -5734,11 +5743,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 ? (self.stashedVolume[id] ?? self.known[id]?.volume ?? 0)
                 : (self.known[id]?.volume ?? 0)
             let target = (current + direction.signum() * Self.speakerVolumeStep).clampedToVolume
-            // Step in the STORED domain (so consecutive presses move the user's own
-            // level by a fixed amount, as before) but hand `setSpeakerVolume` a WIRE
-            // level, which is its contract — it inverts the gain back out.
+            // The step is taken in the STORED domain and handed over as `storedLevel`:
+            // at low master gain a 2-point step can round to the same wire percent as
+            // the current level and would be dropped as an echo of our own write.
             self.setSpeakerVolume(id: id, outputID: match.value,
-                                  level: Double(target) * self.masterGainFraction / 100.0)
+                                  level: Double(target) * self.masterGainFraction / 100.0,
+                                  storedLevel: target)
         }
     }
 
@@ -5971,7 +5981,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// The wire level currently in force for `id`: the user's stored level scaled by
     /// the master gain, in the UI's 0–100 domain. COMPUTED, never stored — it exists
     /// only to be compared against a level a receiver reports back to us (see
-    /// ``setSpeakerVolume(id:outputID:level:)``). On `stateQueue`.
+    /// ``setSpeakerVolume(id:outputID:level:storedLevel:)``). On `stateQueue`.
     private func effectiveVolume(of id: String) -> Int {   // on stateQueue
         Int((Double(known[id]?.volume ?? 0) * masterGainFraction).rounded()).clampedToVolume
     }

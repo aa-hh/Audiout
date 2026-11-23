@@ -540,8 +540,9 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         /// Only the FIRST GET is logged — the interesting fact is whether the
         /// receiver ever reached the server at all.
         var loggedHTTPRequest = false
-        /// Set while this id's PREVIOUS session is still tearing down: the
-        /// recipe starts from that teardown's completion, not here.
+        /// Set while any teardown for this id is still finishing, a
+        /// predecessor's or the session's own: the recipe starts from that
+        /// teardown's completion, not here.
         var awaitingTeardown = false
 
         init(record: CastDeviceRecord) { self.record = record }
@@ -567,14 +568,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             for record in records where self.sessions[record.id] == nil {
                 let session = Session(record: record)
                 self.sessions[record.id] = session
-                if self.teardownsInFlight[record.id] != nil {
-                    // The row is connecting from the user's point of view the
-                    // instant it is selected, waiting included.
-                    session.awaitingTeardown = true
-                    self.setState(session, .connecting)
-                } else {
-                    self.startRecipe(session)
-                }
+                self.startRecipeAfterTeardown(session)
             }
             self.fanOut.setRings(self.sessions.values.map(\.ring))
         }
@@ -595,7 +589,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             guard let self, let session = self.sessions[deviceID] else { return }
             session.autoRetryCount = 0
             self.teardown(session)
-            self.startRecipe(session)
+            self.startRecipeAfterTeardown(session)
         }
     }
 
@@ -994,7 +988,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         let waiting = session.generation
         queue.asyncAfter(deadline: .now() + reconnectDelay) { [weak self] in
             guard let self, let session = self.live(id, waiting) else { return }
-            self.startRecipe(session)
+            self.startRecipeAfterTeardown(session)
         }
     }
 
@@ -1072,10 +1066,22 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         }
     }
 
+    /// The one way to ask for a recipe. While any teardown for the id is still
+    /// finishing, the recipe waits for that id's last teardown hop instead of
+    /// starting here, and the row reads connecting while it waits.
+    private func startRecipeAfterTeardown(_ session: Session) {
+        if teardownsInFlight[session.record.id] != nil {
+            session.awaitingTeardown = true
+            setState(session, .connecting)
+        } else {
+            startRecipe(session)
+        }
+    }
+
     /// The last hop of one teardown. When the id has no other teardown still
-    /// running, a session that was re-selected during it starts its recipe
-    /// here — the receiver has answered STOP by now, so its LAUNCH is a clean
-    /// one.
+    /// running, a session that was re-selected, retried or reconnecting during
+    /// it starts its recipe here — the receiver has answered STOP by now, so
+    /// its LAUNCH is a clean one.
     ///
     /// `razor:` ceiling — the completion chain the teardown already had. A
     /// fixed settle delay would also serialize, less reliably.

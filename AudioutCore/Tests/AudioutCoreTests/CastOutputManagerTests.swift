@@ -273,6 +273,48 @@ import Testing
         }, Comment(rawValue: "expected a connect failure, saw \(log.all)"))
     }
 
+    /// A retry that lands while a re-selected session still waits on the
+    /// previous STOP must start one recipe, from the last teardown's hop.
+    /// Turns red if `retry(deviceID:)` calls `startRecipe` straight after `teardown` instead of `startRecipeAfterTeardown`, which gives the receiver a third `connect`.
+    @Test func retryWhileAwaitingTeardownStartsOneRecipe() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake()
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let deviceRecord = record(endpoint)
+        let log = StateLog()
+        let triggered = Box<Bool>()
+        manager.onStateChange = { [weak manager] id, state in
+            guard id == "dev1" else { return }
+            log.append(state)
+            guard state == .playing, triggered.value == nil, let manager else { return }
+            triggered.set(true)
+            // Deselect, re-select and retry in one breath: the re-selected
+            // session is still waiting on the first STOP when the retry lands.
+            manager.setDevices([])
+            manager.setDevices([deviceRecord])
+            manager.retry(deviceID: "dev1")
+        }
+        manager.setDevices([deviceRecord])
+
+        // A late status from the deselected session can log a stale playing, so the wait also needs the second LAUNCH.
+        try #require(waitUntil(timeout: 20) {
+            log.all.filter { $0 == .playing }.count >= 2
+                && fake.events.filter { $0 == "LAUNCH" }.count >= 2
+        },
+                     Comment(rawValue: "the retried session never reached PLAYING, saw \(log.all)"))
+
+        let events = fake.events
+        let connects = events.indices.filter { events[$0] == "connect" }
+        #expect(connects.count == 2,
+                Comment(rawValue: "expected exactly two connects, saw \(events)"))
+        #expect(events.filter { $0 == "LAUNCH" }.count == 2,
+                Comment(rawValue: "expected exactly two LAUNCHes, saw \(events)"))
+        #expect(connects.count >= 2 && events[..<connects[1]].contains("STOP"),
+                Comment(rawValue: "the second connect raced the previous STOP: \(events)"))
+    }
+
     @Test func rapidReselectRelaunchesCleanly() throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake()

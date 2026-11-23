@@ -732,6 +732,10 @@ public struct PTPHelperReconciler: Sendable {
 /// lost — a later, non-concurrent attempt's own failure is independently
 /// eligible to cycle.
 ///
+/// An `activate(timeout:)` that begins while a cycle runs waits for the cycle
+/// to end before it reads the helper's status, so a mid-teardown
+/// `.notRegistered` is never reported as needing approval.
+///
 /// razor: cycle on the first failure, exactly one cycle per rolling `window`
 /// (60 s default), never a loop or a retry storm. A wedge or stale helper
 /// that recurs inside one window is exactly the "surface failure to the
@@ -761,16 +765,19 @@ public struct PTPHelperSelfHealingActivator: PTPHelperActivating {
 
     public var willWaitForClock: Bool { inner.willWaitForClock }
 
+    /// Test-only: how many `activate(timeout:)` attempts are waiting for a running cycle to end.
+    var test_parkedAttemptCount: Int { state.parkedAttemptCount }
+
     public func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
-        state.beginAttempt()
+        await state.beginAttempt()
         let outcome = await inner.activate(timeout: timeout)
-        let othersInFlight = state.endAttempt()
+        state.endAttempt()
 
         guard outcome == .timingPortsUnavailable else {
             return outcome
         }
 
-        guard othersInFlight == 0, state.armCycleIfEligible(now: Date(), window: window) else {
+        guard state.armCycleIfEligible(now: Date(), window: window) else {
             return outcome
         }
 
@@ -779,6 +786,7 @@ public struct PTPHelperSelfHealingActivator: PTPHelperActivating {
             helper: helper,
             registerRetryDelay: registerRetryDelay,
             registerRetryAttempts: registerRetryAttempts)
+        state.finishCycle()
 
         guard case .registered = cycle.outcome else {
             Telemetry.log(.airplay, "ptp_helper_cycle", [
@@ -788,9 +796,9 @@ public struct PTPHelperSelfHealingActivator: PTPHelperActivating {
             return outcome
         }
 
-        state.beginAttempt()
+        await state.beginAttempt()
         let retryOutcome = await inner.activate(timeout: timeout)
-        _ = state.endAttempt()
+        state.endAttempt()
 
         let outcomeName: String
         switch retryOutcome {
@@ -815,31 +823,78 @@ public struct PTPHelperSelfHealingActivator: PTPHelperActivating {
 private final class PTPSelfHealState: @unchecked Sendable {
     private let lock = NSLock()
     private var inFlight = 0
+    private var cycling: Bool = false
+    private var parkedAttempts: [CheckedContinuation<Void, Never>] = []
     private var lastCycleAt: Date?
 
-    /// Call before the wrapped `activate()` await starts.
-    func beginAttempt() {
-        lock.lock(); inFlight += 1; lock.unlock()
+    /// Call before the wrapped `activate()` await starts. Counts the attempt
+    /// as in flight and returns at once when no cycle is running; an attempt
+    /// that begins during a cycle waits for the cycle to end, and
+    /// ``finishCycle()`` counts it in flight as it releases it.
+    func beginAttempt() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            self.admitOrPark(continuation)
+        }
     }
 
-    /// Call right after the wrapped `activate()` await returns. Returns how
-    /// many OTHER attempts are still in flight — used to refuse a cycle while
-    /// a concurrent takeover wait is mid-flight.
-    func endAttempt() -> Int {
-        lock.lock(); defer { lock.unlock() }
-        inFlight -= 1
-        return inFlight
+    /// Resumes `continuation` at once (counted in flight) when no cycle is
+    /// running, otherwise stores it for ``finishCycle()`` to resume. Never
+    /// resumes while holding the lock.
+    private func admitOrPark(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        if cycling {
+            parkedAttempts.append(continuation)
+            lock.unlock()
+            return
+        }
+        inFlight += 1
+        lock.unlock()
+        continuation.resume()
     }
 
-    /// True iff this attempt should start a cycle NOW: no cycle has fired
-    /// within `window`. Arms the cycle (records `lastCycleAt`) atomically
-    /// with the check so two racing callers can never both win.
+    /// Call right after the wrapped `activate()` await returns. Stops counting
+    /// the attempt as in flight; ``armCycleIfEligible(now:window:)`` reads
+    /// that count to refuse a cycle while a concurrent takeover wait is
+    /// mid-flight.
+    func endAttempt() {
+        lock.lock(); inFlight -= 1; lock.unlock()
+    }
+
+    /// True iff this attempt should start a cycle NOW: no cycle is running,
+    /// no attempt is in flight, and no cycle has fired within `window`. Arms
+    /// the cycle (sets `cycling`, records `lastCycleAt`) atomically with the
+    /// check so two racing callers can never both win, and an attempt that
+    /// begins afterwards waits for ``finishCycle()``.
     func armCycleIfEligible(now: Date, window: TimeInterval) -> Bool {
         lock.lock(); defer { lock.unlock() }
+        guard !cycling, inFlight == 0 else { return false }
         let rateLimitClear = lastCycleAt.map { now.timeIntervalSince($0) > window } ?? true
         guard rateLimitClear else { return false }
         lastCycleAt = now
+        cycling = true
         return true
+    }
+
+    /// Call exactly once per armed cycle, as soon as the cycle's await
+    /// returns, whatever its outcome. Ends the cycle and releases every
+    /// attempt that began during it, counting each one in flight before any
+    /// of them resumes.
+    func finishCycle() {
+        lock.lock()
+        cycling = false
+        inFlight += parkedAttempts.count
+        let released = parkedAttempts
+        parkedAttempts = []
+        lock.unlock()
+        for continuation in released {
+            continuation.resume()
+        }
+    }
+
+    /// How many attempts are waiting for the running cycle to end.
+    var parkedAttemptCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return parkedAttempts.count
     }
 }
 

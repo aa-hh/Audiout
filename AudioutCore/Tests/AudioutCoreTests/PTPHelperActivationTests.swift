@@ -260,11 +260,18 @@ extension SerializedSharedState {
         private let lock = NSLock()
         private var _status: PTPHelperStatus = .enabled
         private var _calls: [String] = []
+        private let unregisterGate: Gate?
         var status: PTPHelperStatus { lock.withLock { _status } }
         var recordedCalls: [String] { lock.withLock { _calls } }
+
+        init(unregisterGate: Gate? = nil) { self.unregisterGate = unregisterGate }
+
         func register() throws { lock.withLock { _calls.append("register"); _status = .enabled } }
         func openSystemSettingsLoginItems() {}
-        func unregister() async throws { lock.withLock { _calls.append("unregister"); _status = .notRegistered } }
+        func unregister() async throws {
+            lock.withLock { _calls.append("unregister"); _status = .notRegistered }
+            if let unregisterGate { await unregisterGate.wait() }
+        }
     }
 
     private final class TelemetryLineBox: @unchecked Sendable {
@@ -387,6 +394,34 @@ extension SerializedSharedState {
         }
     }
 
+    /// A ``PTPHelperActivating`` that mirrors the production activator's
+    /// status-first read: it reads the helper's status before anything else
+    /// and answers `.needsApproval(status)` for anything but `.enabled`,
+    /// counting each such refusal in `statusRefusals`; on `.enabled` it
+    /// returns the scripted activator's next outcome.
+    private final class StatusCheckingActivator: PTPHelperActivating, @unchecked Sendable {
+        private let helper: SelfHealHelper
+        private let scripted: ScriptedActivator
+        private let lock = NSLock()
+        private var _statusRefusals = 0
+        var statusRefusals: Int { lock.withLock { _statusRefusals } }
+        var willWaitForClock: Bool { helper.status == .enabled }
+
+        init(helper: SelfHealHelper, scripted: ScriptedActivator) {
+            self.helper = helper
+            self.scripted = scripted
+        }
+
+        func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
+            let status = helper.status
+            guard status == .enabled else {
+                lock.withLock { _statusRefusals += 1 }
+                return .needsApproval(status)
+            }
+            return await scripted.activate(timeout: timeout)
+        }
+    }
+
     @Test func neverCyclesWhileAnotherTakeoverWaitIsMidFlight() async {
         let gate = Gate()
         let inner = GatedActivator(gate: gate)
@@ -413,6 +448,36 @@ extension SerializedSharedState {
 
         #expect(helper.recordedCalls == ["unregister", "register"],
                 "the cycle deferred by the in-flight guard fires once nobody is left waiting")
+    }
+
+    // Turns red if PTPSelfHealState.beginAttempt() stops parking an attempt that starts while a cycle is running.
+    @Test func attemptStartedMidCycleWaitsForTheCycleAndNeverReportsNeedsApproval() async {
+        let gate = Gate()
+        let helper = SelfHealHelper(unregisterGate: gate)
+        let scripted = ScriptedActivator([.timingPortsUnavailable, .ready])
+        let inner = StatusCheckingActivator(helper: helper, scripted: scripted)
+        let activator = PTPHelperSelfHealingActivator(
+            inner: inner, helper: helper, window: 60,
+            registerRetryDelay: 0, registerRetryAttempts: 3)
+
+        // Call A fails, arms the cycle and is held inside `unregister()` with
+        // the helper torn down to `.notRegistered`. Call B starts mid-cycle.
+        let callA = Task { await activator.activate(timeout: 1) }
+        await SuiteWait.until("call A's cycle is held inside unregister()") { gate.isWaiting }
+        let callB = Task { await activator.activate(timeout: 1) }
+        await SuiteWait.until("call B is parked behind the cycle, or has read the torn-down status") {
+            activator.test_parkedAttemptCount == 1 || inner.statusRefusals > 0
+        }
+
+        gate.release()
+        let outcomeA = await callA.value
+        let outcomeB = await callB.value
+
+        #expect(outcomeB == .ready, "call B waited for the re-registered helper and found the clock ready")
+        #expect(outcomeA == .ready, "call A's post-cycle retry found the clock ready")
+        #expect(inner.statusRefusals == 0, "no attempt read the helper's status mid-teardown")
+        #expect(helper.recordedCalls == ["unregister", "register"], "exactly one cycle")
+        #expect(scripted.callCount == 3, "A's failing attempt, A's post-cycle retry and B's one attempt")
     }
 }
 

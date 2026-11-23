@@ -308,6 +308,10 @@ public final class SyncedLocalSink: @unchecked Sendable {
         }
     }
 
+    /// Test seam: fires on the clearing thread right after the session state is
+    /// published and the lock released.
+    var sessionStateClearedForTesting: (() -> Void)?
+
     /// Just the session/anchor-state half of `stop()` — no engine teardown. Split
     /// out for the same reason as `teardownEngine()` above.
     private func clearSessionState() {
@@ -326,6 +330,10 @@ public final class SyncedLocalSink: @unchecked Sendable {
         var writesDelta = 0
         var samplesDelta = 0
         stateLock.withLock {
+            // Inside the lock, together with clearing the anchor: an enqueue that
+            // anchors after this take must find its chunk still in the ring, so
+            // the ring is never reset once the lock is released.
+            ring.reset()
             anchored = false
             released = false
             targetReleaseNanos = 0
@@ -336,6 +344,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
             lastReportedRingDroppedWrites = droppedWrites
             lastReportedRingDroppedSamples = droppedSamples
         }
+        sessionStateClearedForTesting?()
         if writesDelta > 0 {
             Telemetry.log(.localPlayback, "sync_ring_overflow", [
                 "droppedWritesDelta": String(writesDelta),
@@ -344,7 +353,6 @@ public final class SyncedLocalSink: @unchecked Sendable {
                 "droppedFramesTotal": String(droppedSamples / channelCount),
             ])
         }
-        ring.reset()
         // T-CORRECTION: the render thread is stopped by the time a rebuild reaches
         // here (teardownEngine ran first), so resetting the render-thread-owned DSP
         // is safe. A stale phase accumulator / integrator from the pre-event session
@@ -610,8 +618,10 @@ public final class SyncedLocalSink: @unchecked Sendable {
 
         // Set the release anchor on the FIRST frame of a session, holding the lock
         // only for the scalar set so the anchor pts corresponds to sample 0 in the
-        // ring (the write below is lock-free). A missed `try()` just defers the
-        // anchor to the next buffer — a sub-ms pts error, never a wrong ordering.
+        // ring (the write below is lock-free). A missed try() writes its chunk
+        // unanchored; the next buffer's anchor empties the ring first, so the
+        // session starts one buffer later with the anchor pts still on ring
+        // sample 0.
         if stateLock.try() {
             if !anchored {
                 let delay = cachedTotalDelayNanos ?? SyncTiming.totalDelayNanos(
@@ -620,6 +630,13 @@ public final class SyncedLocalSink: @unchecked Sendable {
                     safetyMarginMs: safetyMarginMs,
                     userOffsetMs: Double(userOffsetMs()))
                 cachedTotalDelayNanos = delay
+                // Empty the ring at the instant the anchor is set: a chunk
+                // written while unanchored (a missed try(), or a write that lost
+                // the race with clearSessionState()) would otherwise sit ahead of
+                // the chunk whose pts this anchor records. The render thread
+                // leaves the ring alone while anchored is false, so the
+                // consumer-owned words are free to move here.
+                ring.reset()
                 anchored = true
                 targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
                     anchorPtsNanos: ptsNanos, totalDelayNanos: delay)
@@ -1018,8 +1035,12 @@ private final class InterleavedFloatRing {
         return applied
     }
 
-    /// Drop all buffered samples and any un-consumed shift. Only safe while
-    /// neither thread is active (call from `stop()`).
+    /// Drop all buffered samples and any un-consumed shift. Moves consumer-owned
+    /// words, so it is only safe while the consumer is not reading: from
+    /// `clearSessionState()` with the engine stopped, or from the producer's
+    /// anchor step under `stateLock`, where `anchored` is still false. A
+    /// concurrent producer write is harmless: it lands whole before the reset
+    /// and is dropped, or whole after it and survives.
     func reset() {
         OSMemoryBarrier()
         tailPtr.pointee = headPtr.pointee

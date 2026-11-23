@@ -582,6 +582,79 @@ import AVFoundation
         #expect(out.allSatisfy { $0 == 0 })
     }
 
+    /// An enqueue that lands inside a rebuild, after the session state is
+    /// published, anchors on its own chunk and keeps it at ring sample 0.
+    // Turns red if clearSessionState() resets the ring after releasing stateLock instead of inside the lock with anchored = false.
+    @Test func anEnqueueLandingInsideARebuild_keepsItsAnchorChunk() {
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1, safetyMarginMs: 0,
+            presentationDelayMs: { 0 }, localOutputLatency: { nil }, userOffsetMs: { 0 })
+        func chunk(_ value: Float, _ pts: timespec) {
+            var frames = [Float](repeating: value, count: 480)
+            frames.withUnsafeMutableBufferPointer { buf in
+                sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: buf.count, pts: pts)
+            }
+        }
+
+        chunk(9.0, timespec(tv_sec: 1_000, tv_nsec: 0))
+        sink.sessionStateClearedForTesting = {
+            chunk(1.0, timespec(tv_sec: 2_000, tv_nsec: 0))
+        }
+        sink.lifecycleHooks.resetSessionState(0)
+        sink.sessionStateClearedForTesting = nil
+        chunk(2.0, timespec(tv_sec: 2_000, tv_nsec: 10_000_000))
+
+        var out = [Float](repeating: 0, count: 512)
+        let produced = out.withUnsafeMutableBufferPointer { ob in
+            sink.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: 2_000_000_000_000)
+        }
+        #expect(produced)
+        #expect(abs(out[0] - 1.0) < 0.01, "ring sample 0 is the chunk the anchor pts belongs to")
+    }
+
+    /// A chunk written while the sink is still unanchored (the nested call's
+    /// `try()` misses because the outer enqueue holds the lock) must not sit
+    /// ahead of the chunk the anchor records.
+    // Turns red if enqueue stops emptying the ring immediately before it sets anchored = true.
+    @Test func aChunkWrittenBeforeTheAnchor_isDroppedWhenTheAnchorIsSet() {
+        final class Race: @unchecked Sendable {
+            var sink: SyncedLocalSink?
+            var armed = false
+        }
+        let race = Race()
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1, safetyMarginMs: 0,
+            presentationDelayMs: {
+                if race.armed {
+                    race.armed = false
+                    var frames = [Float](repeating: 9.0, count: 480)
+                    frames.withUnsafeMutableBufferPointer { buf in
+                        race.sink?.enqueue(
+                            interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                            pts: timespec(tv_sec: 1_999, tv_nsec: 990_000_000))
+                    }
+                }
+                return 0
+            },
+            localOutputLatency: { nil }, userOffsetMs: { 0 })
+        race.sink = sink
+
+        race.armed = true
+        var frames = [Float](repeating: 1.0, count: 480)
+        frames.withUnsafeMutableBufferPointer { buf in
+            sink.enqueue(
+                interleavedFrames: buf.baseAddress!, frameCount: buf.count,
+                pts: timespec(tv_sec: 2_000, tv_nsec: 0))
+        }
+
+        var out = [Float](repeating: 0, count: 512)
+        let produced = out.withUnsafeMutableBufferPointer { ob in
+            sink.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: 2_000_000_000_000)
+        }
+        #expect(produced)
+        #expect(abs(out[0] - 1.0) < 0.01, "the unanchored chunk is gone, ring sample 0 is the anchor chunk")
+    }
+
     // MARK: Ring overflow (sustained overrun)
 
     /// A single enqueue far larger than the ring's capacity must be dropped

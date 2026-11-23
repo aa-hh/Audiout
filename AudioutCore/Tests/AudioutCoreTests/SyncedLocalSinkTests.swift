@@ -390,6 +390,69 @@ import AVFoundation
         #expect(everDrained, "the gate never opened, so silence proves nothing")
     }
 
+    /// A released cycle whose `stateLock.try()` misses drains on the previous locked
+    /// cycle's target and gain, so its output matches an uncontended twin's exactly.
+    /// Turns red if renderInterleaved goes back to zero-filling a released cycle whose stateLock.try() missed.
+    @Test func aMissedRenderLockAfterReleaseKeepsDraining() throws {
+        let contended = Self.rampSink()
+        let reference = Self.rampSink()
+        contended.setGain(0.5)
+        reference.setGain(0.5)
+        Self.enqueueRamp(into: contended)
+        Self.enqueueRamp(into: reference)
+
+        let nsPerFrame = 1_000_000_000.0 / 48_000.0
+        var contendedOut = [Float](repeating: .nan, count: 512)
+        var referenceOut = [Float](repeating: .nan, count: 512)
+        for cycle in 0..<20 {
+            let cycleStart = Self.rampAnchorNanos + Int64((Double(cycle * 512) * nsPerFrame).rounded())
+            _ = referenceOut.withUnsafeMutableBufferPointer { ob -> Bool in
+                reference.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+            }
+            if cycle == 14 {
+                #expect(contended.hasStartedRendering, "the gate must be open before the missed cycle")
+                contended.withStateLockHeldForTesting {
+                    _ = contendedOut.withUnsafeMutableBufferPointer { ob -> Bool in
+                        contended.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+                    }
+                }
+                #expect(!contendedOut.contains(0), "the missed cycle dropped out")
+            } else {
+                _ = contendedOut.withUnsafeMutableBufferPointer { ob -> Bool in
+                    contended.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+                }
+            }
+            #expect(contendedOut == referenceOut, "cycle \(cycle) diverged from the uncontended twin")
+        }
+    }
+
+    /// A session clear drops the render snapshot's released flag, so a missed `try()`
+    /// on the next session's first cycle stays silent and drains nothing.
+    /// Turns red if clearSessionState stops clearing the render snapshot's released flag.
+    @Test func aMissedRenderLockAfterASessionClearStaysSilent() throws {
+        let sink = Self.rampSink()
+        Self.enqueueRamp(into: sink)
+        _ = Self.probeRampCycles(sink, cycles: 12)
+        #expect(sink.hasStartedRendering, "the first session must have released")
+
+        sink.lifecycleHooks.resetSessionState(0)
+        Self.enqueueRamp(into: sink)
+
+        var out = [Float](repeating: .nan, count: 512)
+        var produced = true
+        sink.withStateLockHeldForTesting {
+            produced = out.withUnsafeMutableBufferPointer { ob -> Bool in
+                sink.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: Self.rampAnchorNanos)
+            }
+        }
+        #expect(!produced)
+        #expect(out.allSatisfy { $0 == 0 })
+
+        let control = Self.rampSink()
+        Self.enqueueRamp(into: control)
+        #expect(Self.probeRampCycles(sink, cycles: 20) == Self.probeRampCycles(control, cycles: 20))
+    }
+
     // MARK: Shared ramp fixture (mirrors `rampReleasesAtComputedHostTime_withinOneFrame`)
 
     static let rampAnchorPtsSec = 1_000

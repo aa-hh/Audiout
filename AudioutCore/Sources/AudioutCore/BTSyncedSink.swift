@@ -1095,6 +1095,8 @@ final class BTDeviceSink: @unchecked Sendable {
 
     func test_checkLiveness(nowNanos: Int64) { graphQueue.sync { checkLivenessLocked(nowNanos: nowNanos) } }
     func test_markReleased() { stateLock.withLock { released = true } }
+    /// Test seam: the render path's `stateLock.try()` fails for every cycle rendered inside `body`.
+    func test_withStateLockHeld(_ body: () -> Void) { stateLock.withLock { body() } }
     func test_noteRenderCycle(nowNanos: Int64) { lastRenderCycleNanosPtr.pointee = nowNanos }
     func test_noteEnqueue(nowNanos: Int64) { lastEnqueueNanosPtr.pointee = nowNanos }
     func test_noteStarted(nowNanos: Int64) { graphQueue.sync { startedAtNanos = nowNanos } }
@@ -1419,9 +1421,12 @@ final class BTDeviceSink: @unchecked Sendable {
         // so there is no rate correction to apply and the resampler runs at unity.
         let ratio = 1.0
         var processor: EQProcessor?
-        // Before the lock: a cycle the lock turns away was still pulled.
+        // The re-alignment runs before the lock; a cycle the lock turns away drained nothing, so it leaves the pulled count.
         realignToDevicePulls(cycleStartMonotonicNanos: cycleStartMonotonicNanos, frameCount: frameCount)
-        guard stateLock.try() else { return false }   // no snapshot → silent cycle
+        guard stateLock.try() else {   // no snapshot → silent cycle
+            if pullOriginNanos != nil { framesPulledSinceOrigin -= frameCount }
+            return false
+        }
         processor = eqProcessor
         let keepAliveWindow = keepAliveWindowNanos
         if anchored {

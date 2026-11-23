@@ -297,4 +297,90 @@ import Testing
                 "the ring fell to \(lowest) frames during the over-pull")
         #expect(movedBack, "the over-pull's backward re-alignment never ran")
     }
+
+    /// Five render cycles, one a second, find `stateLock` held: each drains
+    /// nothing while capture keeps writing on wall time, so the ring gains one
+    /// cycle of audio per lockout. Red if renderInterleaved counts a cycle that
+    /// stateLock.try() turned away as pulled: the re-alignment then never sees
+    /// the extra audio and the sink ends about 53 ms late.
+    @Test func aCycleTheLockTurnsAwayDoesNotMoveThePlayoutOffset() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 400 })
+        manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
+        manager.setDevices([.init(deviceID: 0, uid: "move-2")])
+        defer { manager.stop() }
+        let sink = try #require(manager.sinkForTesting(uid: "move-2"))
+
+        let chunkFrames = 480
+        let cycleFrames = 512
+        var written = 0         // frame i carries value i + 1
+        var chunk = [Float](repeating: 0, count: chunkFrames)
+        var out = [Float](repeating: 0, count: cycleFrames)
+        func writeChunk() {
+            for i in 0..<chunkFrames { chunk[i] = Float(written + i + 1) }
+            let ptsNanos = Self.anchorNanos + Int64((Double(written) * Self.nsPerFrame).rounded())
+            chunk.withUnsafeBufferPointer {
+                sink.enqueue(
+                    interleavedFrames: $0.baseAddress!, frameCount: chunkFrames,
+                    pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
+                                  tv_nsec: Int(ptsNanos % 1_000_000_000)))
+            }
+            written += chunkFrames
+        }
+        func render(at host: Double) {
+            sink.test_waitForPendingRebuild()   // see worstStormOffsetMs
+            out.withUnsafeMutableBufferPointer {
+                _ = sink.renderInterleaved(
+                    into: $0, frameCount: cycleFrames, cycleStartMonotonicNanos: Int64(host))
+            }
+        }
+        func offsetMs(at host: Double) -> Double {
+            let pts = Double(Self.anchorNanos) + Double(Int(out[0]) - 1) * Self.nsPerFrame
+            return (host - pts) / 1e6
+        }
+
+        // One second of even pulls: the gate opens and the ring settles at the delay.
+        let cyclePeriod = Double(cycleFrames) * Self.nsPerFrame
+        var host = Double(Self.anchorNanos)
+        while host < Double(Self.anchorNanos) + 1e9 {
+            while Double(Self.anchorNanos) + Double(written) * Self.nsPerFrame <= host { writeChunk() }
+            render(at: host)
+            host += cyclePeriod
+        }
+        #expect(out[cycleFrames - 1] > 0, "the gate never opened")
+        let baselineMs = offsetMs(at: host - cyclePeriod)
+
+        // Six more seconds; the first cycle of each of the first five is held.
+        let mainStart = host
+        var heldSecond = -1
+        var lastHost = host
+        while host < Double(Self.anchorNanos) + 7e9 {
+            while Double(Self.anchorNanos) + Double(written) * Self.nsPerFrame <= host { writeChunk() }
+            let second = Int((host - mainStart) / 1e9)
+            if second < 5 && second != heldSecond {
+                heldSecond = second
+                sink.test_waitForPendingRebuild()   // outside the lock: graphQueue blocks take it
+                var audible = true
+                let cycleHost = host
+                sink.test_withStateLockHeld {
+                    out.withUnsafeMutableBufferPointer {
+                        audible = sink.renderInterleaved(
+                            into: $0, frameCount: cycleFrames,
+                            cycleStartMonotonicNanos: Int64(cycleHost))
+                    }
+                }
+                #expect(audible == false, "a turned-away cycle reported audio")
+                #expect(out[0] == 0, "a turned-away cycle wrote \(out[0])")
+            } else {
+                render(at: host)
+            }
+            lastHost = host
+            host += cyclePeriod
+        }
+
+        let endMs = offsetMs(at: lastHost)
+        #expect(abs(endMs - baselineMs) < BTDeviceSink.pullRealignThresholdMs,
+                "the playout offset moved \(endMs - baselineMs) ms")
+    }
 }

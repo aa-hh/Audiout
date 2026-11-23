@@ -1367,6 +1367,24 @@ import AirPlayEngine
         collector.wait(count: 2)
         #expect(discovery.devices.count == 2)
     }
+
+    // MARK: Probe supersede (NetworkFrameworkBrowser)
+
+    // Turns red if installing a probe stops handing back the one it replaces, or if a probe that is not the current one for its key can finish and clear the slot.
+    @Test func supersededProbeNeitherEmitsNorOrphansItsReplacement() {
+        final class FakeProbe {}
+        var slots = ProbeSlots<FakeProbe>()
+        let a = FakeProbe()
+        let b = FakeProbe()
+        let key = "airplay|Kitchen|_airplay._tcp|local."
+
+        #expect(slots.install(a, for: key) == nil)
+        #expect(slots.install(b, for: key) === a)
+        #expect(slots.finish(a, for: key) == false)
+        #expect(slots.remove(for: key) === b)
+        #expect(slots.finish(b, for: key) == false)
+        #expect(slots.remove(for: key) == nil)
+    }
 }
 
 // MARK: - EventCollector

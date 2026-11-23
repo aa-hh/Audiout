@@ -809,6 +809,37 @@ public final class NativeDiscovery: @unchecked Sendable {
     }
 }
 
+/// The one current probe per result key. A probe that is not the current one
+/// for its key never finishes: `finish` refuses it and leaves the slot alone.
+/// Whoever takes a probe out (`install`, `remove(for:)`, `removeAll`) receives
+/// it back and cancels it; this type performs no cancellation itself.
+struct ProbeSlots<Probe: AnyObject> {
+    private var slots: [String: Probe] = [:]
+
+    mutating func install(_ probe: Probe, for key: String) -> Probe? {
+        let displaced = slots[key]
+        slots[key] = probe
+        return displaced
+    }
+
+    @discardableResult
+    mutating func finish(_ probe: Probe, for key: String) -> Bool {
+        guard let current = slots[key], current === probe else { return false }
+        slots[key] = nil
+        return true
+    }
+
+    mutating func remove(for key: String) -> Probe? {
+        slots.removeValue(forKey: key)
+    }
+
+    mutating func removeAll() -> [Probe] {
+        let all = Array(slots.values)
+        slots.removeAll()
+        return all
+    }
+}
+
 // MARK: - NetworkFrameworkBrowser (production ServiceBrowsing)
 
 /// The real ``ServiceBrowsing``: two `NWBrowser`s (`_airplay._tcp` and
@@ -843,8 +874,8 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
     /// Consecutive `.failed` count per type, feeding `nextDelay(afterAttempt:)`.
     /// Reset to 0 once that type's browser reaches `.ready`.
     private var failureAttempt: [String: Int] = [:]
-    /// In-flight resolve probes, keyed so we can cancel on removal.
-    private var probes: [String: NWConnection] = [:]
+    /// The one current resolve probe per result key.
+    private var probes = ProbeSlots<NWConnection>()
     /// Last-known TXT/name per browse result, so a removal can report the
     /// deviceid even though NWBrowser only hands us the endpoint on the way out.
     private var resultTXT: [String: (name: String, deviceID: String?)] = [:]
@@ -868,8 +899,7 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
             self.failureAttempt.removeAll()
             for b in self.browsers.values { b.cancel() }
             self.browsers.removeAll()
-            for (_, c) in self.probes { c.cancel() }
-            self.probes.removeAll()
+            for c in self.probes.removeAll() { c.cancel() }
             self.resultTXT.removeAll()
         }
     }
@@ -1023,12 +1053,13 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
         }
 
         let connection = NWConnection(to: endpoint, using: params)
-        probes[resultKey] = connection
+        if let displaced = probes.install(connection, for: resultKey) { displaced.cancel() }
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
                 self.queue.async {
+                    guard self.probes.finish(connection, for: resultKey) else { return }
                     if let (address, family, port) = Self.resolvedAddress(connection) {
                         self.onResolve?(ResolvedService(
                             serviceType: serviceType,
@@ -1043,11 +1074,10 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
                         Self.logIPv6Only(connection: connection, name: name)
                     }
                     connection.cancel()
-                    self.probes[resultKey] = nil
                 }
             case .failed, .cancelled:
                 self.queue.async {
-                    self.probes[resultKey] = nil
+                    guard self.probes.finish(connection, for: resultKey) else { return }
                     // The IPv4-forced probe couldn't establish at all — the
                     // device may be IPv6-only. Fall back to an unconstrained
                     // probe purely to detect that case and log it loudly;
@@ -1082,12 +1112,13 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
         guard resultTXT[resultKey] != nil else { return }
 
         let connection = NWConnection(to: endpoint, using: .tcp)
-        probes[resultKey] = connection
+        if let displaced = probes.install(connection, for: resultKey) { displaced.cancel() }
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
                 self.queue.async {
+                    guard self.probes.finish(connection, for: resultKey) else { return }
                     if let (address, family, port) = Self.resolvedAddress(connection) {
                         self.onResolve?(ResolvedService(
                             serviceType: serviceType,
@@ -1102,10 +1133,9 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
                         Self.logIPv6Only(connection: connection, name: name)
                     }
                     connection.cancel()
-                    self.probes[resultKey] = nil
                 }
             case .failed, .cancelled:
-                self.queue.async { self.probes[resultKey] = nil }
+                self.queue.async { self.probes.finish(connection, for: resultKey) }
             default:
                 break
             }
@@ -1135,8 +1165,7 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
     private func remove(_ result: NWBrowser.Result, serviceType: ResolvedService.ServiceType) {
         guard case let .service(name, type, domain, _) = result.endpoint else { return }
         let resultKey = "\(serviceType.rawValue)|\(name)|\(type)|\(domain)"
-        probes[resultKey]?.cancel()
-        probes[resultKey] = nil
+        probes.remove(for: resultKey)?.cancel()
         let deviceID = resultTXT[resultKey]?.deviceID
         resultTXT[resultKey] = nil
         onRemove?(RemovedService(serviceType: serviceType, deviceID: deviceID, name: name))

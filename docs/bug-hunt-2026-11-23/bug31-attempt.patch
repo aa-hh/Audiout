@@ -1,0 +1,64 @@
+diff --git a/AudioutCore/Sources/AudioutCore/CastOutputManager.swift b/AudioutCore/Sources/AudioutCore/CastOutputManager.swift
+index 90b2e14..7459d12 100644
+--- a/AudioutCore/Sources/AudioutCore/CastOutputManager.swift
++++ b/AudioutCore/Sources/AudioutCore/CastOutputManager.swift
+@@ -537,8 +537,9 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
+         /// Last lag value reported via `onVolumeLagChange`, so `handle(_:id:generation:)`
+         /// only fires on a genuine change.
+         var reportedLagSeconds: Int?
+-        /// Only the FIRST GET is logged — the interesting fact is whether the
+-        /// receiver ever reached the server at all.
++        /// Only the first GET of each attempt is logged — the interesting fact
++        /// is whether the receiver ever reached the server at all — and only
++        /// that GET re-arms the play deadline. Cleared by every teardown.
+         var loggedHTTPRequest = false
+         /// Set while this id's PREVIOUS session is still tearing down: the
+         /// recipe starts from that teardown's completion, not here.
+@@ -1036,6 +1037,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
+         session.levelInFlight = false
+         session.levelPending = nil
+         session.controlReady = false
++        session.loggedHTTPRequest = false
+         session.wasPlaying = false
+         session.generation += 1
+         if session.reportedLagSeconds != nil {
+diff --git a/AudioutCore/Tests/AudioutCoreTests/CastOutputManagerTests.swift b/AudioutCore/Tests/AudioutCoreTests/CastOutputManagerTests.swift
+index cc00e53..b3dbe75 100644
+--- a/AudioutCore/Tests/AudioutCoreTests/CastOutputManagerTests.swift
++++ b/AudioutCore/Tests/AudioutCoreTests/CastOutputManagerTests.swift
+@@ -366,6 +366,35 @@ import Testing
+                 Comment(rawValue: "expected a play-deadline timeout, saw \(log.all)"))
+     }
+ 
++    /// The `Session` object survives `retry(deviceID:)`, so the retried attempt
++    /// must still treat its first GET as a first GET and re-arm the deadline.
++    /// Turns red if `teardown(_:)` stops clearing `Session.loggedHTTPRequest`, which makes a retried attempt's first GET return before `armPlayDeadline`.
++    @Test func aSlowFetchRearmsThePlayDeadlineAfterARetry() throws {
++        guard #available(macOS 15, *) else { return }
++        let (fake, endpoint) = try startFake(fetchBytes: 176_444 + 2 * 176_400, fetchDelay: 5) // real-time-ok: the play deadline runs on the manager's own queue with no injected clock
++        defer { fake.stop() }
++        let manager = makeManager(playDeadline: 7) // real-time-ok: the play deadline runs on the manager's own queue with no injected clock
++        defer { manager.stopAll() }
++        let log = watch(manager, deviceID: "dev1")
++        manager.setDevices([record(endpoint)])
++
++        try #require(waitUntil(timeout: 30) { log.contains(.playing) },
++                     Comment(rawValue: "the first attempt never reached PLAYING, saw \(log.all)"))
++        manager.retry(deviceID: "dev1")
++        _ = waitUntil(timeout: 30) {
++            log.all.filter { $0 == .playing }.count >= 2 || log.all.contains { if case .failed = $0 { return true } else { return false } }
++        }
++        let events = fake.events
++        let launches = events.indices.filter { events[$0] == "LAUNCH" }
++        let stopPrecedesRelaunch = launches.count >= 2 && events[..<launches[1]].contains("STOP")
++        #expect(stopPrecedesRelaunch,
++                Comment(rawValue: "the retried LAUNCH raced the previous STOP, so this failure is not about the deadline: \(events)"))
++        #expect(!log.contains(.failed(.timedOut)),
++                Comment(rawValue: "the retried attempt's fetch did not re-arm the deadline, saw \(log.all)"))
++        #expect(log.last == .playing,
++                Comment(rawValue: "the retried attempt never reached PLAYING, saw \(log.all)"))
++    }
++
+     @Test func aSlowFetchRearmsThePlayDeadline() throws {
+         guard #available(macOS 15, *) else { return }
+         // The live regression (Google TV Streamer, 2026-08-22): the GET arrived

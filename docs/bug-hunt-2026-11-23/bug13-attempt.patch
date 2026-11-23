@@ -1,0 +1,231 @@
+diff --git a/AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift b/AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift
+index db5c6ca..a40a98e 100644
+--- a/AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift
++++ b/AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift
+@@ -129,6 +129,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+     /// mid-test. Defaults to `true` — production behavior, unchanged.
+     private let installsProcessListListener: Bool
+ 
++    /// The clock the rebuild claim reads to tell a delivering tap from an idle
++    /// one, on the capture-pts timeline. `nil` means every rebuild arms the fill.
++    private let monotonicNow: (@Sendable () -> Int64)?
++
+     // MARK: State (confined to `queue`)
+ 
+     private let queue = DispatchQueue(label: "NativeCaptureCoordinator.state")
+@@ -621,7 +625,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+             // production construction site, via `makeBackend`) rather than
+             // through `NativeBackend`, since the engine is already in hand and
+             // every join/leave edge belongs to this coordinator's state machine.
+-            workgroup: EngineIOWorkgroup(engine: engine)
++            workgroup: EngineIOWorkgroup(engine: engine),
++            monotonicNow: { NativeCaptureCoordinator.monotonicNanos() }
+         )
+     }
+     #endif
+@@ -643,7 +648,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
+         workgroup: AudioIOWorkgroupJoining? = nil,
+         membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300),
+-        installsProcessListListener: Bool = true
++        installsProcessListListener: Bool = true,
++        monotonicNow: (@Sendable () -> Int64)? = nil
+     ) {
+         self.makeTap = makeTap
+         self.resolveDefaultOutputDeviceID = resolveDefaultOutputDeviceID
+@@ -654,6 +660,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+         self.workgroup = workgroup
+         self.membershipDebounceInterval = membershipDebounceInterval
+         self.installsProcessListListener = installsProcessListListener
++        self.monotonicNow = monotonicNow
+     }
+ 
+     /// Tears down the process-object-list listener installed by the first
+@@ -2150,7 +2157,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+     /// - `lastEndPts` — written ONLY by the delivery thread, at the end of every
+     ///   ``deliver(_:pts:snapshot:btPCM:)``. The one exception is ``reset()``,
+     ///   which runs from `stop()` AFTER the tap's `teardown()` has blocked until
+-    ///   in-flight IO quiesced, so there is no delivery thread left to race.
++    ///   in-flight IO quiesced, so there is no delivery thread left to race. The
++    ///   control side also reads it once in `recreateTap(cause:)`'s claim, to
++    ///   tell a delivering tap from an idle one.
+     /// - `armed` — the pending rebuild cause (`0` = disarmed), written by the
+     ///   control side and cleared by the delivery thread when it consumes it.
+     /// - `armedEpoch` — the ``BufferSnapshot/tapEpoch`` the fill applies FROM,
+@@ -2194,7 +2203,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+             lastEndPtsPtr.pointee = endPtsNanos
+         }
+ 
+-        /// Delivery thread only: where the last block handed downstream ends, or
++        /// The delivery thread reads it per buffer, and the control side reads it
++        /// once in the rebuild claim (a single aligned word load): where the last
++        /// block handed downstream ends, or
+         /// 0 when nothing has been delivered since the last ``reset()``. Read
+         /// without clearing the arm, so every buffer can be measured against it
+         /// and not only the first one after a rebuild.
+@@ -2340,7 +2351,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+             // running and would otherwise consume this arm (``FeedGapTracker``).
+             // Skipped during a wizard run: the pacer keeps feeding right through the
+             // rebuild, so there is no hole in the sender's sample count to patch.
+-            if !self.wizardActive { self.feedGap.arm(cause, fromEpoch: self.tapEpoch + 1) }
++            // Also skipped when the tap was already idle (a pause; the tap sleeps
++            // until an app plays): an idle tap left no feed hole, and a fill would
++            // push every later block late by the whole pause. The arm is skipped
++            // rather than disarmed, so an earlier unconsumed rebuild's arm survives.
++            let lastEnd = self.feedGap.lastDeliveredEndPtsNanos
++            let tapWasIdle: Bool
++            if let now = self.monotonicNow?(), lastEnd != 0 {
++                tapWasIdle = (now &- lastEnd) > Self.maxDroppedCycleFillNanos
++            } else {
++                tapWasIdle = false
++            }
++            if !self.wizardActive && !tapWasIdle { self.feedGap.arm(cause, fromEpoch: self.tapEpoch + 1) }
+             // Snapshot what the OUTGOING tap was anchored to, before `teardown()`
+             // clears it — the baseline the post-commit compare needs to tell a
+             // re-anchor from a like-for-like rebuild.
+diff --git a/AudioutCore/Tests/AudioutCoreTests/SyncedLocalFanoutTests.swift b/AudioutCore/Tests/AudioutCoreTests/SyncedLocalFanoutTests.swift
+index e54f12a..10e0010 100644
+--- a/AudioutCore/Tests/AudioutCoreTests/SyncedLocalFanoutTests.swift
++++ b/AudioutCore/Tests/AudioutCoreTests/SyncedLocalFanoutTests.swift
+@@ -565,6 +565,141 @@ import AVFoundation
+                 "no silence fill may bridge two capture sessions")
+     }
+ 
++    /// A rebuild while the user has paused finds a tap that already stopped
++    /// delivering (it stays idle until an app plays), so the rebuild left no hole.
++    /// Filling against the last pre-pause buffer would push every block after the
++    /// resume late by the whole pause.
++    /// Turns red if `recreateTap` arms the feed-gap fill while the last delivered
++    /// block ended more than 50 ms before the claim.
++    @Test func aRebuildWhileTheTapIsIdleFillsNothing() {
++        let tap = FeedbackFakeTap()
++        let engineSink = SpyPCMSink()
++
++        let coordinator = NativeCaptureCoordinator(
++            makeTap: { tap },
++            sink: engineSink,
++            makeConverter: { _ in FixedConverter() },
++            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID])),
++            muteBehavior: .mutedWhenTapped,
++            monotonicNow: { 1_300_000_000 })
++        defer { coordinator.stop() }
++        coordinator.start()
++        waitForCapturing(coordinator)
++
++        tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
++        waitFor { engineSink.forwarded.count == 1 }
++
++        // The claim reads 1.3 s, ~300 ms after buffer 1 ended: the tap was idle.
++        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.example.x"])
++        waitFor { tap.creates == 2 }
++        waitForCapturing(coordinator)
++
++        // 1.5 s after buffer 1 — inside the 2 s rebuild fill cap, so an arm
++        // standing here would inject ~66 000 frames of silence.
++        tap.deliverMix(frames: 4, phaseStart: 4, pts: timespec(tv_sec: 2, tv_nsec: 500_000_000))
++        waitFor {
++            engineSink.forwarded.count >= 2 && engineSink.forwarded.last?.pcm == FixedConverter.payload
++        }
++
++        let forwarded = engineSink.forwarded
++        #expect(forwarded.count == 2, "a rebuild during a pause must not fill the pause")
++        #expect(forwarded.allSatisfy { $0.pcm == FixedConverter.payload })
++    }
++
++    /// The idle check must not cost a delivering tap its fill: a rebuild claimed
++    /// while audio is still arriving leaves a real hole in the sender's count.
++    /// Turns red if the idle check in `recreateTap` skips the arm for a tap whose
++    /// last block ended within 50 ms of the claim.
++    @Test func aRebuildWhileTheTapIsDeliveringStillFillsItsHole() {
++        let tap = FeedbackFakeTap()
++        let engineSink = SpyPCMSink()
++
++        let coordinator = NativeCaptureCoordinator(
++            makeTap: { tap },
++            sink: engineSink,
++            makeConverter: { _ in FixedConverter() },
++            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID])),
++            muteBehavior: .mutedWhenTapped,
++            monotonicNow: { 1_010_000_000 })
++        defer { coordinator.stop() }
++        coordinator.start()
++        waitForCapturing(coordinator)
++
++        tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
++        waitFor { engineSink.forwarded.count == 1 }
++
++        // The claim reads 1.01 s, ~10 ms after buffer 1 ended: still delivering.
++        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.example.x"])
++        waitFor { tap.creates == 2 }
++        waitForCapturing(coordinator)
++
++        tap.deliverMix(frames: 4, phaseStart: 4, pts: timespec(tv_sec: 1, tv_nsec: 500_000_000))
++        waitFor { engineSink.forwarded.last?.pcm == FixedConverter.payload
++                  && engineSink.forwarded.count > 2 }
++
++        let bytesPerFrame = PCMFormat.airplay.channels * MemoryLayout<Int16>.size
++        let fill = Array(engineSink.forwarded.dropFirst().dropLast())
++        #expect(fill.allSatisfy { $0.pcm.allSatisfy { $0 == 0 } }, "the fill is S16LE silence")
++        let fillFrames = fill.reduce(0) { $0 + $1.pcm.count / bytesPerFrame }
++        // round((0.5 s − 4/44100 s) × 44100).
++        #expect(fillFrames == 22_046, "a delivering tap's rebuild hole is filled exactly")
++    }
++
++    /// Two rebuilds back to back, the second claimed after the tap has gone quiet:
++    /// the first rebuild's hole is still real and still unconsumed.
++    /// Turns red if an idle claim in `recreateTap` disarms the tracker instead of
++    /// leaving an earlier rebuild's arm standing.
++    @Test func aSecondRebuildBeforeAnyBufferKeepsTheFirstRebuildsFill() {
++        final class ClockHolder: @unchecked Sendable {
++            private let lock = NSLock()
++            private var nanos: Int64 = 1_010_000_000
++            var now: Int64 {
++                get { lock.withLock { nanos } }
++                set { lock.withLock { nanos = newValue } }
++            }
++        }
++        let clock = ClockHolder()
++        let tap = FeedbackFakeTap()
++        let engineSink = SpyPCMSink()
++
++        let coordinator = NativeCaptureCoordinator(
++            makeTap: { tap },
++            sink: engineSink,
++            makeConverter: { _ in FixedConverter() },
++            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID])),
++            muteBehavior: .mutedWhenTapped,
++            monotonicNow: { clock.now })
++        defer { coordinator.stop() }
++        coordinator.start()
++        waitForCapturing(coordinator)
++
++        tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
++        waitFor { engineSink.forwarded.count == 1 }
++
++        // Rebuild 1 claims while the tap is delivering: armed.
++        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.example.x"])
++        waitFor { tap.creates == 2 }
++        waitForCapturing(coordinator)
++
++        // Rebuild 2 claims ~300 ms after buffer 1 ended, before any buffer
++        // consumed rebuild 1's arm: idle, so it must leave that arm alone.
++        clock.now = 1_300_000_000
++        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.example.x", "com.example.y"])
++        waitFor { tap.creates == 3 }
++        waitForCapturing(coordinator)
++
++        tap.deliverMix(frames: 4, phaseStart: 4, pts: timespec(tv_sec: 1, tv_nsec: 500_000_000))
++        waitFor { engineSink.forwarded.last?.pcm == FixedConverter.payload
++                  && engineSink.forwarded.count > 2 }
++
++        let bytesPerFrame = PCMFormat.airplay.channels * MemoryLayout<Int16>.size
++        let fill = Array(engineSink.forwarded.dropFirst().dropLast())
++        #expect(fill.allSatisfy { $0.pcm.allSatisfy { $0 == 0 } }, "the fill is S16LE silence")
++        let fillFrames = fill.reduce(0) { $0 + $1.pcm.count / bytesPerFrame }
++        // round((0.5 s − 4/44100 s) × 44100) — rebuild 1's hole, still filled.
++        #expect(fillFrames == 22_046, "an idle second claim must not drop the first rebuild's fill")
++    }
++
+     // MARK: - T3 Part B: base-rate resample (44.1 kHz airplay feed → device-native rate)
+ 
+     /// Goertzel single-bin power on raw Float samples (no Int16 decode) — same

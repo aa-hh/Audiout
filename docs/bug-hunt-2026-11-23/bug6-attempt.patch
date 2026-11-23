@@ -1,0 +1,147 @@
+diff --git a/AudioutCore/Sources/AudioutCore/NativeDiscovery.swift b/AudioutCore/Sources/AudioutCore/NativeDiscovery.swift
+index 14f0f69..6f22ced 100644
+--- a/AudioutCore/Sources/AudioutCore/NativeDiscovery.swift
++++ b/AudioutCore/Sources/AudioutCore/NativeDiscovery.swift
+@@ -257,7 +257,14 @@ public final class NativeDiscovery: @unchecked Sendable {
+     /// local-playback intent.
+     /// `nil` disables the filter (hostname unavailable — fail open: a phantom
+     /// self row is annoying, a silently missing REAL speaker is a support case).
++    /// The hostname comparison only fires for a browser that supplies a real
++    /// mDNS host; the production browser passes the Bonjour instance name
++    /// instead, so `localAddresses` is what catches the receiver in production.
++    /// An empty address set fails open too.
+     private let localHostname: String?
++    /// This Mac's own IPv4 interface addresses, read on every resolve. A service
++    /// resolved to one of them is this Mac's own receiver.
++    private let localAddresses: () -> Set<String>
+     /// Instance names whose self-drop was already logged — one stderr line per
+     /// service, not one per re-announce (D6: drops are loud, but not spam).
+     private var loggedSelfDrops: Set<String> = []
+@@ -333,13 +340,16 @@ public final class NativeDiscovery: @unchecked Sendable {
+     public convenience init(browser: ServiceBrowsing? = nil,
+                             localHostname: String? = NativeDiscovery.systemLocalHostname(),
+                             removeGrace: TimeInterval = NativeDiscovery.defaultRemoveGrace) {
+-        self.init(browser: browser, localHostname: localHostname, removeGrace: removeGrace,
+-                  delayClock: NativeBackend.dispatchDelayClock)
++        self.init(browser: browser, localHostname: localHostname,
++                  localAddresses: NativeDiscovery.systemLocalIPv4Addresses,
++                  removeGrace: removeGrace, delayClock: NativeBackend.dispatchDelayClock)
+     }
+ 
+-    init(browser: ServiceBrowsing?, localHostname: String?, removeGrace: TimeInterval,
++    init(browser: ServiceBrowsing?, localHostname: String?,
++         localAddresses: @escaping () -> Set<String>, removeGrace: TimeInterval,
+          delayClock: @escaping NativeBackend.DelayClock) {
+         self.localHostname = localHostname.map(Self.normalizedHostname)
++        self.localAddresses = localAddresses
+         self.removeGrace = removeGrace
+         self.delayClock = delayClock
+         self.browser = browser ?? NetworkFrameworkBrowser()
+@@ -400,20 +410,44 @@ public final class NativeDiscovery: @unchecked Sendable {
+         return lowered.hasSuffix(".") ? String(lowered.dropLast()) : lowered
+     }
+ 
++    /// Dotted-quad of every IPv4 address on this Mac's interfaces, loopback
++    /// included; empty on failure. The production browser cannot learn a
++    /// service's mDNS host, so self is recognised by address.
++    static func systemLocalIPv4Addresses() -> Set<String> {
++        var addrs: UnsafeMutablePointer<ifaddrs>?
++        guard getifaddrs(&addrs) == 0 else { return [] }
++        defer { freeifaddrs(addrs) }
++        var result = Set<String>()
++        var cursor = addrs
++        while let ifa = cursor {
++            defer { cursor = ifa.pointee.ifa_next }
++            guard let sa = ifa.pointee.ifa_addr,
++                  sa.pointee.sa_family == UInt8(AF_INET) else { continue }
++            var addr = UnsafeRawPointer(sa).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
++            var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
++            guard inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else { continue }
++            result.insert(String(cString: buf))
++        }
++        return result
++    }
++
+     // MARK: Resolve / remove handling (all on `queue`)
+ 
+     private func handleResolve(_ service: ResolvedService) {
+         // Self-receiver filter (the owner's call, 2026-08-07): this Mac's own
+-        // AirPlay receiver announces under the machine's own mDNS hostname —
+-        // drop it BEFORE identity extraction so it never becomes an entry, an
+-        // event, or a popover row. Both service types funnel through here, so
+-        // one check covers `_airplay._tcp` and `_raop._tcp`. Logged once per
+-        // instance name (D6: no silent drops), then quiet across re-announces.
+-        if let localHostname, Self.normalizedHostname(service.hostname) == localHostname {
++        // AirPlay receiver announces under the machine's own mDNS hostname, and
++        // resolves to one of the machine's own interface addresses — either key
++        // marks it as self. Drop it BEFORE identity extraction so it never
++        // becomes an entry, an event, or a popover row. Both service types funnel
++        // through here, so one check covers `_airplay._tcp` and `_raop._tcp`.
++        // Logged once per instance name (D6: no silent drops), then quiet across
++        // re-announces.
++        let hostnameIsSelf = localHostname.map { Self.normalizedHostname(service.hostname) == $0 } ?? false
++        if hostnameIsSelf || localAddresses().contains(service.address) {
+             if loggedSelfDrops.insert(service.name).inserted {
+                 let message = "[Audiout] NativeDiscovery: dropping " +
+-                    "\(service.serviceType.rawValue) service \"\(service.name)\" — it is this " +
+-                    "Mac's own AirPlay receiver (\(service.hostname)); use the This Mac row instead\n"
++                    "\(service.serviceType.rawValue) service \"\(service.name)\" — it is served " +
++                    "from this Mac itself (\(service.hostname), \(service.address)); use the This Mac row instead\n"
+                 FileHandle.standardError.write(Data(message.utf8))
+             }
+             return
+diff --git a/AudioutCore/Tests/AudioutCoreTests/NativeDiscoveryTests.swift b/AudioutCore/Tests/AudioutCoreTests/NativeDiscoveryTests.swift
+index cd40f46..f9fe7d2 100644
+--- a/AudioutCore/Tests/AudioutCoreTests/NativeDiscoveryTests.swift
++++ b/AudioutCore/Tests/AudioutCoreTests/NativeDiscoveryTests.swift
+@@ -94,9 +94,11 @@ import AirPlayEngine
+     private func makeDiscovery(
+         browser: FakeBrowser,
+         localHostname: String? = NativeDiscovery.systemLocalHostname(),
++        localAddresses: Set<String> = [],
+         delayClock: @escaping NativeBackend.DelayClock = { _, queue, work in queue.async(execute: work) }
+     ) -> NativeDiscovery {
+         NativeDiscovery(browser: browser, localHostname: localHostname,
++                        localAddresses: { localAddresses },
+                         removeGrace: NativeDiscovery.defaultRemoveGrace, delayClock: delayClock)
+     }
+ 
+@@ -145,6 +147,38 @@ import AirPlayEngine
+                 "the self receiver never entered the known set either")
+     }
+ 
++    /// The production browser cannot learn a service's mDNS host (it passes the
++    /// Bonjour instance name), so the self-receiver filter also drops a service
++    /// whose resolved address is one of this Mac's own interface addresses, for
++    /// both service types. Ordering on the discovery queue makes the single
++    /// .appeared event prove the self resolves produced nothing.
++    /// Turns red if handleResolve stops comparing a service's resolved address with this Mac's own interface addresses.
++    @Test func selfAddressServicesAreNeverSurfaced() {
++        let browser = FakeBrowser()
++        let discovery = makeDiscovery(browser: browser, localHostname: "my-test-mac.local",
++                                      localAddresses: ["192.168.1.20"])
++        let events = EventCollector()
++        discovery.onEvent = { events.append($0) }
++        discovery.start()
++
++        browser.resolve(airplayService(id: "EE:CF:9C:BE:22:88", name: "My Test Mac",
++                                       features: ap2Features, address: "192.168.1.20"))
++        browser.resolve(raopService(id: "EE:CF:9C:BE:22:88", name: "EECF9CBE2288@My Test Mac",
++                                    address: "192.168.1.20"))
++        browser.resolve(airplayService(id: "AA:BB:CC:DD:EE:07", name: "Real Speaker",
++                                       features: ap2Features))
++
++        let received = events.wait(count: 1)
++        guard case .appeared(let device)? = received.first else {
++            Issue.record("expected exactly the real speaker's .appeared, got \(received)")
++            return
++        }
++        #expect(device.id == "AA:BB:CC:DD:EE:07",
++                "only the non-self address surfaced; the self receiver produced no event")
++        #expect(discovery.devices.map(\.id) == ["AA:BB:CC:DD:EE:07"],
++                "the self receiver never entered the known set either")
++    }
++
+     /// An `_airplay._tcp` resolve with valid AP2 feature bits appears as an
+     /// AP2-capable device with descriptor fields propagated verbatim, then a
+     /// re-resolve with changed facts fires `.updated`, then removal fires

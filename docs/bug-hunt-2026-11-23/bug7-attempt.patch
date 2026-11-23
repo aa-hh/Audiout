@@ -1,0 +1,155 @@
+diff --git a/AudioutCore/Sources/AudioutCore/NativeBackend+Tone.swift b/AudioutCore/Sources/AudioutCore/NativeBackend+Tone.swift
+index 6a039f1..cd64982 100644
+--- a/AudioutCore/Sources/AudioutCore/NativeBackend+Tone.swift
++++ b/AudioutCore/Sources/AudioutCore/NativeBackend+Tone.swift
+@@ -989,19 +989,24 @@ extension NativeBackend {
+         // is a few tens of ms; for a SECOND, faster receiver it is seconds, and
+         // it is the whole reason this leg exists.
+         //
+-        // Three receivers are deliberately skipped, and in every case the point
+-        // is that no delay line gets allocated: one still settling has no
+-        // trustworthy lead to subtract, one refused for exceeding `R_max` plays
+-        // unsynced by policy, and one whose remainder is zero already meets the
+-        // room. `setCastRoomDelayMs` hops to the manager's own queue, so this
+-        // stays a plain call from `stateQueue`.
++        // Two receivers are deliberately skipped: one still settling has no
++        // trustworthy lead to subtract, and one refused for exceeding `R_max`
++        // plays unsynced by policy. Every other receiver is sent its remainder
++        // clamped at zero, so a delay pushed earlier is taken back when the
++        // room falls to the receiver's own lead. A zero for a receiver that
++        // never had a delay allocates nothing, because the ring builds its line
++        // only on the first non-zero ask. `setCastRoomDelayMs` hops to the
++        // manager's own queue, so this stays a plain call from `stateQueue`.
++        //
++        // While a wizard or audition holds the Cast legs out of the room, the
++        // room no longer includes them, so every line keeps its delay for the
++        // return instead of being cut to zero and regrown afterwards.
++        if castTermHeldOutOfRoomLocked() { return }
+         let room = roomDelayLocked()
+         let refusedIDs = castRoomDelay.refusedIDs
+         for id in castSelectedIDs where !refusedIDs.contains(id) {
+             guard let settled = castRoomDelay.settledLeadMs(forID: id) else { continue }
+-            let remainder = room - settled
+-            guard remainder > 0 else { continue }
+-            castOutputManager?.setCastRoomDelayMs(remainder, forDeviceID: id)
++            castOutputManager?.setCastRoomDelayMs(Swift.max(0, room - settled), forDeviceID: id)
+         }
+     }
+ 
+diff --git a/AudioutCore/Sources/AudioutCore/NativeBackend.swift b/AudioutCore/Sources/AudioutCore/NativeBackend.swift
+index 2898da5..590ea2b 100644
+--- a/AudioutCore/Sources/AudioutCore/NativeBackend.swift
++++ b/AudioutCore/Sources/AudioutCore/NativeBackend.swift
+@@ -4160,7 +4160,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
+     /// not stretch the two lanes being compared.
+     private func roomTermsLocked() -> [Int?] {   // on stateQueue
+         guard let participants = companionTickParticipants else { return [_castTermMs, btRoomTermMs] }
+-        let cast = castSelectedIDs.contains(where: participants.contains) ? _castTermMs : nil
++        let cast = castTermHeldOutOfRoomLocked() ? nil : _castTermMs
+         let (latencies, trims) = btTrimLock.withLock { (btLatencyMsByUID, btTrimsByUID) }
+         let candidate = Self.btOnlyReferenceMs(latencies: latencies, trims: trims,
+                                                uids: btSelectedUIDs.filter(participants.contains))
+@@ -4169,6 +4169,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
+         return [cast, bt]
+     }
+ 
++    /// Whether a wizard or audition names participants and no selected Cast
++    /// receiver is one of them, so the Cast term is left out of the room.
++    func castTermHeldOutOfRoomLocked() -> Bool {   // on stateQueue
++        guard let participants = companionTickParticipants else { return false }
++        return !castSelectedIDs.contains(where: participants.contains)
++    }
++
+     /// The reference delay (ms) the Mac-local sink renders on (Wave-4 delay
+     /// agreement) — the room delay itself: the Mac has no intrinsic delay of
+     /// its own to subtract beyond the output latency the sink measures.
+diff --git a/AudioutCore/Tests/AudioutCoreTests/NativeBackendCastTests.swift b/AudioutCore/Tests/AudioutCoreTests/NativeBackendCastTests.swift
+index 9e9967c..e01d7ec 100644
+--- a/AudioutCore/Tests/AudioutCoreTests/NativeBackendCastTests.swift
++++ b/AudioutCore/Tests/AudioutCoreTests/NativeBackendCastTests.swift
+@@ -75,12 +75,18 @@ import CoreAudio
+         /// CAST-SYNC: every by-ear offset written onto the live feed, in order.
+         var castUserOffsets: [(ms: Int, id: String)] { lock.withLock { _castUserOffsets } }
+         private var _castUserOffsets: [(ms: Int, id: String)] = []
++        /// Every room delay pushed onto a receiver's feed, in order.
++        var castRoomDelays: [(ms: Int, id: String)] { lock.withLock { _castRoomDelays } }
++        private var _castRoomDelays: [(ms: Int, id: String)] = []
+ 
+         func setDevices(_ records: [CastDeviceRecord]) { lock.withLock { _deviceSets.append(records) } }
+         func setLevel(_ level: Double, forDevice id: String) { lock.withLock { _levels.append((level, id)) } }
+         func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String) {
+             lock.withLock { _castUserOffsets.append((ms, id)) }
+         }
++        func setCastRoomDelayMs(_ ms: Int, forDeviceID id: String) {
++            lock.withLock { _castRoomDelays.append((ms, id)) }
++        }
+         func retry(deviceID: String) { lock.withLock { _retries.append(deviceID) } }
+         func stopAll() { lock.withLock { _stopAllCount += 1 } }
+ 
+@@ -899,6 +905,66 @@ import CoreAudio
+         #expect(rig.manager.deviceSets.last == [Self.record], "and it is still being fed")
+     }
+ 
++    /// Two Cast receivers settle at different leads; the slower one is then
++    /// deselected and the room falls to the faster one's own lead, so the
++    /// delay pushed onto its feed has to be taken back.
++    /// Turns red if `pushCastFeedDelaysLocked` skips a receiver whose remainder is zero instead of sending it 0.
++    @Test func deselectingTheSlowerReceiverTakesTheFasterOnesFeedDelayBack() {
++        let rig = makeBackend()
++        rig.cast.fire([Self.record, Self.graceRecord])
++        waitFor {
++            Self.device(rig.backend, Self.record.id) != nil
++                && Self.device(rig.backend, Self.graceRecord.id) != nil
++        }
++
++        rig.backend.setOutputSet([Self.record.id, Self.graceRecord.id])
++        waitFor { rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs }
++
++        rig.manager.fireLead(id: Self.record.id, leadMs: 7_000, count: CastRoomDelay.settleSampleCount)
++        waitFor { rig.backend.localSinkReferenceDelayMs() == 7_000 }
++
++        rig.manager.fireLead(id: Self.graceRecord.id, leadMs: 5_800, count: CastRoomDelay.settleSampleCount)
++        drainQueues(rig.backend)
++        #expect(rig.manager.castRoomDelays.last { $0.id == Self.graceRecord.id }?.ms == 1_200)
++
++        rig.backend.setOutputSet([Self.graceRecord.id])
++        waitFor { rig.backend.localSinkReferenceDelayMs() == 5_800 }
++        drainQueues(rig.backend)
++        #expect(rig.manager.castRoomDelays.last { $0.id == Self.graceRecord.id }?.ms == 0)
++    }
++
++    /// A Mac wizard run holds two settled Cast receivers out of the room; the
++    /// faster one's feed delay must stay put for the return rather than be
++    /// cut to zero. Turns red if pushCastFeedDelaysLocked pushes feed delays
++    /// while the Cast term is held out of the room.
++    @Test func aWizardHoldLeavesTheCastFeedDelaysInPlace() {
++        let rig = makeBackend(withBT: true)
++        rig.cast.fire([Self.record, Self.graceRecord])
++        let btID = "C4-38-75-0E-BF-4A:output"
++        rig.bt.fire([BTDeviceSnapshot(id: btID, name: "Move 2", isConnected: true)])
++        waitFor {
++            Self.device(rig.backend, btID) != nil
++                && Self.device(rig.backend, Self.record.id) != nil
++                && Self.device(rig.backend, Self.graceRecord.id) != nil
++        }
++
++        rig.backend.setOutputSet([Self.record.id, Self.graceRecord.id, btID])
++        waitFor { rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs }
++
++        rig.manager.fireLead(id: Self.record.id, leadMs: 7_000, count: CastRoomDelay.settleSampleCount)
++        waitFor { rig.backend.localSinkReferenceDelayMs() == 7_000 }
++
++        rig.manager.fireLead(id: Self.graceRecord.id, leadMs: 5_800, count: CastRoomDelay.settleSampleCount)
++        drainQueues(rig.backend)
++        #expect(rig.manager.castRoomDelays.last { $0.id == Self.graceRecord.id }?.ms == 1_200)
++
++        rig.backend.setBTWizardTickActive(true, btTargetDeviceID: btID,
++                                          btReferenceDeviceID: NativeBackend.localDeviceID)
++        waitFor { rig.backend.localSinkReferenceDelayMs() == rig.backend.startBufferMs }
++        drainQueues(rig.backend)
++        #expect(rig.manager.castRoomDelays.last { $0.id == Self.graceRecord.id }?.ms == 1_200)
++    }
++
+     // MARK: - Lifecycle
+ 
+     @Test func stopStopsTheEnumeratorAndDetachesTheFeed() {

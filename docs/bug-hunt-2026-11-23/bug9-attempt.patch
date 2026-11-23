@@ -1,0 +1,153 @@
+diff --git a/AudioutCore/Sources/AudioutCore/NativeBackend.swift b/AudioutCore/Sources/AudioutCore/NativeBackend.swift
+index 2898da5..299872a 100644
+--- a/AudioutCore/Sources/AudioutCore/NativeBackend.swift
++++ b/AudioutCore/Sources/AudioutCore/NativeBackend.swift
+@@ -4213,8 +4213,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
+     ///    even one stays attached, the old master session (old buffer) survives
+     ///    and step 3's re-adds would join it, silently keeping the old latency.
+     /// 2. Set the new value on the engine (next master session reads it).
+-    /// 3. Re-add the same set (re-feeding descriptors + re-pushing volume/mute
+-    ///    for free) by driving HEAD's per-device converge back to on.
++    /// 3. Re-add the ids of that set the user still has selected (re-feeding
++    ///    descriptors + re-pushing volume/mute for free) by driving HEAD's
++    ///    per-device converge back to on.
+     ///
+     /// The teardown/re-add is driven through the SAME serialized `convergeDevice`
+     /// loop `setOutputSet` uses (design-doc work item 2: "re-add via existing
+@@ -4287,7 +4288,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
+             roomDelayChangedLocked(cause: "start_buffer")
+         }
+ 
+-        // 3. Re-add the same set via converge (best-effort, D4). Converge
++        // 3. Re-add the ids of that set the user still has selected, via converge (best-effort, D4). Converge
+         //    re-feeds the descriptor through its normal add path.
+         await withTaskGroup(of: Void.self) { group in
+             for item in streaming {
+@@ -4321,11 +4322,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
+         // Count what actually came back while we're on the queue: the D4 re-add is
+         // best-effort, so the caller can only claim "reconnected" for the devices
+         // still in `added`.
+-        let reconnected = stateQueue.sync { () -> Int in
++        let (reconnected, expected) = stateQueue.sync { () -> (Int, Int) in
+             for item in streaming { self.bufferReAdding.remove(item.id) }
+-            return streaming.filter { self.added.contains($0.id) }.count
++            let stillSelected = streaming.filter { self.expectedSelected.contains($0.id) }
++            return (stillSelected.filter { self.added.contains($0.id) }.count, stillSelected.count)
+         }
+-        return (reconnected: reconnected, expected: streaming.count)
++        return (reconnected: reconnected, expected: expected)
+     }
+ 
+     /// Set `desiredOn[id] = target`, claim the (awaited) `converging` slot, then
+@@ -4336,11 +4338,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
+     /// If another converge already owns the slot for this id, we just publish the
+     /// new target (`desiredOn`) and return: the running loop re-reads `desiredOn`
+     /// when its current op settles and chases our value, so the target is still
+-    /// honored — we simply don't double-drive the same id. A parked (`failedGate`)
++    /// honored — we simply don't double-drive the same id. A re-add is skipped
++    /// for an id no longer in `expectedSelected`. A parked (`failedGate`)
+     /// device stays parked on a teardown (nothing to remove) and is un-parked on a
+     /// re-add so it can be retried, mirroring `setOutputSet`.
+     func convergeToTarget(id: String, outputID: OutputID, on target: Bool) async {
+         let shouldDrive: Bool = stateQueue.sync {
++            // The user deselected this speaker during the apply: do not resurrect it.
++            if target, !self.expectedSelected.contains(id) { return false }
+             if target { self.failedGate.remove(id) } // re-add clears a park (retryable)
+             self.desiredOn[id] = target
+             // Reflect intent immediately, same as setOutputSet's eager set.
+diff --git a/AudioutCore/Sources/AudioutCore/OutputBackend.swift b/AudioutCore/Sources/AudioutCore/OutputBackend.swift
+index c43afc6..3cc7404 100644
+--- a/AudioutCore/Sources/AudioutCore/OutputBackend.swift
++++ b/AudioutCore/Sources/AudioutCore/OutputBackend.swift
+@@ -521,9 +521,8 @@ public protocol LatencyConfigurable: AnyObject {
+     /// completed (per-device failures follow the D4 best-effort rule: marked
+     /// unavailable, the rest proceed).
+     ///
+-    /// `expected` is how many devices were streaming when the apply began;
+-    /// `reconnected` is how many of those the best-effort re-add actually
+-    /// re-established. The settings pane needs both so it can only claim
++    /// `expected` is how many devices streaming when the apply began are still
++    /// selected when it finishes; `reconnected` is how many of those came back. The settings pane needs both so it can only claim
+     /// "Speakers reconnected" when they all did.
+     @discardableResult
+     func applyStartBuffer(ms: Int) async -> (reconnected: Int, expected: Int)
+diff --git a/AudioutCore/Sources/AudioutSettingsUI/AudioSettingsViewController.swift b/AudioutCore/Sources/AudioutSettingsUI/AudioSettingsViewController.swift
+index b774714..2d303d6 100644
+--- a/AudioutCore/Sources/AudioutSettingsUI/AudioSettingsViewController.swift
++++ b/AudioutCore/Sources/AudioutSettingsUI/AudioSettingsViewController.swift
+@@ -23,8 +23,9 @@ public struct LatencySettingModel {
+     /// UI ("Reconnecting speakers…" / "Speakers reconnected" vs plain "Applied").
+     public let isStreaming: @MainActor () -> Bool
+     /// Persist + apply the new value; returns when the reconnect pass is done,
+-    /// with how many of the devices that were streaming actually came back
+-    /// (`reconnected`) out of how many there were (`expected`).
++    /// with how many devices streaming when the apply began are still selected
++    /// when it finishes (`expected`) and how many of those came back
++    /// (`reconnected`).
+     public let apply: @MainActor (Int) async -> (reconnected: Int, expected: Int)
+ 
+     public init(optionsMs: [Int],
+diff --git a/AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift b/AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift
+index f477e56..abde556 100644
+--- a/AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift
++++ b/AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift
+@@ -3197,6 +3197,59 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
+         #expect(devs.first { $0.id == bad.id }?.isAvailable == false)
+     }
+ 
++    /// Of two streaming speakers, the one the user deselects while the apply's
++    /// teardown is in flight must stay off, while the other comes back: the
++    /// re-add pass skips only the deselected one, and the result counts the
++    /// survivor alone.
++    /// Turns red if convergeToTarget(on: true) stops checking expectedSelected before it writes desiredOn.
++    @Test func applyStartBufferDoesNotReaddASpeakerDeselectedMidApply() async {
++        let (backend, engine, discovery) = makeBackend()
++        let a = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Kitchen")
++        let b = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Lounge")
++
++        backend.start(); defer { backend.stop() }
++        await waitUntilStarted(engine)
++        _ = await collect(from: backend) { events in
++            events.filter { if case .deviceAdded = $0 { return true } else { return false } }.count >= 2
++        } after: {
++            discovery.fire(.appeared(a))
++            discovery.fire(.appeared(b))
++        }
++
++        backend.setOutputSet([a.id, b.id])
++        await pollUntil {
++            let devs = backend.devices
++            return devs.first { $0.id == a.id }?.isSelected == true
++                && devs.first { $0.id == b.id }?.isSelected == true
++        }
++        await pollUntil { !backend.test_isConverging }
++
++        let baseline = engine.ops.count
++        let hold = HoldPoint()
++        engine.onRemoveOutputBody = { id in
++            if id == a.outputID { await hold.hold() }
++        }
++
++        let apply = Task { await backend.applyStartBuffer(ms: 1500) }
++        await pollUntil { hold.entered }
++        backend.setOutputSet([b.id])
++        hold.open()
++        let result = await apply.value
++
++        let ops = Array(engine.ops.dropFirst(baseline))
++        #expect(ops.contains("setBuffer:1500"), "the buffer set still happens; ops: \(ops)")
++        #expect(ops.contains("add:\(b.outputID.rawValue)"),
++                "the still-selected speaker is re-added; ops: \(ops)")
++        #expect(!ops.contains("add:\(a.outputID.rawValue)"),
++                "a speaker deselected mid-apply must not be re-added; ops: \(ops)")
++        let devs = backend.devices
++        #expect(devs.first { $0.id == a.id }?.isSelected == false)
++        #expect(devs.first { $0.id == b.id }?.isSelected == true)
++        #expect(backend.test_expectedSelected == [b.id])
++        #expect(result.reconnected == 1)
++        #expect(result.expected == 1)
++    }
++
+     /// Connecting a device with NO prior slider touch must push a real starting
+     /// volume to the engine, sourced from the CONFIGURED connect-volume default —
+     /// NOT the Mac's current system level (G1-N1: Mac speakers often run loud, so

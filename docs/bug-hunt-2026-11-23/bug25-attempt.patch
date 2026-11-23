@@ -1,0 +1,160 @@
+diff --git a/AudioutCore/Sources/AudioutCore/NativeBackend.swift b/AudioutCore/Sources/AudioutCore/NativeBackend.swift
+index 2898da5..d4860a5 100644
+--- a/AudioutCore/Sources/AudioutCore/NativeBackend.swift
++++ b/AudioutCore/Sources/AudioutCore/NativeBackend.swift
+@@ -5836,10 +5836,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
+     }
+ 
+     /// Heuristic device kind. The TXT `model` key is BETTER signal than a name
+-    /// substring, so we prefer it and fall back to the service name.
++    /// substring, so we prefer it and fall back to the service name. A
++    /// `_raop._tcp` descriptor carries its product under `am` instead, read last
++    /// exactly as ``advertisedModel(for:)`` does.
+     static func kind(for discovered: DiscoveredDevice) -> Device.Kind {
+         let txt = discovered.descriptor.txtRecord
+-        let model = (txt["model"] ?? txt["Model"] ?? "").lowercased()
++        let model = (txt["model"] ?? txt["Model"] ?? txt["am"] ?? "").lowercased()
+         // Match against the human-facing name, not the raw engine descriptor:
+         // a `_raop._tcp` descriptor name still carries the "<12-hex>@" MAC prefix
+         // (see `NativeDiscovery.buildDevice`), whose hex digits could otherwise
+diff --git a/AudioutCore/Sources/AudioutCore/NativeDiscovery.swift b/AudioutCore/Sources/AudioutCore/NativeDiscovery.swift
+index 14f0f69..b915005 100644
+--- a/AudioutCore/Sources/AudioutCore/NativeDiscovery.swift
++++ b/AudioutCore/Sources/AudioutCore/NativeDiscovery.swift
+@@ -60,11 +60,13 @@ public struct DiscoveredDevice: Sendable, Equatable {
+     public let id: String
+ 
+     /// The engine-facing descriptor, ready to hand to
+-    /// ``AirPlayEngine/updateDiscovery(_:)`` (for AP2 devices). Built from the
+-    /// `_airplay._tcp` advertisement when the device has one; from `_raop._tcp`
+-    /// otherwise (AP1-only devices still get a descriptor so the app has their
+-    /// address/port for the future raop sender, but the engine is never asked to
+-    /// add them).
++    /// ``AirPlayEngine/updateDiscovery(_:)``. An AP2 device's is built from its
++    /// `_airplay._tcp` advertisement. A non-AP2 device's is built from its
++    /// `_raop._tcp` advertisement when it has one, so its `kind` is `.raop` and
++    /// the engine registers it with the raop sender; a non-AP2 device seen only
++    /// on `_airplay._tcp` keeps that advertisement's `.airplay` descriptor. The
++    /// app feeds every reachable device's descriptor to the engine, AP1 or AP2;
++    /// the engine's AP2 gate refuses a non-AP2 `.airplay` descriptor.
+     public let descriptor: DeviceDescriptor
+ 
+     /// The parsed 64-bit engine handle (from the `deviceid` TXT key). Always
+@@ -569,18 +571,29 @@ public final class NativeDiscovery: @unchecked Sendable {
+     // MARK: Building & classification (pure, static — easy to unit-test)
+ 
+     /// Rebuild the `DiscoveredDevice` for an entry from whichever service types
+-    /// currently advertise it. `_airplay._tcp` is preferred as the descriptor
+-    /// source (it carries the AP2 features/pk the engine needs); `_raop._tcp` is
+-    /// the AP1 fallback.
++    /// currently advertise it. An AP2 device takes its descriptor from
++    /// `_airplay._tcp` (it carries the AP2 features/pk the engine needs). A
++    /// non-AP2 device takes it from `_raop._tcp` when that leg exists, because a
++    /// `.airplay` descriptor goes to the AP2-gated backend, which refuses it; a
++    /// non-AP2 device with only an `_airplay._tcp` leg still gets the `.airplay`
++    /// descriptor.
+     private static func buildDevice(id: String, outputID: OutputID, entry: Entry, available: Bool) -> DiscoveredDevice {
+-        // Prefer the airplay advertisement for the engine descriptor; fall back
+-        // to raop so AP1-only devices still carry an address/port.
+-        let source = entry.airplay ?? entry.raop!
+         // AP2 is STICKY: a device that has EVER classified AP2 stays AP2 even
+         // after its `_airplay._tcp` advert times out (it's going offline, not
+         // downgrading — see `Entry.hasEverBeenAP2`). A device that has never
+         // advertised `_airplay._tcp` with the AP2 feature bits stays AP1-only.
+         let isAP2 = entry.hasEverBeenAP2 || classify(airplay: entry.airplay)
++        // AP2 devices use the airplay advertisement for the engine descriptor;
++        // a non-AP2 device uses raop when it has that leg, so the raop backend
++        // receives it, and falls back to airplay when raop is absent.
++        let source: ResolvedService
++        if isAP2, let airplay = entry.airplay {
++            source = airplay
++        } else if let raop = entry.raop {
++            source = raop
++        } else {
++            source = entry.airplay!
++        }
+         // A sticky-AP2 device that has gone offline (lost `_airplay._tcp`, only
+         // `_raop._tcp` lingers) keeps its last AP2-sourced descriptor and access
+         // — name, address, port, TXT, the advertised lock all stay put — so the
+@@ -593,8 +606,8 @@ public final class NativeDiscovery: @unchecked Sendable {
+             : descriptor(from: source)
+         // The `DeviceDescriptor` is the ENGINE-facing contract, so its `name`
+         // must stay the RAW resolved instance name — never stripped here. When
+-        // the descriptor comes from `_raop._tcp` (no `_airplay._tcp` advert to
+-        // prefer instead), that name is often MAC-decorated by the receiver's
++        // the descriptor comes from `_raop._tcp` (any non-AP2 device holding that
++        // leg), that name is often MAC-decorated by the receiver's
+         // stack ("6B2E52B73717@Dev Speaker" — see `deriveIDFromInstanceName`).
+         // The vendored RAOP backend re-parses exactly this form:
+         // `raop_device_cb` (raop.c) does `safe_hextou64(name, &id)` then
+diff --git a/AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift b/AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift
+index f477e56..11b888b 100644
+--- a/AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift
++++ b/AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift
+@@ -1991,6 +1991,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
+         #expect(NativeBackend.kind(for: ap2Device(name: "Kitchen", model: "S13")) == .generic)
+     }
+ 
++    /// Turns red if `kind(for:)` stops reading the `_raop._tcp` TXT key `am`: an
++    /// Apple TV 3 now takes its descriptor from that leg, which has no `model`
++    /// key, and one named "Living Room" falls to `.generic`.
++    @Test func aRaopDescriptorTakesItsKindFromAM() {
++        let appleTV = raopAMOnlyDevice(id: "58:55:CA:00:11:22", name: "Living Room", am: "AppleTV3,2")
++        #expect(NativeBackend.kind(for: appleTV) == .appleTV)
++    }
++
+     /// Selecting an AP1 device converges it through the SAME engine surface as AP2:
+     /// it is `addOutput`-ed, marked selected/available/connected, and accepts
+     /// volume + mute control (which reach `engine.setVolume`). `supportsAirPlay2`
+diff --git a/AudioutCore/Tests/AudioutCoreTests/NativeDiscoveryTests.swift b/AudioutCore/Tests/AudioutCoreTests/NativeDiscoveryTests.swift
+index cd40f46..ff26bec 100644
+--- a/AudioutCore/Tests/AudioutCoreTests/NativeDiscoveryTests.swift
++++ b/AudioutCore/Tests/AudioutCoreTests/NativeDiscoveryTests.swift
+@@ -510,6 +510,47 @@ import AirPlayEngine
+         discovery.stop()
+     }
+ 
++    /// A non-AP2 device advertising both legs (an Apple TV 3) must carry the
++    /// raop descriptor in either resolve order, so the raop backend receives it.
++    /// Turns red if buildDevice takes the descriptor from the _airplay._tcp leg of a device that is not AP2 while a _raop._tcp leg is held.
++    @Test func nonAP2DeviceWithBothLegsTakesItsDescriptorFromRaop() {
++        let browser = FakeBrowser()
++        let discovery = makeDiscovery(browser: browser)
++        let events = EventCollector()
++        discovery.onEvent = { events.append($0) }
++        discovery.start()
++
++        browser.resolve(airplayService(id: "58:55:CA:00:11:22", name: "Living Room", model: "AppleTV3,2", features: "0x5A7FFFF7,0x1E"))
++        guard case .appeared(let first)? = events.wait(count: 1).first else {
++            Issue.record("expected .appeared")
++            return
++        }
++        #expect(!first.isAirPlay2Supported)
++        #expect(first.descriptor.kind == .airplay)
++        #expect(first.descriptor.port == 7000)
++
++        browser.resolve(raopNameDerivedService(name: "5855CA001122@Living Room"))
++        #expect(events.count(afterDraining: discovery) == 2)
++        #expect(discovery.devices.count == 1)
++        if let merged = discovery.devices.first {
++            #expect(merged.descriptor.kind == .raop)
++            #expect(merged.descriptor.name == "5855CA001122@Living Room")
++            #expect(merged.descriptor.port == 5000)
++            #expect(merged.descriptor.txtRecord["deviceid"] == "58:55:CA:00:11:22")
++            #expect(!merged.isAirPlay2Supported)
++            #expect(merged.isAvailable)
++        }
++
++        browser.resolve(raopNameDerivedService(name: "AABBCCDDEE77@Den"))
++        browser.resolve(airplayService(id: "AA:BB:CC:DD:EE:77", name: "Den", features: nonAP2Features))
++        #expect(events.count(afterDraining: discovery) == 3)
++        let den = discovery.devices.first { $0.id == "AA:BB:CC:DD:EE:77" }
++        #expect(den?.descriptor.kind == .raop)
++        #expect(den?.descriptor.name == "AABBCCDDEE77@Den")
++
++        discovery.stop()
++    }
++
+     // MARK: Sticky-AP2 (offline vs downgrade)
+ 
+     /// THE BUG: an AP2 device (advertising both `_airplay._tcp` and `_raop._tcp`)

@@ -1,0 +1,107 @@
+diff --git a/AudioutCore/AGENTS-HISTORY.md b/AudioutCore/AGENTS-HISTORY.md
+index 01e4d68..86a84f7 100644
+--- a/AudioutCore/AGENTS-HISTORY.md
++++ b/AudioutCore/AGENTS-HISTORY.md
+@@ -927,3 +927,4 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
+ | `Analytics` | Opt-in anonymous usage-analytics facade; sink installed by the app target. |
+ 
+ - 2026-10-06: the wizard's two sounds changed. The mic probe is one `SyncProbe.lane` (a 600 → 150 Hz glide with 2nd/3rd partials over a 110 + 165 Hz drone) played by the Bluetooth speaker first and the reference 4.5 s later, raised 6 or 12 dB when the lead-in hears a loud room; the by-ear ticks are mallet notes, 440 Hz on the Mac side and 660 Hz on the Bluetooth side, 15 ms fundamental decay. The `mic-probe-spike` and `AlignmentTickInjector` rows above describe the earlier sweeps and click.
++- 2026-11-23: `NativeCaptureCoordinator.start()` now replays a rebuild coalesced during its own create, so `onDeviceRateRebuild` can fire once inside the first `start()` — for that device-caused replay only, never for the initial create itself.
+diff --git a/AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift b/AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift
+index db5c6ca..655b819 100644
+--- a/AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift
++++ b/AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift
+@@ -255,8 +255,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+     /// change (`handleDeviceChange()`), or an exclusion-list change
+     /// (`updateRouting(...)`) — arrives while we're already mid-rebuild
+     /// (`.creatingTap`), so it isn't silently dropped. The in-flight
+-    /// `recreateTap()` replays a fresh rebuild once it lands back in
+-    /// `.capturing`, coalescing however many were dropped into one retry.
++    /// `start()` or `recreateTap()` replays a fresh rebuild once it lands
++    /// back in `.capturing`, coalescing however many were dropped into one retry.
+     /// Confined to `queue`, which is also ``TapRebuildCoalescer``'s lock
+     /// contract. See dev/notes/stability-audit-2026-07-18.md §C6.
+     ///
+@@ -706,6 +706,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+             switch _state {
+             case .idle, .failed:
+                 self.transition(to: .creatingTap)
++                // The new tap reads the current device and format, so a trigger left over from an earlier attempt has nothing to replay.
++                _ = rebuildCoalescer.takePending()
+                 return (true, resolveExcludedProcessObjectIDs())
+             default:
+                 return (false, []) // already in flight — idempotent
+@@ -723,19 +725,22 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+             let format = try newTap.createAndStart(
+                 muteBehavior: muteBehavior, excludedProcessObjectIDs: claim.excludedProcessObjectIDs)
+             try Self.validate(format)
+-            let orphan: SystemAudioTap? = queue.sync {
++            let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
+                 // A stop() may have raced in while we were creating: don't clobber an
+                 // idle/stopping state with a fresh capturing one — stop() wins.
+                 guard case .creatingTap = _state else {
+-                    return newTap // orphan; tear down OUTSIDE the lock
++                    return (newTap, false) // orphan; tear down OUTSIDE the lock
+                 }
+                 self.tap = newTap
+                 self.converter = makeConverter(format)
+                 self.publishBufferSnapshot()
+                 self.lastExcludedObjects = claim.excludedProcessObjectIDs // W1-T7 compare-before-rebuild baseline
+                 self.transition(to: .capturing(format))
+-                return nil
++                // A trigger that arrived during the initial create is replayed once
++                // here, as in recreateTap.
++                return (nil, rebuildCoalescer.takePending())
+             }
++            let orphan = commit.orphan
+             orphan?.teardown()
+             // T7 EDGE 1 — join the engine thread to the AGGREGATE's I/O workgroup,
+             // now that the aggregate exists and we have actually committed to
+@@ -746,6 +751,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
+             if orphan == nil, let id = newTap.workgroupDeviceID {
+                 workgroup?.join(deviceID: id)
+             }
++            if commit.replay {
++                Telemetry.log(.captureWS, "rebuild_replay", [:])
++                recreateTap(cause: .deviceOrRateChange)
++            }
+         } catch {
+             // createAndStart may have created the tap/aggregate before failing on a
+             // later step; tear it down so we don't leak a system-wide process tap.
+diff --git a/AudioutCore/Tests/AudioutCoreTests/NativeCaptureCoordinatorTests.swift b/AudioutCore/Tests/AudioutCoreTests/NativeCaptureCoordinatorTests.swift
+index 475408e..f472048 100644
+--- a/AudioutCore/Tests/AudioutCoreTests/NativeCaptureCoordinatorTests.swift
++++ b/AudioutCore/Tests/AudioutCoreTests/NativeCaptureCoordinatorTests.swift
+@@ -695,6 +695,32 @@ extension SerializedSharedState {
+         coordinator.stop()
+     }
+ 
++    // Turns red if start()'s commit stops taking the coalesced rebuild flag and replaying it.
++    @Test func deviceChangeDuringInitialStartIsReplayedOnce() {
++        let tap = FakeTap()
++        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
++        let lock = NSLock()
++        var deviceRateRebuilds = 0
++        coordinator.onDeviceRateRebuild = { lock.withLock { deviceRateRebuilds += 1 } }
++
++        tap.onCreateAndStart = { [weak tap] in
++            guard let tap, tap.creates == 1 else { return }
++            tap.fireDeviceChange()
++        }
++
++        coordinator.start()
++        #expect(coordinator.state == .capturing(tap.format))
++        #expect(tap.creates == 2, "the device change during the initial create is replayed once")
++        #expect(lock.withLock { deviceRateRebuilds } == 1)
++
++        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.test.excluded"])
++        #expect(tap.creates == 3, "the exclusion rebuild is one create, with no leftover replay")
++        #expect(lock.withLock { deviceRateRebuilds } == 1)
++        #expect(coordinator.state == .capturing(tap.format))
++
++        coordinator.stop()
++    }
++
+     // MARK: - T1: nominal-sample-rate renegotiation drives a tap rebuild (Part A1).
+     //
+     // The tapped output device's nominal-sample-rate renegotiation (44.1<->48kHz —

@@ -251,12 +251,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// read only by ``handleBuffer(_:)``.
     private var _bufferSnapshot: BufferSnapshot = .empty
 
-    /// STABILITY(C6): set when a rebuild trigger — a default-output-device
-    /// change (`handleDeviceChange()`), or an exclusion-list change
-    /// (`updateRouting(...)`) — arrives while we're already mid-rebuild
+    /// STABILITY(C6): set when a rebuild trigger that reaches
+    /// `recreateTap(cause:)` — a default-output-device change
+    /// (`handleDeviceChange()`) — arrives while we're already mid-rebuild
     /// (`.creatingTap`), so it isn't silently dropped. The in-flight
     /// `recreateTap()` replays a fresh rebuild once it lands back in
     /// `.capturing`, coalescing however many were dropped into one retry.
+    /// An exclusion change arriving at `updateRouting(...)` or a sink setter
+    /// during `.creatingTap` is not coalesced: the
+    /// `rebuildIfExclusionObjectsChanged()` call after the commit applies it.
     /// Confined to `queue`, which is also ``TapRebuildCoalescer``'s lock
     /// contract. See dev/notes/stability-audit-2026-07-18.md §C6.
     ///
@@ -691,7 +694,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     public func start() {
         // Claim: only proceed from idle/failed; move to .creatingTap and snapshot
         // the exclusion pids (queue-confined) under a SHORT lock.
-        let claim: (proceed: Bool, excludedProcessObjectIDs: Set<AudioObjectID>) = queue.sync {
+        let claim: (
+            proceed: Bool, excludedProcessObjectIDs: Set<AudioObjectID>, inputs: ExclusionInputs?
+        ) = queue.sync {
             #if canImport(AudioToolbox)
             // First start of this coordinator's life arms the system-wide
             // process-object-list listener (idempotent) — the signal that drives
@@ -706,9 +711,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             switch _state {
             case .idle, .failed:
                 self.transition(to: .creatingTap)
-                return (true, resolveExcludedProcessObjectIDs())
+                return (true, resolveExcludedProcessObjectIDs(), exclusionInputsLocked())
             default:
-                return (false, []) // already in flight — idempotent
+                return (false, [], nil) // already in flight — idempotent
             }
         }
         guard claim.proceed else { return }
@@ -723,18 +728,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             let format = try newTap.createAndStart(
                 muteBehavior: muteBehavior, excludedProcessObjectIDs: claim.excludedProcessObjectIDs)
             try Self.validate(format)
-            let orphan: SystemAudioTap? = queue.sync {
+            let (orphan, inputsMoved): (SystemAudioTap?, Bool) = queue.sync {
                 // A stop() may have raced in while we were creating: don't clobber an
                 // idle/stopping state with a fresh capturing one — stop() wins.
                 guard case .creatingTap = _state else {
-                    return newTap // orphan; tear down OUTSIDE the lock
+                    return (newTap, false) // orphan; tear down OUTSIDE the lock
                 }
                 self.tap = newTap
                 self.converter = makeConverter(format)
                 self.publishBufferSnapshot()
                 self.lastExcludedObjects = claim.excludedProcessObjectIDs // W1-T7 compare-before-rebuild baseline
                 self.transition(to: .capturing(format))
-                return nil
+                return (nil, claim.inputs != exclusionInputsLocked())
             }
             orphan?.teardown()
             // T7 EDGE 1 — join the engine thread to the AGGREGATE's I/O workgroup,
@@ -745,6 +750,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // state lock, like every other handler call in this file.
             if orphan == nil, let id = newTap.workgroupDeviceID {
                 workgroup?.join(deviceID: id)
+            }
+            // A stored exclusion input that changed during the create is applied here.
+            if orphan == nil && inputsMoved {
+                rebuildIfExclusionObjectsChanged()
             }
         } catch {
             // createAndStart may have created the tap/aggregate before failing on a
@@ -843,8 +852,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// unrelated tick) never recreates the tap. When it does differ: if a
     /// tap is currently `.capturing`, it's recreated immediately so the new
     /// exclusion list takes effect without waiting for the next device
-    /// change; otherwise the new set is simply stored for the next
-    /// `start()`.
+    /// change; when idle the new set is stored for the next `start()`, and
+    /// when a tap is `.creatingTap` it is applied right after the in-flight
+    /// create commits.
     ///
     /// A later task (T6) is expected to call this from an AppKit-importing
     /// layer (`NativeBackend`/`AppDelegate`) whenever `AppRoutingController`
@@ -1115,6 +1125,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         return result
     }
 
+    /// The stored inputs ``resolveExcludedProcessObjectIDs()`` resolves from.
+    /// A create compares the value read at its claim with the value at its
+    /// commit, so only a stored-input change during the create triggers the
+    /// post-commit rebuild; process-list churn stays with the debounced path.
+    private struct ExclusionInputs: Equatable {
+        let bundleIDs: Set<String>
+        let syncedLocalPID: pid_t?
+        let btPID: pid_t?
+        let castPID: pid_t?
+    }
+
+    private func exclusionInputsLocked() -> ExclusionInputs {   // must hold `queue`
+        ExclusionInputs(
+            bundleIDs: currentExcludedBundleIDs, syncedLocalPID: syncedLocalRenderPID,
+            btPID: btRenderPID, castPID: castRenderPID)
+    }
+
     /// Shared core of both exclusion-resolve call sites
     /// (``resolveExcludedProcessObjectIDs()`` and ``rebuildIfExclusionObjectsChanged()``'s
     /// off-lock resolve): resolves every bundle id in `bundleIDs` via
@@ -1210,9 +1237,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// a stale baseline that suppresses a later one. Recreates as a benign
     /// `.exclusionChange` (device/clock unchanged → no AirPlay session reset).
     private func rebuildIfExclusionObjectsChanged() {
-        let snapshot: (bundleIDs: Set<String>, renderPID: pid_t?, btPID: pid_t?)? = queue.sync {
+        let snapshot: (bundleIDs: Set<String>, renderPID: pid_t?, btPID: pid_t?, castPID: pid_t?)? = queue.sync {
             guard case .capturing = _state else { return nil }
-            return (currentExcludedBundleIDs, syncedLocalRenderPID, btRenderPID)
+            return (currentExcludedBundleIDs, syncedLocalRenderPID, btRenderPID, castRenderPID)
         }
         guard let snapshot else { return }
 
@@ -1225,6 +1252,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         if let btPID = snapshot.btPID {
             newObjects.formUnion(processResolver.resolve(pid: btPID).map(\.objectID))
         }
+        if let castPID = snapshot.castPID {
+            newObjects.formUnion(processResolver.resolve(pid: castPID).map(\.objectID))
+        }
 
         let needsRecreate: Bool = queue.sync {
             guard case .capturing = _state else { return false }
@@ -1232,7 +1262,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // updateRouting/setSyncedLocalSink/setBTSink already owns the rebuild.
             guard currentExcludedBundleIDs == snapshot.bundleIDs,
                   syncedLocalRenderPID == snapshot.renderPID,
-                  btRenderPID == snapshot.btPID else { return false }
+                  btRenderPID == snapshot.btPID,
+                  castRenderPID == snapshot.castPID else { return false }
             guard newObjects != lastExcludedObjects else { return false } // COMPARE-BEFORE-REBUILD
             return true
         }
@@ -2315,7 +2346,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // dev/notes/stability-audit-2026-07-18.md §C6.
         let claim: (
             proceed: Bool, old: SystemAudioTap?, excludedProcessObjectIDs: Set<AudioObjectID>,
-            previousRate: Int?, previousDeviceID: AudioObjectID?
+            previousRate: Int?, previousDeviceID: AudioObjectID?, inputs: ExclusionInputs?
         ) = queue.sync {
             guard case .capturing(let oldFormat) = _state else {
                 if case .creatingTap = _state {
@@ -2326,7 +2357,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                     // "rebuild_replay" line logged once it's replayed below).
                     Telemetry.log(.captureWS, "rebuild_coalesced", ["reason": "already_rebuilding"])
                 }
-                return (false, nil, [], nil, nil)
+                return (false, nil, [], nil, nil, nil)
             }
             let t = self.tap
             self.tap = nil
@@ -2344,7 +2375,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // Snapshot what the OUTGOING tap was anchored to, before `teardown()`
             // clears it — the baseline the post-commit compare needs to tell a
             // re-anchor from a like-for-like rebuild.
-            return (true, t, resolveExcludedProcessObjectIDs(), oldFormat.sampleRate, t?.tappedDeviceID)
+            return (
+                true, t, resolveExcludedProcessObjectIDs(), oldFormat.sampleRate, t?.tappedDeviceID,
+                exclusionInputsLocked())
         }
         // Not capturing (racing a stop()/failure): nothing to do.
         guard claim.proceed else { return }
@@ -2426,7 +2459,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             if makeBeforeBreak {
                 old?.teardown()
             }
-            let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
+            let commit: (orphan: SystemAudioTap?, replay: Bool, inputsMoved: Bool) = queue.sync {
                 // A stop() may have raced in while we were recreating: don't clobber
                 // an idle/stopping state with a fresh capturing one.
                 guard case .creatingTap = _state else {
@@ -2438,7 +2471,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                     // DEADLOCK — newTap's IO callback (handleBuffer) synchronously took
                     // `queue` — and while handleBuffer no longer touches `queue` at
                     // all, the rule is unchanged.
-                    return (newTap, false)
+                    return (newTap, false, false)
                 }
                 self.tap = newTap
                 self.converter = makeConverter(format)
@@ -2451,7 +2484,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 // STABILITY(C6): a rebuild trigger landed while we were rebuilding —
                 // replay it once now that we're capturing again, coalescing however
                 // many were dropped into a single retry.
-                return (nil, rebuildCoalescer.takePending())
+                return (nil, rebuildCoalescer.takePending(), claim.inputs != exclusionInputsLocked())
             }
             commit.orphan?.teardown()
             // T7 EDGE 3, SECOND HALF — join the NEW aggregate's workgroup, only once
@@ -2512,6 +2545,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 // bounces, never on a plain connect (the sink-attach rebuild lands
                 // while `.capturing`, not `.creatingTap`, so it is never coalesced).
                 recreateTap(cause: .deviceOrRateChange)
+            } else if commit.orphan == nil && commit.inputsMoved {
+                // A stored exclusion input that changed during the create is applied here.
+                rebuildIfExclusionObjectsChanged()
             }
         } catch {
             // T7: nothing to unwind here — the old membership was already left at

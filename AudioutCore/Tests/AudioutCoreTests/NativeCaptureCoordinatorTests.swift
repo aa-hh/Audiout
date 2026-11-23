@@ -979,6 +979,62 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
+    /// An exclusion change that arrives while the whole-system tap is being built
+    /// must reach the live tap. Turns red if `start()` or `recreateTap` stops
+    /// calling `rebuildIfExclusionObjectsChanged()` after a successful commit.
+    @Test func exclusionChangeDuringTapCreateIsAppliedAfterCommit() {
+        let route = AppRoute(bundleID: "com.app.a", displayName: "App A", destination: .device(id: "speaker-1"))
+
+        // Part A: the initial start is in flight when the change arrives.
+        do {
+            let tap = FakeTap()
+            let coordinator = makeCoordinator(
+                tap: tap, sink: SpySink(), converter: FakeConverter(),
+                processResolver: singleProcessResolver(["com.app.a": 111]))
+            let lock = NSLock()
+            var resets = 0
+            coordinator.onDeviceRateRebuild = { lock.withLock { resets += 1 } }
+            tap.onCreateAndStart = {
+                if tap.creates == 1 {
+                    coordinator.updateRouting(appRoutes: [route], excludedBundleIDs: [])
+                }
+            }
+            coordinator.start()
+            #expect(tap.creates == 2, "the commit is followed by one exclusion rebuild")
+            #expect(tap.excludedProcessObjectIDs == [111], "the routed-away app is excluded from the live tap")
+            #expect(coordinator.state == .capturing(tap.format))
+            #expect(lock.withLock { resets } == 0, "an exclusion rebuild fires no session reset")
+            tap.onCreateAndStart = nil
+            coordinator.stop()
+        }
+
+        // Part B: a recreate is in flight when the change arrives.
+        do {
+            let tap = FakeTap()
+            let coordinator = makeCoordinator(
+                tap: tap, sink: SpySink(), converter: FakeConverter(),
+                processResolver: singleProcessResolver(["com.app.a": 111]))
+            let lock = NSLock()
+            var resets = 0
+            coordinator.onDeviceRateRebuild = { lock.withLock { resets += 1 } }
+            coordinator.start()
+            #expect(tap.creates == 1)
+            #expect(tap.excludedProcessObjectIDs == [])
+            tap.onCreateAndStart = {
+                if tap.creates == 2 {
+                    coordinator.updateRouting(appRoutes: [route], excludedBundleIDs: [])
+                }
+            }
+            tap.fireDeviceChange()
+            #expect(tap.creates == 3, "the device-change rebuild is followed by one exclusion rebuild")
+            #expect(tap.excludedProcessObjectIDs == [111], "the routed-away app is excluded from the live tap")
+            #expect(coordinator.state == .capturing(tap.format))
+            #expect(lock.withLock { resets } == 1, "only the device change resets; the exclusion rebuild does not")
+            tap.onCreateAndStart = nil
+            coordinator.stop()
+        }
+    }
+
     /// THE LEAK FIX (T3): a multi-process app (Firefox-shaped — a silent main
     /// process plus an audio-emitting child with no bundle id of its own) must
     /// have BOTH process objects excluded from the whole-system mix. Excluding

@@ -387,6 +387,33 @@ import Testing
                 Comment(rawValue: "the deadline was not re-armed by the fetch, saw \(log.all)"))
     }
 
+    /// A receiver that drops its sender and refuses the first reconnect.
+    /// Turns red if `fail(_:_:stage:)` stops handing a failed automatic reconnect attempt to `handleDrop` while `autoRetryCount` is 1 or 2, which ends the run at `.failed` after one refused connect.
+    @Test func aRefusedReconnectDoesNotEndTheReconnectRun() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake()
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+        manager.setDevices([record(endpoint)])
+        try #require(waitUntil(timeout: 10) { log.contains(.playing) },
+                     Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+
+        fake.dropSenders(refusingNext: 1)
+        _ = waitUntil(timeout: 20) {
+            log.all.filter { $0 == .playing }.count >= 2
+                || log.all.contains { if case .failed = $0 { return true } else { return false } }
+        }
+
+        #expect(log.all == [.connecting, .playing, .connecting, .playing],
+                Comment(rawValue: "expected one reconnect run to recover, saw \(log.all)"))
+        #expect(fake.events.filter { $0 == "refused" }.count == 1,
+                Comment(rawValue: "expected exactly one refusal, saw \(fake.events)"))
+        #expect(fake.events.filter { $0 == "connect" }.count == 2,
+                Comment(rawValue: "expected two accepted connects, saw \(fake.events)"))
+    }
+
     @Test func fixedReceiverReportsVolumeLagThenNilOnDeselect() throws {
         guard #available(macOS 15, *) else { return }
         // A 2 s buffer with no early rebuffer: the receiver settles a whole

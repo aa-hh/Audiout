@@ -123,6 +123,8 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// status the receiver produces on its own — either edge of a stall, or a
     /// fetch that failed — has no request in hand to reply to.
     private var mediaTarget: (message: CastMessage, session: Session)?
+    /// How many upcoming sender connections `accept` still turns away.
+    private var refusalsLeft = 0
 
     /// One sender connection: its frame reader and the endpoints it has opened
     /// a virtual connection to.
@@ -169,6 +171,24 @@ public final class FakeCastReceiver: @unchecked Sendable {
         delayClock(after, queue, DispatchWorkItem { [weak self] in self?.beginStall(duration) })
     }
 
+    /// Drops every sender connection now and turns away the next `count`
+    /// connections, the way a receiver that fell off the network does. The
+    /// app and playback state go with the senders, as after a STOP.
+    public func dropSenders(refusingNext count: Int) {
+        queue.async { [self] in
+            refusalsLeft = count
+            fetch?.cancel()
+            fetch = nil
+            applications.removeAll()
+            playerState = "IDLE"
+            idleReason = "CANCELLED"
+            currentMediaSessionID = nil
+            mediaTarget = nil
+            resetPlayback()
+            for session in sessions.values { session.connection.cancel() }
+        }
+    }
+
     public var pongCount: Int { stateLock.withLock { _pongCount } }
 
     /// How many `SET_VOLUME` messages arrived. A `fixed` receiver must see
@@ -176,7 +196,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
     public var setVolumeCount: Int { stateLock.withLock { _setVolumeCount } }
 
     /// Sender-connection and app-lifecycle milestones in arrival order —
-    /// `connect`, `close`, `LAUNCH`, `STOP`. What a relaunch-ordering test
+    /// `connect`, `refused`, `close`, `LAUNCH`, `STOP`. What a relaunch-ordering test
     /// reads to prove the second LAUNCH followed the first channel's close.
     public var events: [String] { stateLock.withLock { _events } }
 
@@ -304,6 +324,12 @@ public final class FakeCastReceiver: @unchecked Sendable {
     // MARK: - One sender connection
 
     private func accept(_ connection: NWConnection) {
+        if refusalsLeft > 0 {
+            refusalsLeft -= 1
+            record("refused")
+            connection.cancel()
+            return
+        }
         let session = Session(connection: connection)
         sessions[ObjectIdentifier(connection)] = session
         record("connect")

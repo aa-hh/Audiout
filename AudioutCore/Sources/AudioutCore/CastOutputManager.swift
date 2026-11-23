@@ -998,7 +998,18 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         }
     }
 
+    /// While an automatic reconnect run has attempts left, a failed attempt
+    /// counts as the next drop; otherwise the session fails with this error's
+    /// own cause.
     private func fail(_ session: Session, _ error: Error, stage: Stage) {
+        if (1..<3).contains(session.autoRetryCount) {
+            handleDrop(
+                id: session.record.id,
+                generation: session.generation,
+                reason: String(describing: error)
+            )
+            return
+        }
         teardown(session)
         setState(session, .failed(Self.failure(for: error, stage: stage)))
     }

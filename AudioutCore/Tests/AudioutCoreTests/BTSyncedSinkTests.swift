@@ -299,6 +299,8 @@ import AVFoundation
                                 pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
                                               tv_nsec: Int(ptsNanos % 1_000_000_000)))
             }
+            // The producer's telemetry block on the graph queue holds the state lock the render only tries.
+            sink.test_waitForPendingRebuild()
             let cycle = renderCycle(sink, at: ptsNanos, frames: chunk)
             if let last = cycle.samples.last, last != 0 { played = last }
             clock += chunk
@@ -352,6 +354,33 @@ import AVFoundation
         #expect(sink.hasStartedRendering, "no rebuild: the session is still released")
         let after = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
         #expect(abs(after - 290) < 1, "the live seek applied it: \(after) ms")
+    }
+
+    // Turns red if setOffsetMs hands the sink the raw latency difference instead of the change in the clamped delay: the ring then sits at 700 ms where the formula says 500.
+    @Test func resettingALatencyAboveTheReference_playsTheFormulaDelay() throws {
+        let (manager, sink) = try Self.btOnlySink(referenceMs: 500, latencyMs: 700)
+        defer { manager.stop() }
+        var clock = 0
+        let before = Self.streamRealTime(manager, sink, clock: &clock, ms: 1_000)
+        #expect(abs(before - 0) < 1, "anchored on the zero clamp: \(before) ms")
+
+        manager.setOffsetMs(0, forDeviceUID: "dev-a")
+        #expect(sink.hasStartedRendering)
+        let after = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
+        #expect(abs(after - 500) < 1, "reset plays the formula delay: \(after) ms")
+    }
+
+    // Turns red if setTrimMs hands the sink the raw trim difference instead of the change in the clamped delay: the ring then sits at 300 ms where the formula says 100.
+    @Test func aTrimRaisedThroughTheZeroClamp_playsTheFormulaDelay() throws {
+        let (manager, sink) = try Self.btOnlySink(referenceMs: 500, latencyMs: 700)
+        defer { manager.stop() }
+        var clock = 0
+        let before = Self.streamRealTime(manager, sink, clock: &clock, ms: 1_000)
+        #expect(abs(before - 0) < 1, "anchored on the zero clamp: \(before) ms")
+
+        manager.setTrimMs(300, forDeviceUID: "dev-a")
+        let after = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
+        #expect(abs(after - 100) < 1, "the trim plays the formula delay: \(after) ms")
     }
 
     // MARK: - BT-SYNC-DRAWER T2: live trim as a delay-line seek
@@ -571,14 +600,17 @@ import AVFoundation
     }
 
     /// A manager with one device, an AirPlay reference and `presentationDelayMs`
-    /// of 100 — i.e. a 100 ms target — already fed one ramp.
+    /// (default 100 — i.e. a 100 ms target) — already fed one ramp.
     ///
     /// The caller MUST keep the manager alive for the whole test: its `deinit`
     /// stops every sink, which clears the anchor, and a sink whose anchor has
     /// gone renders silence forever after.
-    static func anchoredSink(uid: String = "dev-a") throws -> (BTSyncedSink, BTDeviceSink, [Float]) {
+    static func anchoredSink(
+        uid: String = "dev-a", presentationDelayMs: Int = 100
+    ) throws -> (BTSyncedSink, BTDeviceSink, [Float]) {
         let manager = BTSyncedSink(
-            renderSampleRate: sampleRate, channelCount: 1, presentationDelayMs: { 100 })
+            renderSampleRate: sampleRate, channelCount: 1,
+            presentationDelayMs: { presentationDelayMs })
         manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
         manager.setDevices([.init(deviceID: 0, uid: uid)])
         let ramp = enqueueRamp(into: manager)
@@ -1144,11 +1176,13 @@ extension SerializedSharedState {
             Telemetry._installTestSink { capture.append($0) }
             defer { Telemetry._installTestSink(nil) }
 
-            // 30_000 frames = 625 ms buffered behind a 100 ms gate.
-            let (manager, sink, _) = try BTSyncedSinkTests.anchoredSink()
+            // 30_000 frames = 625 ms buffered behind a 700 ms gate. The
+            // reference is 700 ms so the 600 ms of latency is a real 600 ms
+            // shorter delay.
+            let (manager, sink, _) = try BTSyncedSinkTests.anchoredSink(presentationDelayMs: 700)
             defer { manager.stop() }
             _ = BTSyncedSinkTests.renderCycle(
-                sink, at: BTSyncedSinkTests.anchorNanos + 100_000_000)
+                sink, at: BTSyncedSinkTests.anchorNanos + 700_000_000)
 
             // 600 ms of extra latency asks for a 600 ms forward seek out of a
             // ring holding ~614 ms — inside it, but not by the safety margin.
@@ -1168,10 +1202,11 @@ extension SerializedSharedState {
         /// The invariant the clamp exists for, over a whole run's worth of
         /// candidates: no sequence of previews can empty the ring.
         @Test func noSequenceOfLatencyPreviewsCanSeekTheRingDry() throws {
-            let (manager, sink, _) = try BTSyncedSinkTests.anchoredSink()
+            // The reference is above every candidate so each preview is a real seek.
+            let (manager, sink, _) = try BTSyncedSinkTests.anchoredSink(presentationDelayMs: 2_000)
             defer { manager.stop() }
             _ = BTSyncedSinkTests.renderCycle(
-                sink, at: BTSyncedSinkTests.anchorNanos + 100_000_000)
+                sink, at: BTSyncedSinkTests.anchorNanos + 2_000_000_000)
 
             for (i, latencyMs) in [200, 900, 1_500, 2_000, 400, 1_800, 0].enumerated() {
                 // The live producer keeps feeding through a run.
@@ -1179,7 +1214,7 @@ extension SerializedSharedState {
                     into: manager, atSec: BTSyncedSinkTests.anchorSec + 2 + i)
                 manager.setOffsetMs(latencyMs, forDeviceUID: "dev-a")
                 let cycle = BTSyncedSinkTests.renderCycle(
-                    sink, at: BTSyncedSinkTests.anchorNanos + 200_000_000)
+                    sink, at: BTSyncedSinkTests.anchorNanos + 2_100_000_000)
                 #expect(cycle.produced, "silent after a preview at \(latencyMs) ms")
             }
         }

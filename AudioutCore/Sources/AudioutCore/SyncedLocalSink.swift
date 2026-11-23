@@ -869,6 +869,10 @@ private final class InterleavedFloatRing {
     // has already read. Same design as `BTDelayLine`'s pair.
     private let requestedShiftPtr: UnsafeMutablePointer<Int>   // control-thread-owned
     private let appliedShiftPtr: UnsafeMutablePointer<Int>     // consumer-owned
+    // Consumer-owned: the net samples the read position has advanced since the
+    // last `reset()`. The control thread reads it only through `seekRoomSamples`,
+    // which tolerates a stale value.
+    private let sessionConsumedPtr: UnsafeMutablePointer<Int>
 
     init(minimumCapacitySamples: Int) {
         var cap = 1
@@ -889,6 +893,8 @@ private final class InterleavedFloatRing {
         self.appliedShiftPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         requestedShiftPtr.initialize(to: 0)
         appliedShiftPtr.initialize(to: 0)
+        self.sessionConsumedPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        sessionConsumedPtr.initialize(to: 0)
     }
 
     deinit {
@@ -899,6 +905,7 @@ private final class InterleavedFloatRing {
         droppedSamplesPtr.deallocate()
         requestedShiftPtr.deallocate()
         appliedShiftPtr.deallocate()
+        sessionConsumedPtr.deallocate()
     }
 
     /// Cumulative producer chunks dropped on overflow (never reset — the
@@ -930,21 +937,23 @@ private final class InterleavedFloatRing {
     }
 
     /// How far the read position can move, in samples: `forward` is the audio
-    /// waiting to be played, `backward` the intact history behind it — intact
-    /// precisely because a producer out of room drops its chunk rather than
-    /// overwrite, and fills from the head end first.
+    /// waiting to be played, `backward` the history played since the last
+    /// `reset()` that the producer has not reclaimed — still intact because a
+    /// producer out of room drops its chunk rather than overwrite, and fills
+    /// from the head end first.
     ///
     /// razor: an ADVISORY bound for ``SyncedLocalSink/applyUserOffsetDelta(ms:)``'s
     /// "does this fit, or must I re-anchor?" decision, read from the control
-    /// thread while both other threads run — `seek` below clamps for real. The
+    /// thread while both other threads run — `applyPendingShift()` clamps for real. The
     /// window it can be wrong by is one render cycle's worth of samples against
     /// seconds of room, so a genuine near-miss re-anchors, which is the safe side.
     var seekRoomSamples: (forward: Int, backward: Int) {
         let h = headPtr.pointee
         let t = tailPtr.pointee
+        let consumed = sessionConsumedPtr.pointee
         OSMemoryBarrier()
         let used = (h &- t) & mask
-        return (forward: used, backward: capacity - 1 - used)
+        return (forward: used, backward: min(capacity - 1 - used, consumed))
     }
 
     /// Ask the consumer to move the read position by `samples` (negative =
@@ -960,7 +969,8 @@ private final class InterleavedFloatRing {
 
     /// Take whatever shift the control thread has asked for since the last call
     /// and move the read position by it, clamped to what the ring actually
-    /// holds. Consumer side, so `tailPtr` keeps its single writer.
+    /// holds; a backward move also stops at the read position of the last
+    /// `reset()`. Consumer side, so `tailPtr` keeps its single writer.
     private func applyPendingShift() {
         OSMemoryBarrier()                 // acquire: see the control thread's word
         let requested = requestedShiftPtr.pointee
@@ -971,11 +981,12 @@ private final class InterleavedFloatRing {
         let t = tailPtr.pointee
         let used = (headPtr.pointee &- t) & mask
         let applied = delta < 0
-            ? -min(-delta, capacity - 1 - used)
+            ? -min(-delta, min(capacity - 1 - used, sessionConsumedPtr.pointee))
             : min(delta, used)
         guard applied != 0 else { return }
         OSMemoryBarrier()                 // release: reads land before the producer can reclaim
         tailPtr.pointee = (t &+ applied) & mask
+        sessionConsumedPtr.pointee &+= applied
     }
 
     /// Consumer side. Copies up to `maxCount` available samples into `dst`,
@@ -993,6 +1004,7 @@ private final class InterleavedFloatRing {
         if count > first { dst.advanced(by: first).update(from: storage, count: count - first) }
         OSMemoryBarrier()                 // release: finish reading before advancing tail
         tailPtr.pointee = (t &+ count) & mask
+        sessionConsumedPtr.pointee &+= count
         return count
     }
 
@@ -1015,6 +1027,7 @@ private final class InterleavedFloatRing {
         guard applied != 0 else { return 0 }
         OSMemoryBarrier()                 // release: finish "reading" before advancing tail
         tailPtr.pointee = (t &+ applied) & mask
+        sessionConsumedPtr.pointee &+= applied
         return applied
     }
 
@@ -1024,6 +1037,7 @@ private final class InterleavedFloatRing {
         OSMemoryBarrier()
         tailPtr.pointee = headPtr.pointee
         appliedShiftPtr.pointee = requestedShiftPtr.pointee
+        sessionConsumedPtr.pointee = 0
         OSMemoryBarrier()
     }
 }

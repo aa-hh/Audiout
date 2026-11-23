@@ -379,7 +379,9 @@ extension NativeBackend {
                       let outputID = self.outputIDs[id] else { continue }
                 let wantOn = ids.contains(id)
 
-                let previous = self.desiredOn[id]
+                // A nil entry (a speaker discovered after the last call) carries no
+                // whole-system intent, so it reads as off: leaving it out is no edge.
+                let previous = self.desiredOn[id] ?? false
                 self.desiredOn[id] = wantOn
 
                 // A genuine MEMBERSHIP EDGE clears a terminal-failure park: a

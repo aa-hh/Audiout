@@ -500,8 +500,9 @@ enum BTDeviceSinkError: Error, CustomStringConvertible {
 ///
 /// `@unchecked Sendable`: producer (enqueue) and consumer (render) meet only
 /// through the wait-free ``BTFrameRing``; the scalar gate state is behind
-/// `stateLock`, taken non-blockingly on the render path. Graph mutation is
-/// serialized on `graphQueue`.
+/// `stateLock`, taken non-blockingly on the render path, which renders a
+/// released session from its own copy of that state when the lock is busy.
+/// Graph mutation is serialized on `graphQueue`.
 ///
 /// Lock order: a device's `stateLock` may take the manager's table lock (the
 /// one-time anchor samples `delayNanosProvider`); the manager must NEVER call
@@ -523,7 +524,14 @@ final class BTDeviceSink: @unchecked Sendable {
     private let delayLine: BTDelayLine
     private let resampler: FractionalResampler
     private let stateLock = NSLock()
-    private var anchored = false
+    /// Written under `stateLock`; `enqueue` also reads it WITHOUT the lock, so
+    /// an anchored session's capture buffers never contend with the render
+    /// thread for it. Same one-word idiom as `lastAudibleRenderNanosPtr`.
+    private let anchoredPtr = UnsafeMutablePointer<Bool>.allocate(capacity: 1)
+    private var anchored: Bool {
+        get { anchoredPtr.pointee }
+        set { anchoredPtr.pointee = newValue }
+    }
     private var released = false
     /// The capture pts the session anchored on, kept so a pre-release trim
     /// change can recompute the target through the same one expression the
@@ -563,7 +571,7 @@ final class BTDeviceSink: @unchecked Sendable {
         /// overflow counter, surfaced on the same once-per-gate cadence.
         let droppedChunks: Int
     }
-    private var releaseToLog: ReleaseRecord?
+    private var releaseToLog: ReleaseRecord? { didSet { publishLogPendingLocked() } }
     /// An anchor (carried or fresh) waiting to be logged. Same reason as
     /// `carryToLogNanos`: `enqueue` runs on the capture tap's real-time
     /// thread, which must not allocate/format/log, so the anchor's facts are
@@ -574,7 +582,15 @@ final class BTDeviceSink: @unchecked Sendable {
         let anchorPtsNanos: Int64
         let delayNanos: Int64
     }
-    private var anchorToLog: AnchorRecord?
+    private var anchorToLog: AnchorRecord? { didSet { publishLogPendingLocked() } }
+    /// Whether `releaseToLog` or `anchorToLog` holds a record, so `enqueue`
+    /// can see one is waiting without taking `stateLock`. Written under the
+    /// lock by the two `didSet`s; a stale read costs one buffer's delay or one
+    /// empty `graphQueue` drain, never a lost line.
+    private let logPendingPtr = UnsafeMutablePointer<Bool>.allocate(capacity: 1)
+    private func publishLogPendingLocked() {
+        logPendingPtr.pointee = releaseToLog != nil || anchorToLog != nil
+    }
 
     /// How close a forward seek may bring the read pointer to the write
     /// pointer. A forward seek IS how a larger measured latency lands, and one
@@ -601,6 +617,16 @@ final class BTDeviceSink: @unchecked Sendable {
     private var lastCycleStartNanos: Int64 = 0
     /// How much of the device's pull deficit the read position already absorbed.
     private var pullRealignedNanos: Int64 = 0
+    /// The render thread's copy of what its `stateLock` section read the last
+    /// time it held the lock, so a cycle that finds the lock busy keeps
+    /// playing a released session instead of inserting a silent cycle (each
+    /// one heard as the speaker stepping one cycle later). Written only by the
+    /// render thread while it holds `stateLock`, and cleared with the session
+    /// (`clearSessionStateLocked`, engine stopped); `graphQueue` reads the
+    /// processor copy under the lock to know which retired processor to keep.
+    private var renderCachedReleased = false
+    private var renderCachedKeepAliveNanos: Int64 = 0
+    private var renderCachedEQProcessor: EQProcessor?
 
     // Engine (all mutation on `graphQueue`).
     private let graphQueue: DispatchQueue
@@ -616,6 +642,11 @@ final class BTDeviceSink: @unchecked Sendable {
     /// The baked processor the render path applies, published under `stateLock`
     /// like `driftPpm`. `nil` = flat, and flat stays untouched audio.
     private var eqProcessor: EQProcessor?   // stateLock
+    /// The replaced processor the render thread's copy may still hold, kept
+    /// alive here so the render thread never drops the last reference (a free
+    /// on the render thread). Set to that copy at every swap; the one it
+    /// replaces is released on `graphQueue`.
+    private var retiredEQProcessor: EQProcessor?   // stateLock
     /// Keep-alive (roadmap 085, ticket 04): with this on, a released session's
     /// underrun cycles report their zeroed buffer as AUDIO (`isSilence` false)
     /// for `keepAliveWindowNanos` after the last audible cycle, so the OS never
@@ -649,10 +680,13 @@ final class BTDeviceSink: @unchecked Sendable {
     private let renderCyclesSinceHealthPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     private let renderPeakSinceHealthPtr = UnsafeMutablePointer<Float>.allocate(capacity: 1)
     /// Failed `stateLock.try()` calls since the last `bt_sink_health` line: on
-    /// the render thread (that cycle went out silent) and in `enqueue` (that
-    /// buffer's anchor check was deferred; its audio still reached the ring).
-    /// Same single-writer word and same zeroing as the cycle count above.
+    /// the render thread (all of them, and separately the ones that went out
+    /// silent because the render thread's copy said the session was not
+    /// released) and in `enqueue` (that buffer's anchor was deferred; its
+    /// audio still reached the ring). Same single-writer word and same zeroing
+    /// as the cycle count above.
     private let renderLockMissesSinceHealthPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+    private let renderSilentMissesSinceHealthPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     private let enqueueLockMissesSinceHealthPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     /// Same cadence as `bt_clock_deviation`.
     static let healthIntervalNanos: Int64 = 30_000_000_000
@@ -756,7 +790,10 @@ final class BTDeviceSink: @unchecked Sendable {
         self.renderCyclesSinceHealthPtr.initialize(to: 0)
         self.renderPeakSinceHealthPtr.initialize(to: 0)
         self.renderLockMissesSinceHealthPtr.initialize(to: 0)
+        self.renderSilentMissesSinceHealthPtr.initialize(to: 0)
         self.enqueueLockMissesSinceHealthPtr.initialize(to: 0)
+        self.anchoredPtr.initialize(to: false)
+        self.logPendingPtr.initialize(to: false)
 
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: renderSampleRate,
@@ -782,7 +819,10 @@ final class BTDeviceSink: @unchecked Sendable {
         renderCyclesSinceHealthPtr.deallocate()
         renderPeakSinceHealthPtr.deallocate()
         renderLockMissesSinceHealthPtr.deallocate()
+        renderSilentMissesSinceHealthPtr.deallocate()
         enqueueLockMissesSinceHealthPtr.deallocate()
+        anchoredPtr.deallocate()
+        logPendingPtr.deallocate()
     }
 
     /// The monotonic instant this device last rendered real program audio, or
@@ -859,7 +899,16 @@ final class BTDeviceSink: @unchecked Sendable {
         let processor: EQProcessor? = (eq.isFlat || channelCount != 2)
             ? nil
             : EQProcessor(eq: eq, sampleRate: renderSampleRate)
-        stateLock.withLock { eqProcessor = processor }
+        // The render thread's copy is always the processor being replaced, the
+        // one retired before it, or nil, so keeping exactly that copy means its
+        // next refresh never releases the last reference. The pair returned
+        // here is released by `_ =`, after the unlock, on this queue.
+        _ = stateLock.withLock { () -> (EQProcessor?, EQProcessor?) in
+            let dropped = (eqProcessor, retiredEQProcessor)
+            eqProcessor = processor
+            retiredEQProcessor = renderCachedEQProcessor
+            return dropped
+        }
     }
 
     private func startLocked() throws {
@@ -1051,6 +1100,7 @@ final class BTDeviceSink: @unchecked Sendable {
             "cycles": String(snapshot.cycles),
             "renderCycles": String(snapshot.cycles),
             "renderLockMisses": String(renderLockMisses),
+            "renderSilentMisses": String(renderSilentMissesSinceHealthPtr.pointee),
             "enqueueLockMisses": String(enqueueLockMissesSinceHealthPtr.pointee),
             "peak_dbfs": String(format: "%.1f", snapshot.peakDBFS),
             "released": isReleased ? "true" : "false",
@@ -1067,6 +1117,7 @@ final class BTDeviceSink: @unchecked Sendable {
         renderCyclesSinceHealthPtr.pointee = 0
         renderPeakSinceHealthPtr.pointee = 0
         renderLockMissesSinceHealthPtr.pointee = 0
+        renderSilentMissesSinceHealthPtr.pointee = 0
         enqueueLockMissesSinceHealthPtr.pointee = 0
         lastHealthNanos = now
     }
@@ -1123,6 +1174,30 @@ final class BTDeviceSink: @unchecked Sendable {
     func test_healthSnapshot() -> (cycles: Int64, peakDBFS: Double) { graphQueue.sync { healthSnapshotLocked() } }
     /// Marks the sink running without starting the engine, so liveness runs with no HAL.
     func test_forceRunning() { graphQueue.sync { running = true } }
+    /// Render-thread lock misses since the last health line: all of them, and
+    /// the ones that went out silent.
+    var test_renderLockMisses: (all: Int64, silent: Int64) {
+        graphQueue.sync { (renderLockMissesSinceHealthPtr.pointee, renderSilentMissesSinceHealthPtr.pointee) }
+    }
+    /// Run `body` while another thread holds `stateLock`, as a control-path
+    /// `withLock` does when it collides with a render cycle. Returns once that
+    /// thread has let go.
+    func test_withStateLockHeldElsewhere(_ body: () -> Void) {
+        let held = DispatchSemaphore(value: 0)
+        let letGo = DispatchSemaphore(value: 0)
+        let lock = stateLock
+        Thread.detachNewThread {
+            lock.lock()
+            held.signal()
+            letGo.wait()
+            lock.unlock()
+        }
+        held.wait()
+        body()
+        letGo.signal()
+        lock.lock()   // blocks until the holder has unlocked
+        lock.unlock()
+    }
 
     /// Test seam: the tone this sink is holding — proof that a value remembered
     /// by the manager before this sink existed actually reached it.
@@ -1157,6 +1232,12 @@ final class BTDeviceSink: @unchecked Sendable {
             sessionDelayNanos = 0
             trimClampedSinceAnchor = false
             steadyRoomFramesPtr.pointee = 0
+            // The render thread's copy goes with the session, so a restarted
+            // engine whose first cycles miss the lock cannot play the next
+            // session's ring before its gate opens.
+            renderCachedReleased = false
+            renderCachedKeepAliveNanos = 0
+            renderCachedEQProcessor = nil
         }
         delayLine.reset()
         resampler.reset()
@@ -1170,43 +1251,43 @@ final class BTDeviceSink: @unchecked Sendable {
     /// timeline the AirPlay sessions consume). Called on the tap delivery
     /// thread; real-time safe — a wait-free ring write plus a one-time
     /// non-blocking anchor set (a missed `try()` defers the anchor one buffer:
-    /// a sub-ms pts shift, never a wrong order). Format conversion to this
-    /// sink's rate/channel layout is the caller's job (BT-FANOUT).
+    /// a sub-ms pts shift, never a wrong order). Once anchored it never takes
+    /// `stateLock`, so it cannot turn a render cycle away. Format conversion to
+    /// this sink's rate/channel layout is the caller's job (BT-FANOUT).
     func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {
         guard frameCount > 0 else { return }
         lastEnqueueNanosPtr.pointee = Self.monotonicNowNanos()
         var carriedDelayNanos: Int64?
-        var hasReleaseToLog = false
-        var hasAnchorToLog = false
-        if stateLock.try() {
-            if !anchored {
-                anchored = true
-                anchorPtsNanos = SyncTiming.monotonicNanos(pts)
-                carriedDelayNanos = pendingCarriedDelayNanos
-                pendingCarriedDelayNanos = nil
-                // Only a real carry overwrites the pending line. A plain
-                // anchor must not clobber a stashed record whose emit block
-                // has not run yet — that would drop the line the live check
-                // reads.
-                if carriedDelayNanos != nil { carryToLogNanos = carriedDelayNanos }
-                let delayNanos = carriedDelayNanos ?? delayNanosProvider()
-                sessionDelayNanos = delayNanos
-                targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
-                    anchorPtsNanos: anchorPtsNanos,
-                    totalDelayNanos: delayNanos)
-                anchorToLog = AnchorRecord(anchorPtsNanos: anchorPtsNanos, delayNanos: delayNanos)
+        if !anchoredPtr.pointee {
+            if stateLock.try() {
+                // Re-checked under the lock: the read above may be stale.
+                if !anchored {
+                    anchored = true
+                    anchorPtsNanos = SyncTiming.monotonicNanos(pts)
+                    carriedDelayNanos = pendingCarriedDelayNanos
+                    pendingCarriedDelayNanos = nil
+                    // Only a real carry overwrites the pending line. A plain
+                    // anchor must not clobber a stashed record whose emit block
+                    // has not run yet — that would drop the line the live check
+                    // reads.
+                    if carriedDelayNanos != nil { carryToLogNanos = carriedDelayNanos }
+                    let delayNanos = carriedDelayNanos ?? delayNanosProvider()
+                    sessionDelayNanos = delayNanos
+                    targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
+                        anchorPtsNanos: anchorPtsNanos,
+                        totalDelayNanos: delayNanos)
+                    anchorToLog = AnchorRecord(anchorPtsNanos: anchorPtsNanos, delayNanos: delayNanos)
+                }
+                stateLock.unlock()
+            } else {
+                enqueueLockMissesSinceHealthPtr.pointee &+= 1
             }
-            // The render thread cannot hand its own record to `graphQueue`
-            // (dispatch allocates), so the producer — which is here every
-            // buffer anyway, and already takes this lock — posts it instead.
-            hasReleaseToLog = releaseToLog != nil
-            hasAnchorToLog = anchorToLog != nil
-            stateLock.unlock()
-        } else {
-            enqueueLockMissesSinceHealthPtr.pointee &+= 1
         }
         delayLine.write(interleavedFrames: interleavedFrames, frameCount: frameCount)
-        if carriedDelayNanos != nil || hasReleaseToLog || hasAnchorToLog {
+        // The render thread cannot hand its own record to `graphQueue`
+        // (dispatch allocates), so the producer, here every buffer anyway,
+        // posts it instead.
+        if carriedDelayNanos != nil || logPendingPtr.pointee {
             // Once per lineup change / once per gate opening / once per
             // anchor, never per buffer, and never ON this thread — see
             // `carryToLogNanos`.
@@ -1441,39 +1522,50 @@ final class BTDeviceSink: @unchecked Sendable {
         // (2026-08-12) measured −0.02 ppm between speakers,
         // so there is no rate correction to apply and the resampler runs at unity.
         let ratio = 1.0
-        var processor: EQProcessor?
         // Before the lock: a cycle the lock turns away was still pulled.
         realignToDevicePulls(cycleStartMonotonicNanos: cycleStartMonotonicNanos, frameCount: frameCount)
-        guard stateLock.try() else {   // no snapshot → silent cycle
+        if !stateLock.try() {
+            // Busy lock: a released session plays on from the copy taken the
+            // last time this thread held it. A silent cycle here would push
+            // the speaker one cycle later for good. Not released (or never
+            // seen since the session reset): silence, as the gate would give.
             renderLockMissesSinceHealthPtr.pointee &+= 1
-            return false
-        }
-        processor = eqProcessor
-        let keepAliveWindow = keepAliveWindowNanos
-        if anchored {
-            if released {
-                plan = SyncTiming.RenderPlan(silentFrames: 0, releasesThisCycle: true)
-            } else {
-                plan = SyncTiming.plan(
-                    cycleStartMonotonicNanos: cycleStartMonotonicNanos,
-                    frameCount: frameCount,
-                    sampleRate: renderSampleRate,
-                    targetReleaseMonotonicNanos: targetReleaseNanos)
-                if plan.releasesThisCycle {
-                    released = true
-                    catchUpToTargetLocked(cycleStartMonotonicNanos: cycleStartMonotonicNanos)
-                    pullOriginNanos = cycleStartMonotonicNanos
-                    lastCycleStartNanos = cycleStartMonotonicNanos
-                    framesPulledSinceOrigin = frameCount
-                    pullRealignedNanos = 0
-                    // The sink never sees the capture chunk size, so this
-                    // cycle's frame count stands in for it.
-                    steadyRoomFramesPtr.pointee =
-                        Swift.max(0, delayLine.forwardShiftRoomFrames() - frameCount)
+            guard renderCachedReleased else {
+                renderSilentMissesSinceHealthPtr.pointee &+= 1
+                return false
+            }
+            plan = SyncTiming.RenderPlan(silentFrames: 0, releasesThisCycle: true)
+        } else {
+            if anchored {
+                if released {
+                    plan = SyncTiming.RenderPlan(silentFrames: 0, releasesThisCycle: true)
+                } else {
+                    plan = SyncTiming.plan(
+                        cycleStartMonotonicNanos: cycleStartMonotonicNanos,
+                        frameCount: frameCount,
+                        sampleRate: renderSampleRate,
+                        targetReleaseMonotonicNanos: targetReleaseNanos)
+                    if plan.releasesThisCycle {
+                        released = true
+                        catchUpToTargetLocked(cycleStartMonotonicNanos: cycleStartMonotonicNanos)
+                        pullOriginNanos = cycleStartMonotonicNanos
+                        lastCycleStartNanos = cycleStartMonotonicNanos
+                        framesPulledSinceOrigin = frameCount
+                        pullRealignedNanos = 0
+                        // The sink never sees the capture chunk size, so this
+                        // cycle's frame count stands in for it.
+                        steadyRoomFramesPtr.pointee =
+                            Swift.max(0, delayLine.forwardShiftRoomFrames() - frameCount)
+                    }
                 }
             }
+            renderCachedReleased = released
+            renderCachedKeepAliveNanos = keepAliveWindowNanos
+            renderCachedEQProcessor = eqProcessor
+            stateLock.unlock()
         }
-        stateLock.unlock()
+        let processor = renderCachedEQProcessor
+        let keepAliveWindow = renderCachedKeepAliveNanos
         guard plan.releasesThisCycle else { return false }
 
         let produced = resampler.render(

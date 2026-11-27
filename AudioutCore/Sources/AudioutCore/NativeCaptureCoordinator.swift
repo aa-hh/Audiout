@@ -1777,11 +1777,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
         // The converter's own lock is the bounded, single-caller kind point 3
         // of the policy allows to be taken with `lock()`.
+        var stageStart = Self.monotonicNanos()
         let converted = converter.convertToAirPlayPCM(buffer)
         // Sampled AFTER the convert attempt and BEFORE the failure early-out,
         // so a converter dropping every buffer still surfaces its counters
         // (throttled + delta-gated inside — see `sampleConversionFailuresIfDue`).
         converter.sampleConversionFailuresIfDue()
+        captureHealth.noteStage(.convert, since: &stageStart)
         guard var pcm = converted, !pcm.isEmpty else { return }
 
         let health = captureHealth
@@ -1797,8 +1799,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // the EQ, unlike the tick below: a leveled app is program material and
         // must be shaped by the user's tone. S16LE stereo == 4 bytes per frame.
         if let leveledInjector = snapshot.leveledInjector {
+            stageStart = Self.monotonicNanos()
             leveledInjector.mix(into: &pcm, frameCount: pcm.count / 4)
+            health.noteStage(.mix, since: &stageStart)
         }
+
+        // Timed as one stage with the tick below: both run between the
+        // leveled mix and the delivery.
+        stageStart = Self.monotonicNanos()
 
         // Main Out EQ: the whole mix's own tone stage, applied BEFORE the tick
         // and before every fan-out, so the AirPlay streams, the synced-local
@@ -1820,6 +1828,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         if let tickInjector = snapshot.tickInjector {
             tickInjector.mix(into: &pcm)
         }
+        health.noteStage(.eq, since: &stageStart)
 
         // First buffer after a tap rebuild: measure the hole the rebuild left in
         // the feed, and patch it before this buffer goes downstream (see
@@ -1890,11 +1899,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 let waits = health.snapshotWaits.pointee
                 let waitDelta = waits &- health.gapSnapshotWaitBase
                 let maxHandleNanos = health.maxHandleNanosForGap.pointee
+                let stageMaxima = health.takeStageMaxima(forGap: true)
                 health.gapBaseline = io
                 health.gapSnapshotWaitBase = waits
                 health.maxHandleNanosForGap.pointee = 0
                 queue.async {
-                    Telemetry.log(.captureWS, "tap_feed_gap", [
+                    Telemetry.log(.captureWS, "tap_feed_gap", CaptureHealthTracker.withStageFields(stageMaxima, [
                         "cause": "dropped_cycle",
                         "gapMs": String(format: "%.1f", Double(gapNanos) / 1_000_000),
                         "sampleStepFrames": sampleStep.map {
@@ -1909,7 +1919,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                         "emptyPlanarReturns": "\(delta.emptyPlanarReturns)",
                         "ioOverloads": "\(delta.overloads)",
                         "maxHandleMs": String(format: "%.2f", Double(maxHandleNanos) / 1_000_000),
-                    ])
+                    ]))
                 }
                 fillFeedGap(nanos: gapNanos, from: lastEnd, snapshot: snapshot)
             }
@@ -1928,7 +1938,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             &+ Int64((Double(capturedFrames) * 1_000_000_000 / Double(PCMFormat.airplay.sampleRate)).rounded())
         emitCaptureHealthIfDue(io: io, nowNanos: callStartNanos)
 
-        deliver(pcm, pts: buffer.pts, snapshot: snapshot)
+        deliver(pcm, pts: buffer.pts, snapshot: snapshot, timed: true)
     }
 
     /// Delivery thread only. Every 5 s of delivered buffers, one
@@ -1946,12 +1956,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let waits = health.snapshotWaits.pointee
         let waitDelta = waits &- health.healthSnapshotWaitBase
         let maxHandleNanos = health.maxHandleNanosForHealth.pointee
+        let stageMaxima = health.takeStageMaxima(forGap: false)
         health.healthStartNanos = nowNanos
         health.healthBaseline = io
         health.healthSnapshotWaitBase = waits
         health.maxHandleNanosForHealth.pointee = 0
         queue.async {
-            Telemetry.log(.captureWS, "capture_health", [
+            Telemetry.log(.captureWS, "capture_health", CaptureHealthTracker.withStageFields(stageMaxima, [
                 "callbacks": "\(delta.callbacks)",
                 "maxHandleMs": String(format: "%.2f", Double(maxHandleNanos) / 1_000_000),
                 "snapshotWaits": "\(waitDelta)",
@@ -1961,7 +1972,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 "sampleStepAnomalies": "\(delta.sampleStepAnomalies)",
                 "ioOverloads": "\(delta.overloads)",
                 "intervalMs": String(format: "%.0f", Double(intervalNanos) / 1_000_000),
-            ])
+            ]))
         }
     }
 
@@ -2081,10 +2092,19 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// takes `btPCM` (the block carrying the sweep), every other Bluetooth
     /// device's takes `btSweepFreePCM`. Both `nil` — every run that is not
     /// that one — leaves the fan-out the single write it has always been.
+    ///
+    /// `timed` is true only for calls made inside ``handleBuffer(_:)`` (its
+    /// own block and any padding before it), so the per-stage maxima on the
+    /// `capture_health` and `tap_feed_gap` lines describe the tap's delivery
+    /// thread and nothing the pacer or the fallback clock did.
     private func deliver(_ pcm: Data, pts: timespec, snapshot: BufferSnapshot,
                          btPCM: Data? = nil,
                          btSweepFreePCM: Data? = nil,
-                         btSweepOwnerUID: String? = nil) {
+                         btSweepOwnerUID: String? = nil,
+                         timed: Bool = false) {
+        let health = captureHealth
+        var stageStart: Int64 = timed ? Self.monotonicNanos() : 0
+
         // CAST-SYNC: with a Cast device in the mix the engine is fed audio from
         // `D` seconds ago under the LIVE pts — one block out per block in, same
         // frame count, so the sender sees the identical (byteCount, pts)
@@ -2093,7 +2113,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // no Cast device selected `enginePCM` IS `pcm` and the writes below are
         // the statements they always were. The line wraps ONLY the engine
         // write — the local, BT and Cast fan-outs below stay on the live `pcm`.
-        let enginePCM = snapshot.airPlayPreDelay?.exchange(pcm) ?? pcm
+        // Exists only for Cast, so it is timed as Cast work.
+        let enginePCM: Data
+        if let preDelay = snapshot.airPlayPreDelay {
+            enginePCM = preDelay.exchange(pcm)
+            if timed { health.noteStage(.cast, since: &stageStart) }
+        } else {
+            enginePCM = pcm
+        }
 
         // pts straight off the producer's capture clock (mHostTime → timespec).
         // EQ off is the LITERAL legacy line: one flag test on an already-loaded
@@ -2116,8 +2143,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 processor.process(&shaped)
                 entries.append((pcm: shaped, streamId: stream.streamID))
             }
+            // The per-speaker copies are tone work, timed with the Main Out EQ.
+            if timed { health.noteStage(.eq, since: &stageStart) }
             sink.write(streams: entries, pts: pts)
         }
+        if timed { health.noteStage(.engineWrite, since: &stageStart) }
 
         // T-FANOUT: fan the SAME converted PCM (and its pts) to the delayed local
         // sink — ONE capture, two consumers. Widened to interleaved Float32 and
@@ -2131,6 +2161,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         if let syncedSink = snapshot.syncedLocalSink,
            let baseResampler = snapshot.syncedLocalBaseResampler {
             Self.fanOutToSyncedLocal(pcm, pts: pts, into: syncedSink, resampler: baseResampler)
+            if timed { health.noteStage(.localSink, since: &stageStart) }
         }
 
         // BT-FANOUT: the third consumer of the identical converted PCM+pts —
@@ -2145,6 +2176,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // variant of this block, kept for passive-drift correlation. While
         // nothing has armed the ring this is one atomic word read and a
         // return — no lock, so a reader's copy can never stall delivery.
+        // Timed with the Bluetooth fan-out it serves.
+        if timed { stageStart = Self.monotonicNanos() }
         referenceRing.append(btPCM ?? pcm, pts: pts)
 
         if let btSink = snapshot.btSink, let btResampler = snapshot.btBaseResampler {
@@ -2165,6 +2198,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 Self.fanOutToSyncedLocal(btPCM ?? pcm, pts: pts, into: btSink, resampler: btResampler)
             }
         }
+        if timed { health.noteStage(.bluetooth, since: &stageStart) }
 
         // CAST-FANOUT: the fourth consumer of the identical converted PCM+pts.
         // No widen/base-resample step — a Cast receiver is fed the S16LE
@@ -2174,6 +2208,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // write above is byte-for-byte what it always was.
         if let castSink = snapshot.castSink {
             castSink.write(pcm: pcm, pts: pts)
+            if timed { health.noteStage(.cast, since: &stageStart) }
         }
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for
@@ -2215,7 +2250,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             deliver(Data(count: chunk * bytesPerFrame),
                     pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
                                   tv_nsec: Int(ptsNanos % 1_000_000_000)),
-                    snapshot: snapshot)
+                    snapshot: snapshot, timed: true)
             emitted += chunk
             remaining -= chunk
         }
@@ -2373,11 +2408,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// `tap_feed_gap`: whether a lost cycle was dropped by this code or never
     /// came from Core Audio.
     ///
-    /// The snapshot-wait total and the two longest-call values are written by
-    /// every `handleBuffer` call, and two taps can be inside it at once (a
-    /// make-before-break rebuild starts the new tap before the old one stops).
-    /// Two threads writing one plain stored property would trip Swift's
-    /// exclusivity check, so those three live behind pointers, as
+    /// The snapshot-wait total, the two longest-call values and the per-stage
+    /// maxima are written by every `handleBuffer` call, and two taps can be
+    /// inside it at once (a make-before-break rebuild starts the new tap before
+    /// the old one stops). Two threads writing one plain stored property would
+    /// trip Swift's exclusivity check, so those live behind pointers, as
     /// ``FeedGapTracker``'s words do. Everything else is written only past the
     /// converter check, which one tap at a time gets through, so it stays plain.
     private final class CaptureHealthTracker {
@@ -2403,12 +2438,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
         init() {
             snapshotWaits.initialize(to: 0)
+            stageMaxNanos.initialize(repeating: 0, count: 2 * Self.stageCount)
             maxHandleNanosForHealth.initialize(to: 0)
             maxHandleNanosForGap.initialize(to: 0)
         }
 
         deinit {
             snapshotWaits.deallocate()
+            stageMaxNanos.deallocate()
             maxHandleNanosForHealth.deallocate()
             maxHandleNanosForGap.deallocate()
         }
@@ -2416,6 +2453,67 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         func noteHandleDuration(_ nanos: Int64) {
             if nanos > maxHandleNanosForHealth.pointee { maxHandleNanosForHealth.pointee = nanos }
             if nanos > maxHandleNanosForGap.pointee { maxHandleNanosForGap.pointee = nanos }
+        }
+
+        /// The parts of a `handleBuffer` call timed separately, so a slow call
+        /// names the part that was slow. `eq` covers the Main Out EQ, the align
+        /// tick and the per-speaker EQ copies; `bluetooth` includes the
+        /// reference ring the Bluetooth drift tracker reads; `cast` includes
+        /// the delay line that holds the AirPlay feed back for Cast.
+        enum Stage: Int, CaseIterable {
+            case convert, mix, eq, engineWrite, bluetooth, localSink, cast
+
+            var field: String {
+                switch self {
+                case .convert: return "maxConvertMs"
+                case .mix: return "maxMixMs"
+                case .eq: return "maxEqMs"
+                case .engineWrite: return "maxEngineWriteMs"
+                case .bluetooth: return "maxBluetoothMs"
+                case .localSink: return "maxLocalSinkMs"
+                case .cast: return "maxCastMs"
+                }
+            }
+        }
+
+        /// Stored once: `allCases` builds an array on every read, and
+        /// ``noteStage(_:since:)`` runs several times per buffer.
+        static let stageCount = Stage.allCases.count
+
+        /// Longest single run of each stage in nanoseconds: the first
+        /// `stageCount` words since the last `capture_health` line, the next as
+        /// many since the last `tap_feed_gap` line. Behind a pointer for the
+        /// same two-taps reason as the values above.
+        let stageMaxNanos = UnsafeMutablePointer<Int64>.allocate(capacity: 2 * CaptureHealthTracker.stageCount)
+
+        /// Record the stage that ran from `start` until now, and move `start`
+        /// to now so the next stage can time from it.
+        func noteStage(_ stage: Stage, since start: inout Int64) {
+            let now = NativeCaptureCoordinator.monotonicNanos()
+            let nanos = now &- start
+            start = now
+            let forHealth = stage.rawValue
+            let forGap = Self.stageCount + stage.rawValue
+            if nanos > stageMaxNanos[forHealth] { stageMaxNanos[forHealth] = nanos }
+            if nanos > stageMaxNanos[forGap] { stageMaxNanos[forGap] = nanos }
+        }
+
+        /// Read one line's stage maxima, in `Stage` order, and clear them.
+        func takeStageMaxima(forGap: Bool) -> [Int64] {
+            let base = forGap ? Self.stageCount : 0
+            return Stage.allCases.map { stage in
+                defer { stageMaxNanos[base + stage.rawValue] = 0 }
+                return stageMaxNanos[base + stage.rawValue]
+            }
+        }
+
+        /// `fields` plus one `max…Ms` field per stage, two decimals.
+        static func withStageFields(_ maxima: [Int64], _ fields: [String: String]) -> [String: String] {
+            var out = fields
+            for (stage, nanos) in zip(Stage.allCases, maxima) {
+                out[stage.field] = String(format: "%.2f", Double(nanos) / 1_000_000)
+            }
+            return out
         }
 
         /// A buffer's tap counts went backwards: it comes from a new tap, whose

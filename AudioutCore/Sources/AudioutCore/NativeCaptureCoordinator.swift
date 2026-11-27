@@ -1731,11 +1731,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     /// Convert one captured buffer to the engine's fixed S16LE/44100/2ch format
     /// and forward it with a `pts` derived from the buffer's own `mHostTime`.
-    /// Runs on the tap's delivery thread (the IOProc, in production). Allocation
-    /// beyond the converter's own scratch is avoided on this path where practical.
+    /// Runs on the tap's delivery thread (in production, the consumer thread of
+    /// the tap's ``TapDeliveryRing``, outside Core Audio's IO cycle).
+    /// Allocation beyond the converter's own scratch is avoided on this path
+    /// where practical.
     private func handleBuffer(_ buffer: CapturedBuffer) {
         let callStartNanos = Self.monotonicNanos()
         defer { captureHealth.noteHandleDuration(Self.monotonicNanos() &- callStartNanos) }
+        captureHealth.noteRing(depth: buffer.ringMaxDepth, ioBlockNanos: buffer.maxIoBlockNanos)
         // This is the tap's delivery thread: never take `queue` here, because
         // `start`/`stop`/`recreateTap`/`updateRouting` hold it while they do
         // slow work. See the policy at `startIOProc`'s IOProc block.
@@ -1775,7 +1778,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         guard !snapshot.wizardActive else { return }
         guard let converter = snapshot.converter else { return }
 
-        // The converter's own lock is the bounded, single-caller kind point 3
+        // The converter's own lock is the bounded, single-caller kind point 4
         // of the policy allows to be taken with `lock()`.
         var stageStart = Self.monotonicNanos()
         let converted = converter.convertToAirPlayPCM(buffer)
@@ -1918,6 +1921,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                         "emptyInterleavedReturns": "\(delta.emptyInterleavedReturns)",
                         "emptyPlanarReturns": "\(delta.emptyPlanarReturns)",
                         "ioOverloads": "\(delta.overloads)",
+                        "ringOverflows": "\(delta.ringOverflows)",
                         "maxHandleMs": String(format: "%.2f", Double(maxHandleNanos) / 1_000_000),
                     ]))
                 }
@@ -1956,15 +1960,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let waits = health.snapshotWaits.pointee
         let waitDelta = waits &- health.healthSnapshotWaitBase
         let maxHandleNanos = health.maxHandleNanosForHealth.pointee
+        let maxIoBlockNanos = health.maxIoBlockNanosForHealth.pointee
+        let ringMaxDepth = health.ringMaxDepthForHealth.pointee
         let stageMaxima = health.takeStageMaxima(forGap: false)
         health.healthStartNanos = nowNanos
         health.healthBaseline = io
         health.healthSnapshotWaitBase = waits
         health.maxHandleNanosForHealth.pointee = 0
+        health.maxIoBlockNanosForHealth.pointee = 0
+        health.ringMaxDepthForHealth.pointee = 0
         queue.async {
             Telemetry.log(.captureWS, "capture_health", CaptureHealthTracker.withStageFields(stageMaxima, [
                 "callbacks": "\(delta.callbacks)",
                 "maxHandleMs": String(format: "%.2f", Double(maxHandleNanos) / 1_000_000),
+                "maxIoBlockMs": String(format: "%.2f", Double(maxIoBlockNanos) / 1_000_000),
+                "ringOverflows": "\(delta.ringOverflows)",
+                "ringOversize": "\(delta.ringOversize)",
+                "ringMaxDepth": "\(ringMaxDepth)",
                 "snapshotWaits": "\(waitDelta)",
                 "emptyBufferListReturns": "\(delta.emptyBufferListReturns)",
                 "emptyInterleavedReturns": "\(delta.emptyInterleavedReturns)",
@@ -2422,6 +2434,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         /// `capture_health` line, and since the last `tap_feed_gap` line.
         let maxHandleNanosForHealth = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
         let maxHandleNanosForGap = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+        /// Longest tap IO block in nanoseconds, and most entries seen waiting
+        /// in the tap's delivery ring, since the last `capture_health` line.
+        let maxIoBlockNanosForHealth = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+        let ringMaxDepthForHealth = UnsafeMutablePointer<Int>.allocate(capacity: 1)
 
         var lastSeenCallbacks = 0
         /// Sample time of the last captured buffer handed downstream.
@@ -2441,6 +2457,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             stageMaxNanos.initialize(repeating: 0, count: 2 * Self.stageCount)
             maxHandleNanosForHealth.initialize(to: 0)
             maxHandleNanosForGap.initialize(to: 0)
+            maxIoBlockNanosForHealth.initialize(to: 0)
+            ringMaxDepthForHealth.initialize(to: 0)
         }
 
         deinit {
@@ -2448,11 +2466,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             stageMaxNanos.deallocate()
             maxHandleNanosForHealth.deallocate()
             maxHandleNanosForGap.deallocate()
+            maxIoBlockNanosForHealth.deallocate()
+            ringMaxDepthForHealth.deallocate()
         }
 
         func noteHandleDuration(_ nanos: Int64) {
             if nanos > maxHandleNanosForHealth.pointee { maxHandleNanosForHealth.pointee = nanos }
             if nanos > maxHandleNanosForGap.pointee { maxHandleNanosForGap.pointee = nanos }
+        }
+
+        func noteRing(depth: Int, ioBlockNanos: Int64) {
+            if depth > ringMaxDepthForHealth.pointee { ringMaxDepthForHealth.pointee = depth }
+            if ioBlockNanos > maxIoBlockNanosForHealth.pointee { maxIoBlockNanosForHealth.pointee = ioBlockNanos }
         }
 
         /// The parts of a `handleBuffer` call timed separately, so a slow call
@@ -3080,6 +3105,11 @@ public struct CapturedBuffer: Sendable {
     public var sampleTime: Double?
     /// The tap's IO counts as of this buffer (see ``TapIOCounters``).
     public var ioCounters: TapIOCounters
+    /// Most entries seen waiting in the tap's ``TapDeliveryRing`` since the
+    /// previous buffer, and the longest IO block in nanoseconds over the same
+    /// span. Zero from a tap that has no ring.
+    public var ringMaxDepth = 0
+    public var maxIoBlockNanos: Int64 = 0
 
     public init(channelData: [Data], frameCount: Int, pts: timespec,
                 sampleTime: Double? = nil, ioCounters: TapIOCounters = TapIOCounters()) {
@@ -3105,6 +3135,10 @@ public struct TapIOCounters: Sendable {
     var sampleStepAnomalies = 0
     /// `kAudioDeviceProcessorOverload` notifications on the tap's aggregate.
     var overloads = 0
+    /// Cycles the tap's ``TapDeliveryRing`` dropped because it was full, and
+    /// because they were larger than one of its slots.
+    var ringOverflows = 0
+    var ringOversize = 0
 
     public init() {}
 
@@ -3119,6 +3153,8 @@ public struct TapIOCounters: Sendable {
         delta.emptyPlanarReturns = emptyPlanarReturns - base.emptyPlanarReturns
         delta.sampleStepAnomalies = sampleStepAnomalies - base.sampleStepAnomalies
         delta.overloads = overloads - base.overloads
+        delta.ringOverflows = ringOverflows - base.ringOverflows
+        delta.ringOversize = ringOversize - base.ringOversize
         return delta
     }
 }
@@ -3146,7 +3182,8 @@ public struct EmptyAudioProcessEnumerator: AudioProcessEnumerating {
 /// drives `CATapDescription` / `AudioHardwareCreateProcessTap` + an aggregate
 /// device; tests inject a fake that pushes ``CapturedBuffer``s on demand.
 public protocol SystemAudioTap: AnyObject {
-    /// Called with each captured buffer, on the delivery (IOProc) thread.
+    /// Called with each captured buffer, on the tap's delivery thread (for
+    /// ``CoreAudioSystemTap``, the consumer thread of its ``TapDeliveryRing``).
     var onBuffer: (@Sendable (CapturedBuffer) -> Void)? { get set }
     /// Called when the default output device changes (the tap follows it, so its
     /// format may change and it must be recreated).
@@ -3877,6 +3914,11 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     private var lastIOSampleTime: Double?
     private var lastIOFrameCount: Int?
 
+    /// Carries each IO cycle from the IO block to this tap's consumer thread
+    /// (see the policy at `startIOProc`). Built and started in `startIOProc`,
+    /// stopped and dropped in `teardown()`.
+    private var deliveryRing: TapDeliveryRing?
+
     /// Processor overloads reported on this tap's aggregate. Written by the
     /// overload listener on `telemetryQueue` and read by the IOProc, so it is
     /// one aligned heap word rather than a stored property, the idiom the
@@ -4182,6 +4224,30 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
         let onBuffer = self.onBuffer
 
+        // The ring's size, from the aggregate's real buffer list and the
+        // largest IO buffer it can be asked to run. A planar list is copied
+        // whole (every non-empty buffer, as `CapturedBuffer` has always
+        // carried it), so a slot holds every input buffer the aggregate has;
+        // an interleaved list contributes buffer 0 only.
+        let shape = Self.readInputBufferShape(aggregateID)
+        let bytesPerSample = max(4, Int(asbd.mBitsPerChannel) / 8)
+        let chunkCount = nonInterleaved ? max(shape?.buffers ?? 0, channels, 1) : 1
+        let frameBytes = max(bytesPerFrame * (nonInterleaved ? max(1, channels) : 1),
+                             (shape?.channels ?? 0) * bytesPerSample, 1)
+        // razor: 16 384 frames is the largest cycle the ring is built for and
+        // 32 MiB the most one ring holds; a larger cycle is dropped and counted
+        // in `ringOversize`. Upgrade path if that count ever moves: size the
+        // slot from the cycle Core Audio is running now and rebuild the ring
+        // when the buffer size changes.
+        let maxFrames = min(Self.readMaxBufferFrameSize(aggregateID) ?? 4_096, 16_384)
+        let slotCount = TapDeliveryRing.defaultSlotCount
+        let slotBytes = min(maxFrames * frameBytes, 32 * 1_048_576 / slotCount)
+        let ring = TapDeliveryRing(slotCount: slotCount, chunkCount: chunkCount, slotBytes: slotBytes)
+        deliveryRing = ring
+        ring.start(threadName: "com.audiout.native.capture.delivery.\(name)") { buffer in
+            onBuffer?(buffer)
+        }
+
         // Seed the rebase offset fresh for THIS tap instance (not a process-wide
         // one-time sample) — see `machToMonotonicOffsetNanos` doc. This write
         // happens-before `AudioDeviceStart` below, which happens-before the
@@ -4198,29 +4264,48 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             // ---- THE REAL-TIME POLICY FOR TAP DELIVERY (the one place it
             // is written down; every other site points here) ----
             //
-            // 1. This block runs on the `.userInitiated` serial queue it was
-            //    registered on just above, NOT on the HAL's own real-time
-            //    thread. But `AudioHardware.h` says of that queue: "All
-            //    IOBlocks are dispatched synchronously", i.e. the HAL waits
-            //    for this block, so its wall time still counts against the
-            //    device's IO cycle. Everything downstream of here — the
-            //    per-app `onBuffer` closure, `handleBuffer`, `AppRouteMixer`
-            //    and `LeveledAppInjector` — is on that same critical path.
-            // 2. Nothing on this path waits on a serial queue, or on any lock
+            // 1. This block runs on the serial queue it was registered on just
+            //    above, not on the HAL's own real-time thread, but the HAL
+            //    waits for it ("All IOBlocks are dispatched synchronously",
+            //    `AudioHardware.h`), so its wall time counts against the
+            //    device's IO cycle: 11.6 ms at 512 frames and 44.1 kHz. A block
+            //    that overruns makes Core Audio skip the next cycle, which every
+            //    speaker hears as a tick.
+            // 2. So this block does bounded work only: count the callback, turn
+            //    the host time into a pts, copy the cycle's bytes into this
+            //    tap's ``TapDeliveryRing`` (memory allocated once, in
+            //    `startIOProc`), wake the ring's consumer thread, and return. It
+            //    never allocates, never creates an array or `Data`, never logs,
+            //    never `sync`s onto a queue, and takes only the ring's own lock,
+            //    whose two holders each read or write a few integers.
+            // 3. Everything after capture runs on the ring's consumer thread, a
+            //    `.userInteractive` thread this tap owns, one entry at a time in
+            //    capture order: building the `CapturedBuffer`, the `onBuffer`
+            //    closure, `handleBuffer`, the converter, EQ, the engine write
+            //    and every fan-out. A slow entry there delays later entries; it
+            //    no longer delays Core Audio. A full ring drops the cycle and
+            //    counts it in `ringOverflows` on the `capture_health` and
+            //    `tap_feed_gap` lines.
+            // 4. The consumer path still never waits on a serial queue (above
+            //    all `NativeCaptureCoordinator.queue`: `teardown()` waits for
+            //    this consumer to exit and is called from there), or on any lock
             //    whose holder may do unbounded work (build a converter,
-            //    recompute routes, fire callbacks, log). Queue-confined state
-            //    is published as one immutable snapshot whose lock guards only
-            //    the reference, so every holder does one load or store. This
-            //    path waits for that lock when it is busy and never drops the
-            //    buffer: a dropped buffer is 11.6 ms of silence on every
-            //    speaker, and the lock is an unfair lock, which raises a
-            //    lower-priority holder while the delivery thread waits.
-            // 3. A lock whose EVERY holder does only bounded in-memory work
-            //    may be taken with `lock()`: the converter's own lock (single
-            //    caller in production), and the mixers' timeline and ring
-            //    locks.
-            // 4. Allocation and the `AVAudioConverter` run are accepted costs
-            //    here. There is no no-allocation contract to honour.
+            //    recompute routes, fire callbacks, log). Queue-confined state is
+            //    published as one immutable snapshot whose lock guards only the
+            //    reference, so every holder does one load or store. The consumer
+            //    waits for that lock when it is busy and never drops the buffer.
+            //    A lock whose EVERY holder does only bounded in-memory work may
+            //    be taken with `lock()`: the converter's own lock, and the
+            //    mixers' timeline and ring locks. Allocation and the
+            //    `AVAudioConverter` run are accepted costs on the consumer.
+            // 5. The per-app tap (`PerAppCaptureCoordinator`) still runs its
+            //    whole path inside its IO block, so `AppRouteMixer` and
+            //    `LeveledAppInjector` stay on Core Audio's clock and rule 4
+            //    binds them there as it always has.
+            let blockStartNanos = Self.currentMonotonicNanos()
+            defer {
+                ring.noteIoBlock(nanos: Int64(clamping: Self.currentMonotonicNanos() &- blockStartNanos))
+            }
             guard let self else { return }
             // Diagnostic counts (see ``TapIOCounters``), bumped before any early
             // return so a callback that delivers nothing is still on the record.
@@ -4244,7 +4329,8 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
                 return
             }
 
-            // pts from the IOProc's own capture clock (host time → timespec).
+            // pts from the IOProc's own capture clock (host time → timespec),
+            // stamped here and carried through the ring unchanged.
             // Drift self-heal: if the cached offset has fallen out of step with
             // reality (e.g. the box slept mid-tap), resample it before use —
             // two clock reads, cheap, and confined to this same serial queue so
@@ -4261,41 +4347,36 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             }
             let pts = Self.timespec(machNanos: machNanos, offset: self.machToMonotonicOffsetNanos)
 
-            var channelData: [Data] = []
+            // Frame count from the first non-empty buffer (planar) or buffer 0
+            // (interleaved), without copying anything yet.
             var frameCount = 0
             if nonInterleaved {
-                channelData.reserveCapacity(bufCount)
-                for i in 0..<bufCount {
-                    let b = listPtr[i]
-                    guard let d = b.mData, b.mDataByteSize > 0 else { continue }
-                    channelData.append(Data(bytes: d, count: Int(b.mDataByteSize)))
+                var firstBytes = 0
+                for i in 0..<bufCount where listPtr[i].mData != nil && listPtr[i].mDataByteSize > 0 {
+                    firstBytes = Int(listPtr[i].mDataByteSize)
+                    break
                 }
-                if let first = channelData.first, bytesPerFrame > 0 {
-                    frameCount = first.count / bytesPerFrame
+                guard firstBytes > 0 else {
+                    self.ioCounters.emptyPlanarReturns += 1
+                    return
                 }
+                if bytesPerFrame > 0 { frameCount = firstBytes / bytesPerFrame }
             } else {
                 let b = listPtr[0]
-                guard let d = b.mData, b.mDataByteSize > 0 else {
+                guard b.mData != nil, b.mDataByteSize > 0 else {
                     self.ioCounters.emptyInterleavedReturns += 1
                     return
                 }
-                channelData = [Data(bytes: d, count: Int(b.mDataByteSize))]
-                let frameBytes = max(1, bytesPerFrame)
-                frameCount = Int(b.mDataByteSize) / frameBytes
+                frameCount = Int(b.mDataByteSize) / max(1, bytesPerFrame)
             }
-            // Only the planar path can reach here empty: the interleaved one
-            // returned above.
-            guard !channelData.isEmpty else {
-                self.ioCounters.emptyPlanarReturns += 1
-                return
-            }
+            // Set for a cycle the ring drops too: Core Audio did deliver it, so
+            // the next cycle's sample step is measured against it.
             self.lastIOFrameCount = frameCount
             var counters = self.ioCounters
             counters.overloads = self.overloadCountPtr.pointee
-            onBuffer?(CapturedBuffer(channelData: channelData, frameCount: frameCount, pts: pts,
-                                     sampleTime: sampleTime, ioCounters: counters))
+            ring.push(listPtr, nonInterleaved: nonInterleaved, frameCount: frameCount,
+                      pts: pts, sampleTime: sampleTime, counters: counters)
         }
-        _ = channels
         guard err == noErr else {
             throw NativeCaptureError.aggregateDeviceFailed(reason: "AudioDeviceCreateIOProcIDWithBlock \(err)")
         }
@@ -4394,6 +4475,42 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let err = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
         guard err == noErr, rate.isFinite, rate > 0 else { return nil }
         return rate
+    }
+
+    /// The largest IO buffer, in frames, a device can be asked to run
+    /// (`kAudioDevicePropertyBufferFrameSizeRange`'s maximum), or nil.
+    static func readMaxBufferFrameSize(_ deviceID: AudioObjectID) -> Int? {
+        guard deviceID != kAudioObjectUnknown else { return nil }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyBufferFrameSizeRange,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var range = AudioValueRange()
+        var size = UInt32(MemoryLayout<AudioValueRange>.size)
+        let err = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &range)
+        guard err == noErr, range.mMaximum.isFinite, range.mMaximum >= 1 else { return nil }
+        return Int(min(range.mMaximum, 1_048_576))
+    }
+
+    /// The shape of the input buffer list a device's IO block receives
+    /// (`kAudioDevicePropertyStreamConfiguration`, input scope): how many
+    /// buffers, and how many channels they carry in total. Nil if unreadable.
+    static func readInputBufferShape(_ deviceID: AudioObjectID) -> (buffers: Int, channels: Int)? {
+        guard deviceID != kAudioObjectUnknown else { return nil }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr,
+              Int(size) >= MemoryLayout<AudioBufferList>.size else { return nil }
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { raw.deallocate() }
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, raw) == noErr else { return nil }
+        let list = UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self))
+        let channels = list.reduce(0) { $0 + Int($1.mNumberChannels) }
+        return (list.count, channels)
     }
 
     // MARK: D2 telemetry helpers (whole-system-dropout investigation)
@@ -4606,6 +4723,12 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             }
             ioProcID = nil
         }
+        // The IO block can no longer run, so nothing more enters the ring. Wait
+        // for the consumer to finish the buffer it is on and exit; cycles still
+        // waiting are discarded. After this, `onBuffer` is never called again,
+        // which `stop()` and `recreateTap` rely on.
+        deliveryRing?.stop()
+        deliveryRing = nil
         if aggregateID != kAudioObjectUnknown {
             // D2 telemetry ONLY: same shape as `aggregate_create`, read
             // BEFORE the destroy call below so a reader can compare "at

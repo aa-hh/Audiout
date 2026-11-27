@@ -73,7 +73,7 @@ import AVFoundation
         /// Deliver one capture buffer = the SUM of every non-excluded process's
         /// tone, over `frames` frames starting at sample index `phaseStart` (so a
         /// sequence of buffers is phase-continuous).
-        func deliverMix(frames: Int, phaseStart: Int, pts: timespec) {
+        func deliverMix(frames: Int, phaseStart: Int, pts: timespec, sampleTime: Double? = nil) {
             let (procs, exc) = lock.withLock { (_processes, _excluded) }
             var interleaved = [Float](repeating: 0, count: frames * Self.channels)
             for (pid, freq) in procs where !exc.contains(Self.objectID(for: pid)) {
@@ -85,7 +85,8 @@ import AVFoundation
                 }
             }
             let data = interleaved.withUnsafeBufferPointer { Data(buffer: $0) }
-            onBuffer?(CapturedBuffer(channelData: [data], frameCount: frames, pts: pts))
+            onBuffer?(CapturedBuffer(channelData: [data], frameCount: frames, pts: pts,
+                                     sampleTime: sampleTime))
         }
     }
 
@@ -859,7 +860,9 @@ extension SerializedSharedState {
         /// then, nothing padded the hole, and every sink is fed by sample count,
         /// so all later audio played 11.6 ms early once per lost cycle. Turns red
         /// if `handleBuffer` goes back to measuring the feed hole only when a
-        /// rebuild armed it.
+        /// rebuild armed it, or if the line stops carrying the sample-time step,
+        /// the snapshot-wait count or the host-time gap that tell a cycle Core
+        /// Audio skipped from one this code dropped.
         @Test func aDroppedIOProcCycleIsPaddedWithSilence() async throws {
             let capture = LineCapture()
             Telemetry._installTestSink { capture.append($0) }
@@ -876,11 +879,13 @@ extension SerializedSharedState {
             // Block 1 ends 4 frames after its own pts (the fixed converter's
             // payload); block 2 arrives one whole 512-frame IOProc cycle later
             // than that, which is the hole a lost cycle leaves.
-            tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
+            tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0),
+                           sampleTime: 0)
             let firstEndNsec = 90_703
             let cycleNanos = 11_609_977
             tap.deliverMix(frames: 4, phaseStart: 4,
-                           pts: timespec(tv_sec: 1, tv_nsec: firstEndNsec + cycleNanos))
+                           pts: timespec(tv_sec: 1, tv_nsec: firstEndNsec + cycleNanos),
+                           sampleTime: 1024)
 
             let bytesPerFrame = PCMFormat.airplay.channels * MemoryLayout<Int16>.size
             let framesDelivered = engineSink.forwarded.reduce(0) { $0 + $1.pcm.count / bytesPerFrame }
@@ -890,8 +895,73 @@ extension SerializedSharedState {
             _ = try #require(
                 await capture.pollForLine(
                     evt: "tap_feed_gap",
-                    containing: ["\"cause\":\"dropped_cycle\"", "\"gapMs\":\"11.6\""]),
+                    containing: ["\"cause\":\"dropped_cycle\"", "\"gapMs\":\"11.6\"",
+                                 "\"sampleStepFrames\":\"1024\"", "\"snapshotWaits\":\"0\"",
+                                 "\"hostGapMs\":\"11.6\""]),
                 "no tap_feed_gap line for the lost cycle")
+        }
+
+        /// Defect (live capture 2026-11-27): a buffer that found the snapshot
+        /// lock busy was thrown away, leaving an 11.6 ms hole on every speaker.
+        /// Turns red if `handleBuffer` goes back to returning on a busy lock
+        /// (the second buffer never reaches the sink, and the third is padded
+        /// with a lost cycle of silence), or stops counting the wait.
+        @Test func aBufferArrivingWhileTheSnapshotLockIsHeldIsDelivered() async throws {
+            let tap = SyncedLocalFanoutTests.FeedbackFakeTap()
+            let engineSink = SyncedLocalFanoutTests.SpyPCMSink()
+            let coordinator = makeCoordinator(tap: tap, sink: engineSink)
+            defer { coordinator.stop() }
+
+            coordinator.start()
+            await waitForCapturing(coordinator)
+
+            // Three back-to-back 4-frame blocks: each starts where the last
+            // one ends, so none of them leaves a hole to pad.
+            let blockNanos = 90_703
+            let pts = (0..<3).map { timespec(tv_sec: 1, tv_nsec: $0 * blockNanos) }
+            tap.deliverMix(frames: 4, phaseStart: 0, pts: pts[0])
+
+            // Another thread holds the lock until told to let go. The unfair
+            // lock must be unlocked by the thread that locked it, so the
+            // holder and the delivery each get a thread of their own.
+            let held = DispatchSemaphore(value: 0)
+            let release = DispatchSemaphore(value: 0)
+            let delivered = DispatchSemaphore(value: 0)
+            Thread {
+                coordinator.test_withSnapshotLockHeld {
+                    held.signal()
+                    release.wait()
+                }
+            }.start()
+            await withCheckedContinuation { done in
+                DispatchQueue.global().async { held.wait(); done.resume() }
+            }
+            Thread {
+                tap.deliverMix(frames: 4, phaseStart: 4, pts: pts[1])
+                delivered.signal()
+            }.start()
+
+            // The count goes up just before the delivery starts waiting.
+            await SuiteWait.until("the delivery to find the snapshot lock busy") {
+                coordinator.test_snapshotWaits == 1
+            }
+            #expect(engineSink.forwarded.count == 1, "nothing gets past the lock while it is held")
+            release.signal()
+            await withCheckedContinuation { done in
+                DispatchQueue.global().async { delivered.wait(); done.resume() }
+            }
+
+            tap.deliverMix(frames: 4, phaseStart: 8, pts: pts[2])
+
+            // Exactly the three converted blocks, in order. Padding would be
+            // zeroed silence where the converter's payload is not, and no
+            // padding means no `tap_feed_gap` line (it is logged only when it
+            // pads).
+            #expect(engineSink.forwarded.map(\.pts.tv_nsec) == pts.map(\.tv_nsec),
+                    "the waiting buffer must reach the sink, in order")
+            #expect(engineSink.forwarded.allSatisfy { $0.pcm == SyncedLocalFanoutTests.FixedConverter.payload },
+                    "every block is captured audio, none of it padded silence")
+            #expect(coordinator.test_snapshotWaits == 1)
         }
 
         /// The other half of the same defect: a hole far longer than a lost cycle

@@ -1045,6 +1045,75 @@ import AVFoundation
         #expect(health.peakDBFS == -120)
     }
 
+    // MARK: - A busy state lock never inserts a silent cycle into released audio
+
+    static let cycleNanos = Int64((512 * nsPerFrame).rounded())
+
+    /// Red if a render cycle that finds `stateLock` busy after release goes out
+    /// silent again: on a real speaker each such cycle was heard as the audio
+    /// stepping one cycle (11.6 ms) later, for good.
+    @Test func busyLockAfterRelease_playsTheRingAndCountsAHarmlessMiss() throws {
+        let (manager, sink, ramp) = try Self.anchoredSink()
+        defer { manager.stop() }
+        let onTime = Self.renderCycle(sink, at: Self.anchorNanos + 100_000_000)
+        #expect(onTime.samples[0] == ramp[0])
+
+        let before = sink.test_renderLockMisses
+        var busy: (produced: Bool, samples: [Float]) = (false, [])
+        sink.test_withStateLockHeldElsewhere {
+            busy = Self.renderCycle(sink, at: Self.anchorNanos + 100_000_000 + Self.cycleNanos)
+        }
+        let after = sink.test_renderLockMisses
+
+        #expect(busy.produced)
+        #expect(busy.samples[0] == ramp[512], "the busy cycle must play on from where the last one stopped")
+        #expect(after.all - before.all == 1)
+        #expect(after.silent - before.silent == 0)
+    }
+
+    /// Red if a busy lock before release plays the ring (the gate has not
+    /// opened, so that is audio early) or stops counting as a silent miss.
+    @Test func busyLockBeforeRelease_staysSilentAndCountsASilentMiss() throws {
+        let (manager, sink, _) = try Self.anchoredSink()
+        defer { manager.stop() }
+        _ = Self.renderCycle(sink, at: Self.anchorNanos + 40_000_000)
+
+        let before = sink.test_renderLockMisses
+        var busy: (produced: Bool, samples: [Float]) = (true, [])
+        sink.test_withStateLockHeldElsewhere {
+            busy = Self.renderCycle(sink, at: Self.anchorNanos + 50_000_000)
+        }
+        let after = sink.test_renderLockMisses
+
+        #expect(!busy.produced)
+        #expect(busy.samples.allSatisfy { $0 == 0 })
+        #expect(after.all - before.all == 1)
+        #expect(after.silent - before.silent == 1)
+    }
+
+    /// Red if the session reset leaves the render thread's copy saying
+    /// "released": a busy-lock cycle after a rebuild would then play the next
+    /// session's ring before its gate opens.
+    @Test func busyLockAfterARebuild_doesNotPlayTheNextSessionEarly() throws {
+        let (manager, sink, _) = try Self.anchoredSink()
+        defer { manager.stop() }
+        #expect(Self.renderCycle(sink, at: Self.anchorNanos + 100_000_000).produced)
+
+        sink.requestRebuild(cause: "test")
+        sink.test_waitForPendingRebuild()
+        let secondAnchorSec = Self.anchorSec + 10
+        Self.enqueueRamp(into: manager, atSec: secondAnchorSec)
+        sink.test_waitForPendingRebuild()
+
+        var busy: (produced: Bool, samples: [Float]) = (true, [])
+        sink.test_withStateLockHeldElsewhere {
+            busy = Self.renderCycle(
+                sink, at: Int64(secondAnchorSec) * 1_000_000_000 + 50_000_000)
+        }
+        #expect(!busy.produced)
+        #expect(busy.samples.allSatisfy { $0 == 0 })
+    }
+
     /// Red if a first start that finds the device dead only logs a start failure:
     /// the stopped sink would sit in the table with nobody told.
     @Test func deadDeviceAtFirstStart_reportsDeadAndDropsSink() {

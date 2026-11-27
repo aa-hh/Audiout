@@ -2,6 +2,7 @@
 // Copyright (C) 2026 ahh and contributors.
 
 import Foundation
+import os
 
 #if canImport(AudioToolbox)
 import AudioToolbox
@@ -107,13 +108,13 @@ public final class LeveledAppInjector: @unchecked Sendable {
             volumeForBundle: [:], converterForBundle: [:], meteringActive: false)
     }
 
-    /// Guards ONLY the `_snapshot` reference — one pointer store on publish, one
-    /// non-blocking `try()` read on delivery, nothing else. NEVER held across a
-    /// converter call, and never held while waiting on `queue`. Same shape as
-    /// ``NativeCaptureCoordinator``'s own `snapshotLock`; the rule it serves is
-    /// the real-time policy written at `NativeCaptureCoordinator.startIOProc`'s
-    /// IOProc block.
-    private let snapshotLock = NSLock()
+    /// Guards ONLY the `_snapshot` reference — one store on publish, one load on
+    /// delivery, nothing else. NEVER held across a converter call, and never
+    /// held while waiting on `queue`. Same shape and same lock type as
+    /// ``NativeCaptureCoordinator``'s own `snapshotLock`, for the reason written
+    /// there; the rule it serves is the real-time policy written at
+    /// `NativeCaptureCoordinator.startIOProc`'s IOProc block.
+    private let snapshotLock = OSAllocatedUnfairLock()
 
     /// The currently published snapshot. Written only via
     /// ``publishSnapshotLocked()`` (always while holding `queue`), read only by
@@ -226,9 +227,14 @@ public final class LeveledAppInjector: @unchecked Sendable {
             volumeForBundle: volumeForBundle,
             converterForBundle: converterForBundle,
             meteringActive: meteringActive)
+        // Swap rather than assign, so the old snapshot is released after the
+        // unlock: its last release can free converters, and the delivery path
+        // waits on this lock.
+        var previous = snapshot
         snapshotLock.lock()
-        _snapshot = snapshot
+        swap(&_snapshot, &previous)
         snapshotLock.unlock()
+        withExtendedLifetime(previous) {}
     }
 
     // MARK: Configuration
@@ -314,20 +320,18 @@ public final class LeveledAppInjector: @unchecked Sendable {
     /// per-app tap's delivery thread: it reads the published snapshot and takes
     /// `mixLock` for bounded sections only, never waiting on `queue`.
     public func handleBuffer(bundleID: String, buffer: CapturedBuffer) {
-        // Delivery thread: read the published state with a single non-blocking
-        // reference read and drop this buffer on a miss, instead of waiting on
-        // `queue` — which `updateLeveled` and `handleStateChange` hold while they
-        // BUILD CONVERTERS, so a wait here parks the tap for the whole edit. The
-        // snapshot is swapped whole, so a torn read is impossible, and it is at
-        // most one edit stale. This is the policy written at
-        // `NativeCaptureCoordinator.startIOProc`'s IOProc block.
-        let snapshot: DeliverySnapshot
-        if snapshotLock.try() {
-            snapshot = _snapshot
-            snapshotLock.unlock()
-        } else {
-            return
-        }
+        // Delivery thread: read the published state with a single reference
+        // load instead of waiting on `queue`, which `updateLeveled` and
+        // `handleStateChange` hold while they BUILD CONVERTERS. The snapshot is
+        // swapped whole, so a torn read is impossible. Every holder of
+        // `snapshotLock` does one load or store, so waiting for it is short;
+        // giving up on a busy lock instead dropped the buffer, and several
+        // leveled apps' taps read here at once, so they made each other drop.
+        // This is the policy written at `NativeCaptureCoordinator.startIOProc`'s
+        // IOProc block.
+        snapshotLock.lock()
+        let snapshot = _snapshot
+        snapshotLock.unlock()
 
         mixLock.lock()
         let isActive = active

@@ -73,7 +73,7 @@ import AVFoundation
         /// Deliver one capture buffer = the SUM of every non-excluded process's
         /// tone, over `frames` frames starting at sample index `phaseStart` (so a
         /// sequence of buffers is phase-continuous).
-        func deliverMix(frames: Int, phaseStart: Int, pts: timespec) {
+        func deliverMix(frames: Int, phaseStart: Int, pts: timespec, sampleTime: Double? = nil) {
             let (procs, exc) = lock.withLock { (_processes, _excluded) }
             var interleaved = [Float](repeating: 0, count: frames * Self.channels)
             for (pid, freq) in procs where !exc.contains(Self.objectID(for: pid)) {
@@ -85,7 +85,8 @@ import AVFoundation
                 }
             }
             let data = interleaved.withUnsafeBufferPointer { Data(buffer: $0) }
-            onBuffer?(CapturedBuffer(channelData: [data], frameCount: frames, pts: pts))
+            onBuffer?(CapturedBuffer(channelData: [data], frameCount: frames, pts: pts,
+                                     sampleTime: sampleTime))
         }
     }
 
@@ -859,7 +860,9 @@ extension SerializedSharedState {
         /// then, nothing padded the hole, and every sink is fed by sample count,
         /// so all later audio played 11.6 ms early once per lost cycle. Turns red
         /// if `handleBuffer` goes back to measuring the feed hole only when a
-        /// rebuild armed it.
+        /// rebuild armed it, or if the line stops carrying the sample-time step,
+        /// the try-miss count or the host-time gap that tell a cycle Core Audio
+        /// skipped from one this code dropped.
         @Test func aDroppedIOProcCycleIsPaddedWithSilence() async throws {
             let capture = LineCapture()
             Telemetry._installTestSink { capture.append($0) }
@@ -876,11 +879,13 @@ extension SerializedSharedState {
             // Block 1 ends 4 frames after its own pts (the fixed converter's
             // payload); block 2 arrives one whole 512-frame IOProc cycle later
             // than that, which is the hole a lost cycle leaves.
-            tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
+            tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0),
+                           sampleTime: 0)
             let firstEndNsec = 90_703
             let cycleNanos = 11_609_977
             tap.deliverMix(frames: 4, phaseStart: 4,
-                           pts: timespec(tv_sec: 1, tv_nsec: firstEndNsec + cycleNanos))
+                           pts: timespec(tv_sec: 1, tv_nsec: firstEndNsec + cycleNanos),
+                           sampleTime: 1024)
 
             let bytesPerFrame = PCMFormat.airplay.channels * MemoryLayout<Int16>.size
             let framesDelivered = engineSink.forwarded.reduce(0) { $0 + $1.pcm.count / bytesPerFrame }
@@ -890,8 +895,48 @@ extension SerializedSharedState {
             _ = try #require(
                 await capture.pollForLine(
                     evt: "tap_feed_gap",
-                    containing: ["\"cause\":\"dropped_cycle\"", "\"gapMs\":\"11.6\""]),
+                    containing: ["\"cause\":\"dropped_cycle\"", "\"gapMs\":\"11.6\"",
+                                 "\"sampleStepFrames\":\"1024\"", "\"tryMisses\":\"0\"",
+                                 "\"hostGapMs\":\"11.6\""]),
                 "no tap_feed_gap line for the lost cycle")
+        }
+
+        /// The other cause of the same hole: the buffer reached `handleBuffer`
+        /// but missed the snapshot lock and was dropped there. Turns red if the
+        /// try-miss drop stops being counted, which would make a buffer this code
+        /// dropped read on the line as a cycle Core Audio skipped.
+        @Test func aBufferDroppedOnTheSnapshotLockIsCountedOnTheFeedGapLine() async throws {
+            let capture = LineCapture()
+            Telemetry._installTestSink { capture.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            let tap = SyncedLocalFanoutTests.FeedbackFakeTap()
+            let engineSink = SyncedLocalFanoutTests.SpyPCMSink()
+            let coordinator = makeCoordinator(tap: tap, sink: engineSink)
+            defer { coordinator.stop() }
+
+            coordinator.start()
+            await waitForCapturing(coordinator)
+
+            tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0),
+                           sampleTime: 0)
+            let firstEndNsec = 90_703
+            let cycleNanos = 11_609_977
+            coordinator.test_withSnapshotLockHeld {
+                tap.deliverMix(frames: 4, phaseStart: 4,
+                               pts: timespec(tv_sec: 1, tv_nsec: firstEndNsec),
+                               sampleTime: 512)
+            }
+            tap.deliverMix(frames: 4, phaseStart: 8,
+                           pts: timespec(tv_sec: 1, tv_nsec: firstEndNsec + cycleNanos),
+                           sampleTime: 1024)
+
+            _ = try #require(
+                await capture.pollForLine(
+                    evt: "tap_feed_gap",
+                    containing: ["\"cause\":\"dropped_cycle\"", "\"tryMisses\":\"1\"",
+                                 "\"sampleStepFrames\":\"1024\""]),
+                "no tap_feed_gap line counting the dropped buffer")
         }
 
         /// The other half of the same defect: a hole far longer than a lost cycle

@@ -1661,6 +1661,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
     }
 
+    /// Test seam: run `body` with the buffer-snapshot lock held, so a buffer
+    /// delivered inside it misses `handleBuffer`'s `try()` and is dropped.
+    /// `NSLock.try()` fails even for the thread that holds the lock.
+    func test_withSnapshotLockHeld(_ body: () -> Void) {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        body()
+    }
+
     /// Swap in the tone stages the delivery path applies (per-device + Main Out
     /// EQ). ADDITIVE seam, same shape as ``setAlignTickMode(_:)``: it swaps one
     /// snapshot field and touches neither the tap, the exclusion set, nor the
@@ -1699,6 +1708,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Runs on the tap's delivery thread (the IOProc, in production). Allocation
     /// beyond the converter's own scratch is avoided on this path where practical.
     private func handleBuffer(_ buffer: CapturedBuffer) {
+        let callStartNanos = Self.monotonicNanos()
+        defer { captureHealth.noteHandleDuration(Self.monotonicNanos() &- callStartNanos) }
         // T8 (plan finding F12): this is the tap's delivery thread — never take
         // `queue` here. See the policy at `startIOProc`'s IOProc block.
         //
@@ -1727,6 +1738,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             snapshot = _bufferSnapshot
             snapshotLock.unlock()
         } else {
+            captureHealth.tryMisses.pointee &+= 1
             return
         }
         // The wizard drives the feed itself for the duration of a run, so the
@@ -1744,6 +1756,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // (throttled + delta-gated inside — see `sampleConversionFailuresIfDue`).
         converter.sampleConversionFailuresIfDue()
         guard var pcm = converted, !pcm.isEmpty else { return }
+
+        let health = captureHealth
+        let io = buffer.ioCounters
+        if io.callbacks < health.lastSeenCallbacks { health.restartForNewTap() }
+        health.lastSeenCallbacks = io.callbacks
 
         // Leveled apps (per-app volume for un-redirected apps): each one's own
         // captured audio, already scaled by its slider, summed back into the
@@ -1825,10 +1842,43 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 // Logged only when it fills, unlike the rebuild arm above: an
                 // unfilled hole here is the tap waking from idle, which happens
                 // every time the music stops and says nothing worth a line.
+                //
+                // Reading the extra fields: `sampleStepFrames` is measured
+                // between buffers that reached this point, so a step of two
+                // cycles (1024 frames at 512 a cycle) with zero `tryMisses` and
+                // zero early returns means Core Audio skipped the cycle. The same
+                // step with a miss or an early return counted means our code
+                // dropped the buffer. Counts are since the previous line of this
+                // kind (or since start); `hostGapMs` is this buffer's pts against
+                // the end of the previous captured buffer, ignoring fills.
+                let sampleStep: Double? = buffer.sampleTime.flatMap { now in
+                    health.lastSampleTime.map { now - $0 }
+                }
+                let hostGapNanos: Int64? = health.lastCapturedEndPtsNanos == 0
+                    ? nil : SyncTiming.monotonicNanos(buffer.pts) &- health.lastCapturedEndPtsNanos
+                let delta = io.since(health.gapBaseline)
+                let misses = health.tryMisses.pointee
+                let tryMissDelta = misses &- health.gapTryMissBase
+                let maxHandleNanos = health.maxHandleNanosForGap.pointee
+                health.gapBaseline = io
+                health.gapTryMissBase = misses
+                health.maxHandleNanosForGap.pointee = 0
                 queue.async {
                     Telemetry.log(.captureWS, "tap_feed_gap", [
                         "cause": "dropped_cycle",
                         "gapMs": String(format: "%.1f", Double(gapNanos) / 1_000_000),
+                        "sampleStepFrames": sampleStep.map {
+                            $0 == $0.rounded() ? String(format: "%.0f", $0) : String(format: "%.1f", $0)
+                        } ?? "na",
+                        "hostGapMs": hostGapNanos.map {
+                            String(format: "%.1f", Double($0) / 1_000_000)
+                        } ?? "na",
+                        "tryMisses": "\(tryMissDelta)",
+                        "emptyBufferListReturns": "\(delta.emptyBufferListReturns)",
+                        "emptyInterleavedReturns": "\(delta.emptyInterleavedReturns)",
+                        "emptyPlanarReturns": "\(delta.emptyPlanarReturns)",
+                        "ioOverloads": "\(delta.overloads)",
+                        "maxHandleMs": String(format: "%.2f", Double(maxHandleNanos) / 1_000_000),
                     ])
                 }
                 fillFeedGap(nanos: gapNanos, from: lastEnd, snapshot: snapshot)
@@ -1842,7 +1892,47 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             leveledClockLock.unlock()
         }
 
+        let capturedFrames = pcm.count / (PCMFormat.airplay.channels * MemoryLayout<Int16>.size)
+        health.lastSampleTime = buffer.sampleTime
+        health.lastCapturedEndPtsNanos = SyncTiming.monotonicNanos(buffer.pts)
+            &+ Int64((Double(capturedFrames) * 1_000_000_000 / Double(PCMFormat.airplay.sampleRate)).rounded())
+        emitCaptureHealthIfDue(io: io, nowNanos: callStartNanos)
+
         deliver(pcm, pts: buffer.pts, snapshot: snapshot)
+    }
+
+    /// Delivery thread only. Every 5 s of delivered buffers, one
+    /// `capture_health` line with the counts for that interval. Handed to
+    /// `queue` because `Telemetry.log` must not run on the delivery thread.
+    private func emitCaptureHealthIfDue(io: TapIOCounters, nowNanos: Int64) {
+        let health = captureHealth
+        guard health.healthStartNanos != 0 else {
+            health.healthStartNanos = nowNanos
+            return
+        }
+        let intervalNanos = nowNanos &- health.healthStartNanos
+        guard intervalNanos >= Self.captureHealthIntervalNanos else { return }
+        let delta = io.since(health.healthBaseline)
+        let misses = health.tryMisses.pointee
+        let tryMissDelta = misses &- health.healthTryMissBase
+        let maxHandleNanos = health.maxHandleNanosForHealth.pointee
+        health.healthStartNanos = nowNanos
+        health.healthBaseline = io
+        health.healthTryMissBase = misses
+        health.maxHandleNanosForHealth.pointee = 0
+        queue.async {
+            Telemetry.log(.captureWS, "capture_health", [
+                "callbacks": "\(delta.callbacks)",
+                "maxHandleMs": String(format: "%.2f", Double(maxHandleNanos) / 1_000_000),
+                "tryMisses": "\(tryMissDelta)",
+                "emptyBufferListReturns": "\(delta.emptyBufferListReturns)",
+                "emptyInterleavedReturns": "\(delta.emptyInterleavedReturns)",
+                "emptyPlanarReturns": "\(delta.emptyPlanarReturns)",
+                "sampleStepAnomalies": "\(delta.sampleStepAnomalies)",
+                "ioOverloads": "\(delta.overloads)",
+                "intervalMs": String(format: "%.0f", Double(intervalNanos) / 1_000_000),
+            ])
+        }
     }
 
     // MARK: - Leveled-app fallback clock
@@ -2248,6 +2338,66 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     }
 
     private let feedGap = FeedGapTracker()
+
+    /// Evidence for the `capture_health` line and the `dropped_cycle` arm of
+    /// `tap_feed_gap`: whether a lost cycle was dropped by this code or never
+    /// came from Core Audio.
+    ///
+    /// The try-miss total and the two longest-call values are written by every
+    /// `handleBuffer` call, and two taps can be inside it at once (a
+    /// make-before-break rebuild starts the new tap before the old one stops).
+    /// Two threads writing one plain stored property would trip Swift's
+    /// exclusivity check, so those three live behind pointers, as
+    /// ``FeedGapTracker``'s words do. Everything else is written only past the
+    /// converter check, which one tap at a time gets through, so it stays plain.
+    private final class CaptureHealthTracker {
+        let tryMisses = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        /// Longest `handleBuffer` call in nanoseconds since the last
+        /// `capture_health` line, and since the last `tap_feed_gap` line.
+        let maxHandleNanosForHealth = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+        let maxHandleNanosForGap = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+
+        var lastSeenCallbacks = 0
+        /// Sample time of the last captured buffer handed downstream.
+        var lastSampleTime: Double?
+        /// Where the last captured buffer handed downstream ends (its pts plus
+        /// its converted length); fills are not counted.
+        var lastCapturedEndPtsNanos: Int64 = 0
+
+        var healthStartNanos: Int64 = 0
+        var healthBaseline = TapIOCounters()
+        var healthTryMissBase = 0
+        var gapBaseline = TapIOCounters()
+        var gapTryMissBase = 0
+
+        init() {
+            tryMisses.initialize(to: 0)
+            maxHandleNanosForHealth.initialize(to: 0)
+            maxHandleNanosForGap.initialize(to: 0)
+        }
+
+        deinit {
+            tryMisses.deallocate()
+            maxHandleNanosForHealth.deallocate()
+            maxHandleNanosForGap.deallocate()
+        }
+
+        func noteHandleDuration(_ nanos: Int64) {
+            if nanos > maxHandleNanosForHealth.pointee { maxHandleNanosForHealth.pointee = nanos }
+            if nanos > maxHandleNanosForGap.pointee { maxHandleNanosForGap.pointee = nanos }
+        }
+
+        /// A buffer's tap counts went backwards: it comes from a new tap, whose
+        /// counts and sample times restart, so the old baselines mean nothing.
+        func restartForNewTap() {
+            healthBaseline = TapIOCounters()
+            gapBaseline = TapIOCounters()
+            lastSampleTime = nil
+        }
+    }
+
+    private let captureHealth = CaptureHealthTracker()
+    private static let captureHealthIntervalNanos: Int64 = 5_000_000_000
 
     /// Rolling history of the Bluetooth-bound outgoing audio (roadmap 085
     /// ticket 01): the correlation reference for passive drift tracking.
@@ -2797,11 +2947,50 @@ public struct CapturedBuffer: Sendable {
     public var frameCount: Int
     /// Presentation timestamp of the first frame (from the capture clock).
     public var pts: timespec
+    /// The IO cycle's `mSampleTime`, when Core Audio marked it valid.
+    public var sampleTime: Double?
+    /// The tap's IO counts as of this buffer (see ``TapIOCounters``).
+    public var ioCounters: TapIOCounters
 
-    public init(channelData: [Data], frameCount: Int, pts: timespec) {
+    public init(channelData: [Data], frameCount: Int, pts: timespec,
+                sampleTime: Double? = nil, ioCounters: TapIOCounters = TapIOCounters()) {
         self.channelData = channelData
         self.frameCount = frameCount
         self.pts = pts
+        self.sampleTime = sampleTime
+        self.ioCounters = ioCounters
+    }
+}
+
+/// Running counts from one tap's IOProc, stamped into every buffer it delivers,
+/// so the counts from callbacks that returned early ride on the next buffer that
+/// gets through. Cumulative since the tap was created: a rebuilt tap is a new
+/// object and starts again from zero.
+public struct TapIOCounters: Sendable {
+    var callbacks = 0
+    var emptyBufferListReturns = 0
+    var emptyInterleavedReturns = 0
+    var emptyPlanarReturns = 0
+    /// Callbacks whose sample time did not move by the previous callback's
+    /// frame count (within half a frame).
+    var sampleStepAnomalies = 0
+    /// `kAudioDeviceProcessorOverload` notifications on the tap's aggregate.
+    var overloads = 0
+
+    public init() {}
+
+    /// The counts added since `base`. When `callbacks` went backwards, `base`
+    /// belongs to an earlier tap, so the counts are returned as they stand.
+    func since(_ base: TapIOCounters) -> TapIOCounters {
+        guard callbacks >= base.callbacks else { return self }
+        var delta = TapIOCounters()
+        delta.callbacks = callbacks - base.callbacks
+        delta.emptyBufferListReturns = emptyBufferListReturns - base.emptyBufferListReturns
+        delta.emptyInterleavedReturns = emptyInterleavedReturns - base.emptyInterleavedReturns
+        delta.emptyPlanarReturns = emptyPlanarReturns - base.emptyPlanarReturns
+        delta.sampleStepAnomalies = sampleStepAnomalies - base.sampleStepAnomalies
+        delta.overloads = overloads - base.overloads
+        return delta
     }
 }
 
@@ -3552,6 +3741,36 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// queue-confinement discipline elsewhere.
     private var machToMonotonicOffsetNanos: Int64 = 0
 
+    /// Diagnostic IO counts and the previous callback's sample time and frame
+    /// count. Touched only inside the IOProc block, which runs serially on this
+    /// tap's own queue, so no lock (same confinement as the offset above).
+    private var ioCounters = TapIOCounters()
+    private var lastIOSampleTime: Double?
+    private var lastIOFrameCount: Int?
+
+    /// Processor overloads reported on this tap's aggregate. Written by the
+    /// overload listener on `telemetryQueue` and read by the IOProc, so it is
+    /// one aligned heap word rather than a stored property, the idiom the
+    /// coordinator's `FeedGapTracker` uses for the same cross-thread case.
+    private let overloadCountPtr: UnsafeMutablePointer<Int> = {
+        let pointer = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        pointer.initialize(to: 0)
+        return pointer
+    }()
+    private var overloadListener: AudioObjectPropertyListenerBlock?
+    /// Overloads counted since the last `tap_io_overload` line. `telemetryQueue`
+    /// only. A separate object so the delayed line still logs if this tap is
+    /// released before it fires.
+    private final class OverloadWindow: @unchecked Sendable { var count = 0 }
+    private let overloadWindow = OverloadWindow()
+
+    private static var overloadAddress: AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioDeviceProcessorOverload,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+    }
+
     /// T7: the AGGREGATE device's id, which is the object publishing the I/O
     /// workgroup the engine thread should join — deliberately NOT
     /// `tappedOutputDeviceID`. The default output device publishes a different,
@@ -3579,7 +3798,10 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// `createAndStart` failure where the caller drops us, or a coordinator
     /// deallocated mid-capture. `teardown()` is idempotent and guards each object
     /// id, so a double teardown is safe.
-    deinit { teardown() }
+    deinit {
+        teardown()
+        overloadCountPtr.deallocate()
+    }
 
     func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
         // Connect-latency diagnosis: brackets whole-system capture setup (tap +
@@ -3789,6 +4011,42 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         Self.telemetryQueue.asyncAfter(deadline: .now() + .milliseconds(250), execute: work)
     }
 
+    /// Count `kAudioDeviceProcessorOverload` on the aggregate: Core Audio's own
+    /// report that an IO cycle ran out of time. Registered before
+    /// `AudioDeviceStart` so the first cycles are covered; removed in
+    /// `teardown()`. Diagnostic only, so a failed registration never fails the
+    /// tap.
+    private func installOverloadListener() {
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.noteOverload()
+        }
+        var address = Self.overloadAddress
+        let err = AudioObjectAddPropertyListenerBlock(aggregateID, &address, Self.telemetryQueue, block)
+        guard err == noErr else {
+            AudioDiag.log("CoreAudioSystemTap overload listener install failed: \(err)")
+            return
+        }
+        overloadListener = block
+    }
+
+    /// `telemetryQueue` only. The first overload in a window schedules one
+    /// `tap_io_overload` line a second later carrying every overload counted
+    /// by then: at most one line a second, and no overload left uncounted.
+    private func noteOverload() {
+        overloadCountPtr.pointee += 1
+        let window = overloadWindow
+        window.count += 1
+        guard window.count == 1 else { return }
+        let name = self.name
+        Self.telemetryQueue.asyncAfter(deadline: .now() + .seconds(1)) {
+            Telemetry.log(.captureWS, "tap_io_overload", [
+                "coordinator": name,
+                "count": "\(window.count)",
+            ])
+            window.count = 0
+        }
+    }
+
     private func startIOProc() throws {
         let channels = Int(asbd.mChannelsPerFrame)
         let bytesPerFrame = Int(asbd.mBytesPerFrame)
@@ -3832,10 +4090,27 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             // 4. Allocation and the `AVAudioConverter` run are accepted costs
             //    here. There is no no-allocation contract to honour.
             guard let self else { return }
+            // Diagnostic counts (see ``TapIOCounters``), bumped before any early
+            // return so a callback that delivers nothing is still on the record.
+            self.ioCounters.callbacks += 1
+            let timeStamp = inInputTime.pointee
+            let sampleTime: Double? = timeStamp.mFlags.contains(.sampleTimeValid)
+                ? timeStamp.mSampleTime : nil
+            if let sampleTime, let previousTime = self.lastIOSampleTime,
+               let previousFrames = self.lastIOFrameCount,
+               abs(sampleTime - previousTime - Double(previousFrames)) > 0.5 {
+                self.ioCounters.sampleStepAnomalies += 1
+            }
+            self.lastIOSampleTime = sampleTime
+            self.lastIOFrameCount = nil
+
             let mutablePtr = UnsafeMutablePointer(mutating: inInputData)
             let listPtr = UnsafeMutableAudioBufferListPointer(mutablePtr)
             let bufCount = listPtr.count
-            if bufCount == 0 { return }
+            if bufCount == 0 {
+                self.ioCounters.emptyBufferListReturns += 1
+                return
+            }
 
             // pts from the IOProc's own capture clock (host time → timespec).
             // Drift self-heal: if the cached offset has fallen out of step with
@@ -3868,19 +4143,33 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
                 }
             } else {
                 let b = listPtr[0]
-                guard let d = b.mData, b.mDataByteSize > 0 else { return }
+                guard let d = b.mData, b.mDataByteSize > 0 else {
+                    self.ioCounters.emptyInterleavedReturns += 1
+                    return
+                }
                 channelData = [Data(bytes: d, count: Int(b.mDataByteSize))]
                 let frameBytes = max(1, bytesPerFrame)
                 frameCount = Int(b.mDataByteSize) / frameBytes
             }
-            guard !channelData.isEmpty else { return }
-            onBuffer?(CapturedBuffer(channelData: channelData, frameCount: frameCount, pts: pts))
+            // Only the planar path can reach here empty: the interleaved one
+            // returned above.
+            guard !channelData.isEmpty else {
+                self.ioCounters.emptyPlanarReturns += 1
+                return
+            }
+            self.lastIOFrameCount = frameCount
+            var counters = self.ioCounters
+            counters.overloads = self.overloadCountPtr.pointee
+            onBuffer?(CapturedBuffer(channelData: channelData, frameCount: frameCount, pts: pts,
+                                     sampleTime: sampleTime, ioCounters: counters))
         }
         _ = channels
         guard err == noErr else {
             throw NativeCaptureError.aggregateDeviceFailed(reason: "AudioDeviceCreateIOProcIDWithBlock \(err)")
         }
         self.ioProcID = newProcID
+
+        installOverloadListener()
 
         let startErr = AudioDeviceStart(aggregateID, ioProcID)
         guard startErr == noErr else {
@@ -4171,6 +4460,11 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
 
         unsubscribeFromDefaultOutput()
         tappedOutputDeviceID = kAudioObjectUnknown
+        if let block = overloadListener, aggregateID != kAudioObjectUnknown {
+            var address = Self.overloadAddress
+            AudioObjectRemovePropertyListenerBlock(aggregateID, &address, Self.telemetryQueue, block)
+        }
+        overloadListener = nil
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
             let stopErr = AudioDeviceStop(aggregateID, proc)
             if stopErr != noErr { AudioDiag.log("CoreAudioSystemTap.teardown AudioDeviceStop failed: \(stopErr)") }

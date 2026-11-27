@@ -648,6 +648,12 @@ final class BTDeviceSink: @unchecked Sendable {
     /// muted sink still reports its program peak.
     private let renderCyclesSinceHealthPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     private let renderPeakSinceHealthPtr = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    /// Failed `stateLock.try()` calls since the last `bt_sink_health` line: on
+    /// the render thread (that cycle went out silent) and in `enqueue` (that
+    /// buffer's anchor check was deferred; its audio still reached the ring).
+    /// Same single-writer word and same zeroing as the cycle count above.
+    private let renderLockMissesSinceHealthPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+    private let enqueueLockMissesSinceHealthPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     /// Same cadence as `bt_clock_deviation`.
     static let healthIntervalNanos: Int64 = 30_000_000_000
     private var lastHealthNanos: Int64 = 0   // graphQueue
@@ -749,6 +755,8 @@ final class BTDeviceSink: @unchecked Sendable {
         self.steadyRoomFramesPtr.initialize(to: 0)
         self.renderCyclesSinceHealthPtr.initialize(to: 0)
         self.renderPeakSinceHealthPtr.initialize(to: 0)
+        self.renderLockMissesSinceHealthPtr.initialize(to: 0)
+        self.enqueueLockMissesSinceHealthPtr.initialize(to: 0)
 
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: renderSampleRate,
@@ -773,6 +781,8 @@ final class BTDeviceSink: @unchecked Sendable {
         steadyRoomFramesPtr.deallocate()
         renderCyclesSinceHealthPtr.deallocate()
         renderPeakSinceHealthPtr.deallocate()
+        renderLockMissesSinceHealthPtr.deallocate()
+        enqueueLockMissesSinceHealthPtr.deallocate()
     }
 
     /// The monotonic instant this device last rendered real program audio, or
@@ -1034,10 +1044,14 @@ final class BTDeviceSink: @unchecked Sendable {
     private func writeHealthLineLocked(nowNanos now: Int64, alive: Bool, fed: Bool,
                                        released isReleased: Bool, at: String?) {   // on graphQueue
         let snapshot = healthSnapshotLocked()
+        let renderLockMisses = renderLockMissesSinceHealthPtr.pointee
         var fields = [
             "uid": deviceUID,
             "deviceID": String(deviceID),
             "cycles": String(snapshot.cycles),
+            "renderCycles": String(snapshot.cycles),
+            "renderLockMisses": String(renderLockMisses),
+            "enqueueLockMisses": String(enqueueLockMissesSinceHealthPtr.pointee),
             "peak_dbfs": String(format: "%.1f", snapshot.peakDBFS),
             "released": isReleased ? "true" : "false",
             "fed": fed ? "true" : "false",
@@ -1045,8 +1059,15 @@ final class BTDeviceSink: @unchecked Sendable {
         ]
         if let at { fields["at"] = at }
         Telemetry.log(.localPlayback, "bt_sink_health", fields)
+        if renderLockMisses > 0 {
+            Telemetry.log(.localPlayback, "bt_render_lock_miss", [
+                "uid": deviceUID, "count": String(renderLockMisses),
+            ])
+        }
         renderCyclesSinceHealthPtr.pointee = 0
         renderPeakSinceHealthPtr.pointee = 0
+        renderLockMissesSinceHealthPtr.pointee = 0
+        enqueueLockMissesSinceHealthPtr.pointee = 0
         lastHealthNanos = now
     }
 
@@ -1181,6 +1202,8 @@ final class BTDeviceSink: @unchecked Sendable {
             hasReleaseToLog = releaseToLog != nil
             hasAnchorToLog = anchorToLog != nil
             stateLock.unlock()
+        } else {
+            enqueueLockMissesSinceHealthPtr.pointee &+= 1
         }
         delayLine.write(interleavedFrames: interleavedFrames, frameCount: frameCount)
         if carriedDelayNanos != nil || hasReleaseToLog || hasAnchorToLog {
@@ -1421,7 +1444,10 @@ final class BTDeviceSink: @unchecked Sendable {
         var processor: EQProcessor?
         // Before the lock: a cycle the lock turns away was still pulled.
         realignToDevicePulls(cycleStartMonotonicNanos: cycleStartMonotonicNanos, frameCount: frameCount)
-        guard stateLock.try() else { return false }   // no snapshot → silent cycle
+        guard stateLock.try() else {   // no snapshot → silent cycle
+            renderLockMissesSinceHealthPtr.pointee &+= 1
+            return false
+        }
         processor = eqProcessor
         let keepAliveWindow = keepAliveWindowNanos
         if anchored {

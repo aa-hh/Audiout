@@ -2,6 +2,7 @@
 // Copyright (C) 2026 ahh and contributors.
 
 import Foundation
+import os
 
 #if canImport(AudioToolbox)
 import AudioToolbox
@@ -232,13 +233,13 @@ public final class AppRouteMixer: @unchecked Sendable {
             contributorCountByStream: [:], meteringActive: false)
     }
 
-    /// Guards ONLY the `_snapshot` reference — one pointer store on publish, one
-    /// non-blocking `try()` read on delivery, nothing else. NEVER held across a
-    /// converter call, and never held while waiting on `queue`. Same shape as
-    /// ``NativeCaptureCoordinator``'s own `snapshotLock`; the rule it serves is
-    /// the real-time policy written at `NativeCaptureCoordinator.startIOProc`'s
-    /// IOProc block.
-    private let snapshotLock = NSLock()
+    /// Guards ONLY the `_snapshot` reference — one store on publish, one load on
+    /// delivery, nothing else. NEVER held across a converter call, and never
+    /// held while waiting on `queue`. Same shape and same lock type as
+    /// ``NativeCaptureCoordinator``'s own `snapshotLock`, for the reason written
+    /// there; the rule it serves is the real-time policy written at
+    /// `NativeCaptureCoordinator.startIOProc`'s IOProc block.
+    private let snapshotLock = OSAllocatedUnfairLock()
 
     /// The currently published snapshot. Written only via
     /// ``publishSnapshotLocked()`` (always while holding `queue`, so the
@@ -458,21 +459,18 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// frame-indexed timeline, and emit whatever prefix is now old enough to be
     /// final. Safe to call concurrently from several taps' IOProc threads.
     public func handleBuffer(bundleID: String, buffer: CapturedBuffer) {
-        // Delivery thread: read the published state with a single non-blocking
-        // reference read and drop this buffer on a miss, instead of waiting on
-        // `queue` — which `updateRoutes` and `handleStateChange` hold while they
-        // recompute routes and BUILD CONVERTERS, so a wait here parks the tap for
-        // the whole edit. Because the snapshot is swapped whole, a torn read is
-        // structurally impossible, and the published set is at most one edit
-        // stale, so a dropped buffer costs nothing. This is the policy written at
+        // Delivery thread: read the published state with a single reference
+        // load instead of waiting on `queue`, which `updateRoutes` and
+        // `handleStateChange` hold while they recompute routes and BUILD
+        // CONVERTERS. Because the snapshot is swapped whole, a torn read is
+        // impossible. Every holder of `snapshotLock` does one load or store, so
+        // waiting for it is short; giving up on a busy lock instead dropped the
+        // buffer, and several apps' taps read here at once, so they made each
+        // other drop. This is the policy written at
         // `NativeCaptureCoordinator.startIOProc`'s IOProc block.
-        let snapshot: DeliverySnapshot
-        if snapshotLock.try() {
-            snapshot = _snapshot
-            snapshotLock.unlock()
-        } else {
-            return
-        }
+        snapshotLock.lock()
+        let snapshot = _snapshot
+        snapshotLock.unlock()
 
         guard let streamGains = snapshot.streamGainsForBundle[bundleID], !streamGains.isEmpty,
               let converter = snapshot.converterForBundle[bundleID],

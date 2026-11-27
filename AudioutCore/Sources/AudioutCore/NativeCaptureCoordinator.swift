@@ -1,6 +1,8 @@
 import Foundation
 import AirPlayEngine
 
+import os
+
 #if canImport(CoreAudio)
 import CoreAudio
 #endif
@@ -229,21 +231,20 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// commit block, alongside the converter republish. See ``FeedGapTracker``.
     private var tapEpoch = 0
 
-    /// Guards ONLY the `_bufferSnapshot` reference — one pointer read on the RT
-    /// side, one pointer write on the publish side, nothing else. NEVER held
+    /// Guards ONLY the `_bufferSnapshot` reference. Every holder does one load
+    /// or one store of it and nothing else: build a new snapshot before taking
+    /// the lock, read into a local and release before using it. NEVER held
     /// across a Core Audio / HAL / converter call, and never held while waiting
     /// on `queue`.
     ///
-    /// This is the same shape ``LocalPlaybackEngine`` (and ``SyncedLocalSink``)
-    /// already use for exactly this problem: a plain `NSLock` whose critical
-    /// sections are a few instructions, taken NON-blockingly (`try()`) from the
-    /// real-time thread so a graph/state mutation can never make the audio
-    /// thread wait. `queue` — an unqualified, default-QoS serial queue that
-    /// `start`/`stop`/`recreateTap`/`updateRouting` all take — is no longer
-    /// touched from the RT path at all, which is the whole point: a `queue.sync`
-    /// from the IOProc could block behind a lower-priority holder (priority
-    /// inversion → audible stutter under load).
-    private let snapshotLock = NSLock()
+    /// An unfair lock, not an `NSLock`: while a thread waits on it, the kernel
+    /// raises the holder to the waiter's priority, so the delivery thread
+    /// waiting here cannot be parked behind a low-priority holder that got
+    /// descheduled. That, plus every hold being one load or store, is what
+    /// lets ``handleBuffer(_:)`` wait for it instead of dropping the buffer.
+    /// An unfair lock must be unlocked by the thread that locked it, and traps
+    /// if that thread locks it again.
+    private let snapshotLock = OSAllocatedUnfairLock()
 
     /// The currently published snapshot. Written only via
     /// ``publishBufferSnapshot()`` (always while holding `queue`, so the
@@ -701,8 +702,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             #endif
             // The fallback clock lives exactly as long as the tap does: it exists
             // to cover the tap's silent windows, so it must be armed before the
-            // first buffer and gone before teardown.
-            startLeveledClockLocked()
+            // first buffer and gone before teardown. Only while a leveled app is
+            // attached, though: with none, every fire had nothing to do and still
+            // took the snapshot lock 100 times a second.
+            if leveledInjector != nil { startLeveledClockLocked() }
             switch _state {
             case .idle, .failed:
                 self.transition(to: .creatingTap)
@@ -1053,8 +1056,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// the queue-confined field the setter writes.
     var test_publishedAirPlayPreDelayInstalled: Bool {
         snapshotLock.lock()
-        defer { snapshotLock.unlock() }
-        return _bufferSnapshot.airPlayPreDelay != nil
+        let snapshot = _bufferSnapshot
+        snapshotLock.unlock()
+        return snapshot.airPlayPreDelay != nil
     }
 
     /// Sized for the brief's `R_max` (9500 ms) minus the smallest start buffer
@@ -1346,10 +1350,27 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// the same shape as ``setAlignTickMode(_:)``: it swaps one snapshot field
     /// and touches neither the tap nor the exclusion set. `queue.sync`, so the
     /// very next delivered buffer already carries the leveled apps.
+    ///
+    /// Also arms or cancels the leveled-app fallback clock, which runs only
+    /// while an injector is attached and the tap is between `start()` and
+    /// `stop()`.
     public func setLeveledAppInjector(_ injector: LeveledAppInjector?) {
         queue.sync {
             self.leveledInjector = injector
             self.publishBufferSnapshot()
+            if injector == nil {
+                // Cancel without draining, so this never waits on the clock's
+                // queue. A fire already running may still deliver one block
+                // from the snapshot it read before the publish above; any later
+                // fire is cancelled, and would see no injector anyway.
+                leveledClockTimer?.cancel()
+                leveledClockTimer = nil
+            } else {
+                switch _state {
+                case .idle, .stopping: break
+                default: startLeveledClockLocked()
+                }
+            }
         }
     }
 
@@ -1662,13 +1683,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     }
 
     /// Test seam: run `body` with the buffer-snapshot lock held, so a buffer
-    /// delivered inside it misses `handleBuffer`'s `try()` and is dropped.
-    /// `NSLock.try()` fails even for the thread that holds the lock.
+    /// delivered on ANOTHER thread meanwhile finds it busy and waits. `body`
+    /// must not deliver a buffer itself: the unfair lock traps when the
+    /// thread holding it locks it again. The only holder that does more than
+    /// one load or store, and it exists only in tests.
     func test_withSnapshotLockHeld(_ body: () -> Void) {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
         body()
     }
+
+    /// How many buffers have found the snapshot lock busy and waited for it.
+    var test_snapshotWaits: Int { captureHealth.snapshotWaits.pointee }
 
     /// Swap in the tone stages the delivery path applies (per-device + Main Out
     /// EQ). ADDITIVE seam, same shape as ``setAlignTickMode(_:)``: it swaps one
@@ -1710,36 +1736,37 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private func handleBuffer(_ buffer: CapturedBuffer) {
         let callStartNanos = Self.monotonicNanos()
         defer { captureHealth.noteHandleDuration(Self.monotonicNanos() &- callStartNanos) }
-        // T8 (plan finding F12): this is the tap's delivery thread — never take
-        // `queue` here. See the policy at `startIOProc`'s IOProc block.
+        // This is the tap's delivery thread: never take `queue` here, because
+        // `start`/`stop`/`recreateTap`/`updateRouting` hold it while they do
+        // slow work. See the policy at `startIOProc`'s IOProc block.
         //
-        // This used to be `queue.sync { (converter, meteringActive, sink,
-        // resampler) }`, i.e. the audio thread blocking on the same unqualified,
-        // default-QoS serial queue that `start`/`stop`/`recreateTap`/
-        // `updateRouting` take from ordinary threads: a textbook priority
-        // inversion, and one that shows up as audible stutter when the machine is
-        // loaded and the queue's current holder isn't scheduled.
+        // What this path needs from the queue-confined state is published as
+        // ONE immutable ``BufferSnapshot`` (see ``publishBufferSnapshot()``),
+        // and `snapshotLock` guards only the reference to it. The whole object
+        // is swapped, so a read sees the previous complete set or the next
+        // one, never a converter from one and a sink from the other.
         //
-        // Instead the four values are published as ONE immutable
-        // ``BufferSnapshot`` (see ``publishBufferSnapshot()``) and picked up here
-        // with a single non-blocking reference read — the same `try()`-on-the-RT-
-        // path shape ``LocalPlaybackEngine/receive(buffer:for:)`` and
-        // ``SyncedLocalSink/enqueue(interleavedFrames:frameCount:pts:)`` already
-        // use. Because it is a whole-object swap, a torn/half-updated read is
-        // structurally impossible: we either see the previous complete set or the
-        // next complete one, never a converter from one and a sink from another.
+        // Waiting for the lock is safe: every holder does one load or store
+        // and nothing else, and the unfair lock raises a lower-priority holder
+        // to this thread's priority while this thread waits, so the wait lasts
+        // about as long as that one load or store.
         //
-        // A missed `try()` drops this one buffer, exactly as `receive` does. The
-        // lock is only ever held for a single pointer store by a non-RT thread,
-        // so a miss is vanishingly rare — and dropping one buffer is strictly
-        // better than parking the IOProc behind a descheduled writer.
+        // This path used to give up on a busy lock and return, throwing the
+        // captured buffer away on the belief that a busy lock was vanishingly
+        // rare. It was not: the leveled-app fallback timer took the same lock
+        // every 10 ms, and a live capture on 2026-11-27 lost three 11.6 ms
+        // cycles this way in ten minutes, each one heard as a tick on every
+        // speaker at once. A busy lock is now counted in `snapshotWaits` (on
+        // the `capture_health` and `tap_feed_gap` lines) and waited out.
         let snapshot: BufferSnapshot
-        if snapshotLock.try() {
+        if snapshotLock.lockIfAvailable() {
             snapshot = _bufferSnapshot
             snapshotLock.unlock()
         } else {
-            captureHealth.tryMisses.pointee &+= 1
-            return
+            captureHealth.snapshotWaits.pointee &+= 1
+            snapshotLock.lock()
+            snapshot = _bufferSnapshot
+            snapshotLock.unlock()
         }
         // The wizard drives the feed itself for the duration of a run, so the
         // captured content is deliberately delivered to NOBODY — `.wizard`
@@ -1845,23 +1872,26 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 //
                 // Reading the extra fields: `sampleStepFrames` is measured
                 // between buffers that reached this point, so a step of two
-                // cycles (1024 frames at 512 a cycle) with zero `tryMisses` and
-                // zero early returns means Core Audio skipped the cycle. The same
-                // step with a miss or an early return counted means our code
-                // dropped the buffer. Counts are since the previous line of this
-                // kind (or since start); `hostGapMs` is this buffer's pts against
-                // the end of the previous captured buffer, ignoring fills.
+                // cycles (1024 frames at 512 a cycle) with zero early returns
+                // means Core Audio skipped the cycle; `ioOverloads` and
+                // `maxHandleMs` above the cycle length say why. The same step
+                // with an early return counted means our code dropped the
+                // buffer. `snapshotWaits` counts buffers that waited for the
+                // snapshot lock; they were delivered, so they never explain a
+                // step. Counts are since the previous line of this kind (or
+                // since start); `hostGapMs` is this buffer's pts against the
+                // end of the previous captured buffer, ignoring fills.
                 let sampleStep: Double? = buffer.sampleTime.flatMap { now in
                     health.lastSampleTime.map { now - $0 }
                 }
                 let hostGapNanos: Int64? = health.lastCapturedEndPtsNanos == 0
                     ? nil : SyncTiming.monotonicNanos(buffer.pts) &- health.lastCapturedEndPtsNanos
                 let delta = io.since(health.gapBaseline)
-                let misses = health.tryMisses.pointee
-                let tryMissDelta = misses &- health.gapTryMissBase
+                let waits = health.snapshotWaits.pointee
+                let waitDelta = waits &- health.gapSnapshotWaitBase
                 let maxHandleNanos = health.maxHandleNanosForGap.pointee
                 health.gapBaseline = io
-                health.gapTryMissBase = misses
+                health.gapSnapshotWaitBase = waits
                 health.maxHandleNanosForGap.pointee = 0
                 queue.async {
                     Telemetry.log(.captureWS, "tap_feed_gap", [
@@ -1873,7 +1903,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                         "hostGapMs": hostGapNanos.map {
                             String(format: "%.1f", Double($0) / 1_000_000)
                         } ?? "na",
-                        "tryMisses": "\(tryMissDelta)",
+                        "snapshotWaits": "\(waitDelta)",
                         "emptyBufferListReturns": "\(delta.emptyBufferListReturns)",
                         "emptyInterleavedReturns": "\(delta.emptyInterleavedReturns)",
                         "emptyPlanarReturns": "\(delta.emptyPlanarReturns)",
@@ -1913,18 +1943,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let intervalNanos = nowNanos &- health.healthStartNanos
         guard intervalNanos >= Self.captureHealthIntervalNanos else { return }
         let delta = io.since(health.healthBaseline)
-        let misses = health.tryMisses.pointee
-        let tryMissDelta = misses &- health.healthTryMissBase
+        let waits = health.snapshotWaits.pointee
+        let waitDelta = waits &- health.healthSnapshotWaitBase
         let maxHandleNanos = health.maxHandleNanosForHealth.pointee
         health.healthStartNanos = nowNanos
         health.healthBaseline = io
-        health.healthTryMissBase = misses
+        health.healthSnapshotWaitBase = waits
         health.maxHandleNanosForHealth.pointee = 0
         queue.async {
             Telemetry.log(.captureWS, "capture_health", [
                 "callbacks": "\(delta.callbacks)",
                 "maxHandleMs": String(format: "%.2f", Double(maxHandleNanos) / 1_000_000),
-                "tryMisses": "\(tryMissDelta)",
+                "snapshotWaits": "\(waitDelta)",
                 "emptyBufferListReturns": "\(delta.emptyBufferListReturns)",
                 "emptyInterleavedReturns": "\(delta.emptyInterleavedReturns)",
                 "emptyPlanarReturns": "\(delta.emptyPlanarReturns)",
@@ -2343,15 +2373,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// `tap_feed_gap`: whether a lost cycle was dropped by this code or never
     /// came from Core Audio.
     ///
-    /// The try-miss total and the two longest-call values are written by every
-    /// `handleBuffer` call, and two taps can be inside it at once (a
+    /// The snapshot-wait total and the two longest-call values are written by
+    /// every `handleBuffer` call, and two taps can be inside it at once (a
     /// make-before-break rebuild starts the new tap before the old one stops).
     /// Two threads writing one plain stored property would trip Swift's
     /// exclusivity check, so those three live behind pointers, as
     /// ``FeedGapTracker``'s words do. Everything else is written only past the
     /// converter check, which one tap at a time gets through, so it stays plain.
     private final class CaptureHealthTracker {
-        let tryMisses = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        /// Buffers that found `snapshotLock` busy and waited for it.
+        let snapshotWaits = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         /// Longest `handleBuffer` call in nanoseconds since the last
         /// `capture_health` line, and since the last `tap_feed_gap` line.
         let maxHandleNanosForHealth = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
@@ -2366,18 +2397,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
         var healthStartNanos: Int64 = 0
         var healthBaseline = TapIOCounters()
-        var healthTryMissBase = 0
+        var healthSnapshotWaitBase = 0
         var gapBaseline = TapIOCounters()
-        var gapTryMissBase = 0
+        var gapSnapshotWaitBase = 0
 
         init() {
-            tryMisses.initialize(to: 0)
+            snapshotWaits.initialize(to: 0)
             maxHandleNanosForHealth.initialize(to: 0)
             maxHandleNanosForGap.initialize(to: 0)
         }
 
         deinit {
-            tryMisses.deallocate()
+            snapshotWaits.deallocate()
             maxHandleNanosForHealth.deallocate()
             maxHandleNanosForGap.deallocate()
         }
@@ -4080,9 +4111,12 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             // 2. Nothing on this path waits on a serial queue, or on any lock
             //    whose holder may do unbounded work (build a converter,
             //    recompute routes, fire callbacks, log). Queue-confined state
-            //    is read as one immutable snapshot through
-            //    `snapshotLock.try()`, and a miss drops the buffer — at most
-            //    one edit stale, so a drop costs nothing.
+            //    is published as one immutable snapshot whose lock guards only
+            //    the reference, so every holder does one load or store. This
+            //    path waits for that lock when it is busy and never drops the
+            //    buffer: a dropped buffer is 11.6 ms of silence on every
+            //    speaker, and the lock is an unfair lock, which raises a
+            //    lower-priority holder while the delivery thread waits.
             // 3. A lock whose EVERY holder does only bounded in-memory work
             //    may be taken with `lock()`: the converter's own lock (single
             //    caller in production), and the mixers' timeline and ring

@@ -184,6 +184,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         /// buffer from one that was already in flight when the rebuild claimed.
         let tapEpoch: Int
         let eqPlan: WholeSystemEQPlan
+        /// When the current tap's IO block last captured a cycle, read by the
+        /// leveled-app fallback clock. Carried here rather than read from `tap`,
+        /// which is `queue`-confined.
+        let tapCaptureStamp: TapCaptureStamp?
 
         /// The published value before anything has been started, and the value
         /// every teardown path returns to: no converter, so ``handleBuffer(_:)``
@@ -193,7 +197,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             syncedLocalSink: nil, syncedLocalBaseResampler: nil,
             btSink: nil, btBaseResampler: nil,
             castSink: nil, airPlayPreDelay: nil, leveledInjector: nil,
-            tickInjector: nil, wizardActive: false, tapEpoch: 0, eqPlan: .passthrough)
+            tickInjector: nil, wizardActive: false, tapEpoch: 0, eqPlan: .passthrough,
+            tapCaptureStamp: nil)
 
         init(
             converter: PCMConverting?,
@@ -208,7 +213,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             tickInjector: AlignmentTickInjector?,
             wizardActive: Bool,
             tapEpoch: Int,
-            eqPlan: WholeSystemEQPlan
+            eqPlan: WholeSystemEQPlan,
+            tapCaptureStamp: TapCaptureStamp?
         ) {
             self.converter = converter
             self.meteringActive = meteringActive
@@ -223,6 +229,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.wizardActive = wizardActive
             self.tapEpoch = tapEpoch
             self.eqPlan = eqPlan
+            self.tapCaptureStamp = tapCaptureStamp
         }
     }
 
@@ -548,8 +555,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     /// Fired once per converted buffer with the buffer's peak/RMS level in
     /// 0.0...1.0, so a caller (``NativeBackend``) can plumb it straight into
-    /// `BackendEvent.level` without recomputing it. Called from the tap's IOProc
-    /// delivery thread — keep the handler cheap and lock-light. (Metering is
+    /// `BackendEvent.level` without recomputing it. Called from every caller of
+    /// `deliver`: the consumer thread of the tap's ``TapDeliveryRing`` (one per
+    /// tap, serial within a tap), the wizard pacer's `pacerQueue` and the
+    /// leveled-app fallback clock's `leveledClockQueue` — keep the handler
+    /// cheap and lock-light. (Metering is
     /// upstream of the engine per playback-meter-research.md: it's a property of
     /// the captured audio, identical for every fanned-out device.)
     public var onLevel: (@Sendable (_ rms: Float) -> Void)?
@@ -702,10 +712,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             #endif
             // The fallback clock lives exactly as long as the tap does: it exists
             // to cover the tap's silent windows, so it must be armed before the
-            // first buffer and gone before teardown. Only while a leveled app is
-            // attached, though: with none, every fire had nothing to do and still
-            // took the snapshot lock 100 times a second.
-            if leveledInjector != nil { startLeveledClockLocked() }
+            // first buffer and gone before teardown.
+            startLeveledClockLocked()
             switch _state {
             case .idle, .failed:
                 self.transition(to: .creatingTap)
@@ -1313,7 +1321,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         rebuildIfExclusionObjectsChanged()
     }
 
-    // MARK: Buffer delivery (tap IOProc thread → convert → engine)
+    // MARK: Buffer delivery (ring consumer thread → convert → engine)
 
     /// Freeze the four queue-confined fields ``handleBuffer(_:)`` needs into a
     /// fresh immutable ``BufferSnapshot`` and swap it into the published slot
@@ -1340,37 +1348,26 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             tickInjector: tickInjector,
             wizardActive: wizardActive,
             tapEpoch: tapEpoch,
-            eqPlan: eqPlan)
+            eqPlan: eqPlan,
+            tapCaptureStamp: tap?.captureStamp)
+        // Swap rather than assign, so the old snapshot is released after the
+        // unlock: its last release can free a converter or a sink, and the
+        // delivery thread waits on this lock.
+        var previous = snapshot
         snapshotLock.lock()
-        _bufferSnapshot = snapshot
+        swap(&_bufferSnapshot, &previous)
         snapshotLock.unlock()
+        withExtendedLifetime(previous) {}
     }
 
     /// Attach (or detach, with `nil`) the leveled-app intercept. ADDITIVE seam,
     /// the same shape as ``setAlignTickMode(_:)``: it swaps one snapshot field
     /// and touches neither the tap nor the exclusion set. `queue.sync`, so the
     /// very next delivered buffer already carries the leveled apps.
-    ///
-    /// Also arms or cancels the leveled-app fallback clock, which runs only
-    /// while an injector is attached and the tap is between `start()` and
-    /// `stop()`.
     public func setLeveledAppInjector(_ injector: LeveledAppInjector?) {
         queue.sync {
             self.leveledInjector = injector
             self.publishBufferSnapshot()
-            if injector == nil {
-                // Cancel without draining, so this never waits on the clock's
-                // queue. A fire already running may still deliver one block
-                // from the snapshot it read before the publish above; any later
-                // fire is cancelled, and would see no injector anyway.
-                leveledClockTimer?.cancel()
-                leveledClockTimer = nil
-            } else {
-                switch _state {
-                case .idle, .stopping: break
-                default: startLeveledClockLocked()
-                }
-            }
         }
     }
 
@@ -1929,8 +1926,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             }
         }
 
-        // Tell the fallback clock the tap is alive. While this keeps updating,
-        // the fallback stays parked and this remains the only producer.
+        // Tell the fallback clock the tap is alive. While this or the tap's
+        // capture stamp keeps updating, the fallback stays parked and this
+        // remains the only producer.
         if leveledClockLock.try() {
             lastTapDeliveryNanos = Self.monotonicNanos()
             leveledClockLock.unlock()
@@ -2004,7 +2002,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     // app has audio waiting, this synthesizes the silent block the tap would have
     // produced and runs the identical injector → EQ → tick → deliver chain over
     // it. The tap remains the producer whenever it is producing; this only fills
-    // the hole its own exclusion creates.
+    // the hole its own exclusion creates. "Producing" means Core Audio captured
+    // a cycle or the delivery thread delivered one within the idle threshold:
+    // the tap's ``TapCaptureStamp`` covers a delivery thread that stalls behind
+    // the ring while capture continues, which would otherwise read as idle and
+    // start a second feed.
 
     /// Start the fallback clock. Must hold `queue`.
     private func startLeveledClockLocked() {
@@ -2052,11 +2054,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         leveledClockLock.lock()
         let lastDelivery = lastTapDeliveryNanos
         leveledClockLock.unlock()
+        // The later of the last delivery and the last capture. While the
+        // delivery thread keeps up they are within a cycle of each other; when
+        // it falls behind, Core Audio is still capturing and every cycle it
+        // captured will be delivered, so the tap is still the producer.
+        let lastProduced = max(lastDelivery, snapshot.tapCaptureStamp?.nanos ?? 0)
 
         // The tap is producing: it is the only producer, and a fresh idle period
         // must start its clock from scratch rather than owing frames for the
         // whole time the tap was healthy.
-        guard lastDelivery == 0 || now &- lastDelivery > Self.leveledClockIdleThresholdNanos else {
+        guard lastProduced == 0 || now &- lastProduced > Self.leveledClockIdleThresholdNanos else {
             leveledClockStartNanos = 0
             return
         }
@@ -3227,11 +3234,41 @@ public protocol SystemAudioTap: AnyObject {
     /// the new one hasn't armed its listener yet. Defaulted to nil so a fake that
     /// doesn't model device identity keeps working (the compare simply abstains).
     var tappedDeviceID: AudioObjectID? { get }
+
+    /// When this tap's IO block last captured a cycle, which can be later than
+    /// the last ``onBuffer`` call while the delivery thread is behind. Defaulted
+    /// to nil so a fake that does not model it keeps working; the fallback
+    /// clock then goes by delivery alone.
+    var captureStamp: TapCaptureStamp? { get }
 }
 
 public extension SystemAudioTap {
     var workgroupDeviceID: AudioObjectID? { nil }
     var tappedDeviceID: AudioObjectID? { nil }
+    var captureStamp: TapCaptureStamp? { nil }
+}
+
+/// Monotonic nanoseconds of a tap's last captured cycle, 0 before the first.
+/// One aligned heap word with a single writer (the tap's IO block) and any
+/// number of readers, the idiom ``NativeCaptureCoordinator``'s
+/// `FeedGapTracker` uses: a reader sees the previous value or the new one.
+/// A separate object so the coordinator's buffer snapshot can carry it
+/// without holding the tap, whose `deinit` tears Core Audio objects down.
+public final class TapCaptureStamp: @unchecked Sendable {
+    private let nanosPtr: UnsafeMutablePointer<Int64> = {
+        let pointer = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+        pointer.initialize(to: 0)
+        return pointer
+    }()
+
+    init() {}
+
+    deinit { nanosPtr.deallocate() }
+
+    var nanos: Int64 {
+        get { nanosPtr.pointee }
+        set { nanosPtr.pointee = newValue }
+    }
 }
 
 /// The audio I/O workgroup seam (T7). Implemented in production by
@@ -3590,11 +3627,11 @@ public enum NativeCaptureError: Error, Equatable, Sendable {
 ///
 /// `final class` (not the original `struct`) so this per-instance counter state
 /// is a stored reference, not copied — `EngineSink` is constructed once and held
-/// by ``NativeCaptureCoordinator``. `@unchecked Sendable`: `write(pcm:pts:)` runs
-/// serially on the tap's IOProc delivery thread (Core Audio never invokes an
-/// IOProc concurrently with itself), so the counter needs no lock — the same
-/// single-caller discipline this file already uses for e.g.
-/// `machToMonotonicOffsetNanos`.
+/// by ``NativeCaptureCoordinator``. `@unchecked Sendable`: for captured audio
+/// `write(pcm:pts:)` runs on the consumer thread of the tap's
+/// ``TapDeliveryRing`` (one per tap, serial within a tap), so the counter
+/// needs no lock — the same single-caller discipline this file already uses
+/// for e.g. `machToMonotonicOffsetNanos`.
 final class EngineSink: PCMSink, @unchecked Sendable {
     let engine: AirPlayEngine
     init(engine: AirPlayEngine) { self.engine = engine }
@@ -3929,6 +3966,12 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         return pointer
     }()
     private var overloadListener: AudioObjectPropertyListenerBlock?
+
+    /// Written by the IO block for every cycle it hands to the ring, accepted
+    /// or dropped, so the coordinator's fallback clock knows Core Audio is
+    /// still capturing while the ring's consumer is behind.
+    let captureStamp: TapCaptureStamp? = TapCaptureStamp()
+
     /// Overloads counted since the last `tap_io_overload` line. `telemetryQueue`
     /// only. A separate object so the delayed line still logs if this tap is
     /// released before it fires.
@@ -4272,8 +4315,9 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             //    that overruns makes Core Audio skip the next cycle, which every
             //    speaker hears as a tick.
             // 2. So this block does bounded work only: count the callback, turn
-            //    the host time into a pts, copy the cycle's bytes into this
-            //    tap's ``TapDeliveryRing`` (memory allocated once, in
+            //    the host time into a pts, store the capture time in this tap's
+            //    ``TapCaptureStamp`` (one word, no lock), copy the cycle's bytes
+            //    into this tap's ``TapDeliveryRing`` (memory allocated once, in
             //    `startIOProc`), wake the ring's consumer thread, and return. It
             //    never allocates, never creates an array or `Data`, never logs,
             //    never `sync`s onto a queue, and takes only the ring's own lock,
@@ -4287,9 +4331,10 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             //    counts it in `ringOverflows` on the `capture_health` and
             //    `tap_feed_gap` lines.
             // 4. The consumer path still never waits on a serial queue (above
-            //    all `NativeCaptureCoordinator.queue`: `teardown()` waits for
-            //    this consumer to exit and is called from there), or on any lock
-            //    whose holder may do unbounded work (build a converter,
+            //    all `NativeCaptureCoordinator.queue`, whose holders do slow
+            //    work: `teardown()` waits for this consumer to exit, and `stop()`
+            //    and `recreateTap` take `queue` right after it returns), or on
+            //    any lock whose holder may do unbounded work (build a converter,
             //    recompute routes, fire callbacks, log). Queue-confined state is
             //    published as one immutable snapshot whose lock guards only the
             //    reference, so every holder does one load or store. The consumer
@@ -4300,8 +4345,16 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             //    `AVAudioConverter` run are accepted costs on the consumer.
             // 5. The per-app tap (`PerAppCaptureCoordinator`) still runs its
             //    whole path inside its IO block, so `AppRouteMixer` and
-            //    `LeveledAppInjector` stay on Core Audio's clock and rule 4
-            //    binds them there as it always has.
+            //    `LeveledAppInjector` run inside Core Audio's IO block and rule
+            //    4 binds them there. Their snapshot read used to be a
+            //    non-blocking try that dropped the buffer on a miss; it is now
+            //    a wait for the lock, inside that IO block. The wait is
+            //    accepted because every holder of those locks does one load or
+            //    one store and nothing else (the publisher swaps the old
+            //    snapshot out and releases it after unlocking), and the lock is
+            //    an unfair lock, which raises a lower-priority holder while the
+            //    IO block waits. A wait that short costs less than the dropped
+            //    buffer did.
             let blockStartNanos = Self.currentMonotonicNanos()
             defer {
                 ring.noteIoBlock(nanos: Int64(clamping: Self.currentMonotonicNanos() &- blockStartNanos))
@@ -4374,6 +4427,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             self.lastIOFrameCount = frameCount
             var counters = self.ioCounters
             counters.overloads = self.overloadCountPtr.pointee
+            self.captureStamp?.nanos = Int64(clamping: blockStartNanos)
             ring.push(listPtr, nonInterleaved: nonInterleaved, frameCount: frameCount,
                       pts: pts, sampleTime: sampleTime, counters: counters)
         }

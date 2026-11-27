@@ -179,34 +179,41 @@ final class TapDeliveryRing: @unchecked Sendable {
     private func runConsumer(_ deliver: (CapturedBuffer) -> Void) {
         while true {
             available.wait()
-            lock.lock()
-            let isStopped = stopped
-            let depth = waiting
-            lock.unlock()
-            if isStopped { break }
-            guard depth > 0 else { continue }
+            // A plain `Thread` drains its autorelease pool only when it exits,
+            // and each pass runs `AVAudioConverter` and builds `Data`, so each
+            // pass gets its own pool. The closure returns true to stop.
+            let shouldStop = autoreleasepool { () -> Bool in
+                lock.lock()
+                let isStopped = stopped
+                let depth = waiting
+                lock.unlock()
+                if isStopped { return true }
+                guard depth > 0 else { return false }
 
-            let slot = readIndex
-            let entry = entries[slot]
-            var channelData: [Data] = []
-            channelData.reserveCapacity(entry.usedChunks)
-            var offset = 0
-            for chunk in 0..<entry.usedChunks {
-                let size = chunkLengths[slot * chunkCount + chunk]
-                channelData.append(Data(bytes: bytes + slot * slotBytes + offset, count: size))
-                offset += size
+                let slot = readIndex
+                let entry = entries[slot]
+                var channelData: [Data] = []
+                channelData.reserveCapacity(entry.usedChunks)
+                var offset = 0
+                for chunk in 0..<entry.usedChunks {
+                    let size = chunkLengths[slot * chunkCount + chunk]
+                    channelData.append(Data(bytes: bytes + slot * slotBytes + offset, count: size))
+                    offset += size
+                }
+                readIndex = slot + 1 == slotCount ? 0 : slot + 1
+                // The slot is copied out: hand it back before the slow part.
+                lock.lock()
+                waiting -= 1
+                lock.unlock()
+
+                var buffer = CapturedBuffer(channelData: channelData, frameCount: entry.frameCount, pts: entry.pts,
+                                            sampleTime: entry.sampleTime, ioCounters: entry.counters)
+                buffer.ringMaxDepth = entry.maxDepth
+                buffer.maxIoBlockNanos = entry.maxIoBlockNanos
+                deliver(buffer)
+                return false
             }
-            readIndex = slot + 1 == slotCount ? 0 : slot + 1
-            // The slot is copied out: hand it back before the slow part.
-            lock.lock()
-            waiting -= 1
-            lock.unlock()
-
-            var buffer = CapturedBuffer(channelData: channelData, frameCount: entry.frameCount, pts: entry.pts,
-                                        sampleTime: entry.sampleTime, ioCounters: entry.counters)
-            buffer.ringMaxDepth = entry.maxDepth
-            buffer.maxIoBlockNanos = entry.maxIoBlockNanos
-            deliver(buffer)
+            if shouldStop { break }
         }
         exited.signal()
     }

@@ -294,9 +294,14 @@ public final class AppRouteMixer: @unchecked Sendable {
             converterForBundle: converterForBundle,
             contributorCountByStream: contributorCountByStream,
             meteringActive: meteringActive)
+        // Swap rather than assign, so the old snapshot is released after the
+        // unlock: its last release can free converters, and the delivery path
+        // waits on this lock.
+        var previous = snapshot
         snapshotLock.lock()
-        _snapshot = snapshot
+        swap(&_snapshot, &previous)
         snapshotLock.unlock()
+        withExtendedLifetime(previous) {}
     }
 
     // MARK: Topology

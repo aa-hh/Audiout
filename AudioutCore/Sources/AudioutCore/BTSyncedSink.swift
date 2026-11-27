@@ -1098,7 +1098,6 @@ final class BTDeviceSink: @unchecked Sendable {
             "uid": deviceUID,
             "deviceID": String(deviceID),
             "cycles": String(snapshot.cycles),
-            "renderCycles": String(snapshot.cycles),
             "renderLockMisses": String(renderLockMisses),
             "renderSilentMisses": String(renderSilentMissesSinceHealthPtr.pointee),
             "enqueueLockMisses": String(enqueueLockMissesSinceHealthPtr.pointee),
